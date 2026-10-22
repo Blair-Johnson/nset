@@ -1,0 +1,19 @@
+[workspace]
+name = "not-shitty-experiment-tracker"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64", "win-64"]
+
+[tasks]
+web-install = "npm --prefix web ci"
+web-build = "npm --prefix web run build"
+web-test = "npm --prefix web test"
+build = { cmd = "cargo build --release --locked", depends-on = ["web-build"] }
+check = { cmd = "cargo test --locked", depends-on = ["web-build", "web-test"] }
+serve = "cargo run -- --data-dir ./data"
+demo = "python examples/demo.py"
+
+[dependencies]
+rust = ">=1.85,<2"
+nodejs = ">=22.12,<23"
+python = ">=3.12,<3.14"
