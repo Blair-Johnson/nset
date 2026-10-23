@@ -118,17 +118,19 @@ function syncPins() {
 }
 function applyConfig(next: ViewConfig) {
   try {
-    const previousAxis = config.axis;
-    config = validateConfig(next);
+    const candidate = validateConfig(next);
+    const nextPins =
+      config.axis !== candidate.axis
+        ? { a: null, b: null, threshold: pins.threshold }
+        : { ...pins };
+    renderCandidate(candidate, nextPins);
+    error();
     persist();
     syncControls();
     settings.render(config, selectedRuns());
-    if (previousAxis !== config.axis) {
-      pins = { a: null, b: null, threshold: pins.threshold };
-    }
-    renderAnalysis();
   } catch (e) {
-    error(message(e));
+    syncControls();
+    error(`Plot settings were not applied: ${message(e)}`);
   }
 }
 function invalidate() {
@@ -145,29 +147,34 @@ function invalidate() {
   renderReadouts();
 }
 function renderAnalysis() {
+  renderCandidate(config, { ...pins });
+}
+function renderCandidate(nextConfig: ViewConfig, nextPins: Pins) {
   if (!snapshotsReady) {
     plot.clear();
+    config = nextConfig;
+    pins = nextPins;
     return;
   }
-  try {
-    derived = analyze(raw, config);
-    if (pins.a === null && pins.b === null) {
-      const initial = initialPins(derived);
-      pins.a = initial.a;
-      pins.b = initial.b;
-    }
-    syncPins();
-    plot.render(derived, config, pins);
-    const observations = raw.reduce((n, r) => n + r.raw.length, 0);
-    const canonical = derived.reduce((n, r) => n + r.points.length, 0);
-    $("plot-empty").hidden = canonical > 0;
-    $("data-note").textContent =
-      `${observations.toLocaleString()} observations · ${canonical.toLocaleString()} canonical x values · ${config.smoothing ? "EMA → " : ""}${config.interpolation} · no extrapolation`;
-    $("plot-title").textContent = loadedKey || "No metric selected";
-    renderReadouts();
-  } catch (e) {
-    error(`Plot could not be rendered: ${message(e)}`);
+  const nextDerived = analyze(raw, nextConfig);
+  if (nextPins.a === null && nextPins.b === null) {
+    const initial = initialPins(nextDerived);
+    nextPins.a = initial.a;
+    nextPins.b = initial.b;
   }
+  // PlotPanel stages its canvas; commit application state only after it succeeds.
+  plot.render(nextDerived, nextConfig, nextPins);
+  config = nextConfig;
+  derived = nextDerived;
+  pins = nextPins;
+  syncPins();
+  const observations = raw.reduce((n, r) => n + r.raw.length, 0);
+  const canonical = derived.reduce((n, r) => n + r.points.length, 0);
+  $("plot-empty").hidden = canonical > 0;
+  $("data-note").textContent =
+    `${observations.toLocaleString()} observations · ${canonical.toLocaleString()} canonical x values · ${config.smoothing ? "EMA → " : ""}${config.interpolation} · no extrapolation`;
+  $("plot-title").textContent = loadedKey || "No metric selected";
+  renderReadouts();
 }
 function table(headers: string[]) {
   const t = element("table");

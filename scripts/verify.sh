@@ -15,3 +15,4 @@ pixi run browser-install
 CI=1 pixi run npm --prefix web run test:browser
 pixi run python scripts/browser_verify.py
 pixi run python scripts/benchmark.py
+pixi run python scripts/browser_perf.py

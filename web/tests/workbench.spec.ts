@@ -239,3 +239,43 @@ test("zoom leaves numerical answers unchanged and reset restores view", async ({
   await page.getByRole("button", { name: "Reset zoom", exact: true }).click();
   expect(await page.locator("#readout").innerText()).toBe(before);
 });
+
+test("runtime range rejection preserves saved settings, chart and numerical readouts", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.locator("#interpolation").selectOption("pchip");
+  const saved = await page.evaluate(() => localStorage.getItem("nset.config"));
+  const readout = await page.locator("#readout").innerText();
+  await page.evaluate(() => {
+    (window as any).__previousCanvas = document.querySelector("#plot canvas");
+  });
+  await page.getByRole("tab", { name: "Plot configuration" }).click();
+  await page
+    .getByLabel("Y minimum", { exact: true })
+    .fill(String(Number.MAX_VALUE));
+  await page
+    .getByRole("button", { name: "Apply configuration", exact: true })
+    .click();
+  await expect(page.locator("#global-error")).toContainText("were not applied");
+  expect(await page.evaluate(() => localStorage.getItem("nset.config"))).toBe(
+    saved,
+  );
+  expect(await page.locator("#readout").innerText()).toBe(readout);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).__previousCanvas ===
+        document.querySelector("#plot canvas"),
+    ),
+  ).toBe(true);
+  await page
+    .getByRole("button", { name: "Reset defaults", exact: true })
+    .click();
+  await expect(page.locator("#global-error")).toBeHidden();
+  expect(
+    JSON.parse(
+      (await page.evaluate(() => localStorage.getItem("nset.config")))!,
+    ).yMin,
+  ).toBe(null);
+});

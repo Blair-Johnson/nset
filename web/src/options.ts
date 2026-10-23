@@ -138,7 +138,12 @@ export function resolveOptions(
             : "Timestamp · UTC epoch milliseconds"),
         stroke: "#8f9db4",
         font: "11px ui-monospace, monospace",
-        values: formatter(config.xFormat),
+        values: formatter(
+          config.axis === "timestamp" && config.xFormat === "number"
+            ? "iso-time"
+            : config.xFormat,
+        ),
+        space: config.axis === "timestamp" ? 170 : 50,
         size: 64,
         labelSize: 20,
         grid: { show: config.grid, stroke: "#263347", width: 1 },
