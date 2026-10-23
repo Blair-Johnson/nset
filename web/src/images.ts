@@ -30,6 +30,7 @@ export class ImagePanel {
   private status = element("div", "muted");
   private play = element("button", "", "Play");
   private speed = element("select");
+  private cameraInfo = element("div", "muted camera-info");
   constructor(
     private host: HTMLElement,
     private api: Api,
@@ -62,6 +63,26 @@ export class ImagePanel {
     toolbar.append(this.speed);
     this.speed.setAttribute("aria-label", "Playback rate");
     button("Reset view", () => this.viewer.viewport.goHome());
+    button("1:1 pixels", () => {
+      const item = this.viewer.world.getItemAt(0);
+      if (item)
+        this.viewer.viewport.zoomTo(
+          item.imageToViewportZoom(1),
+          undefined,
+          true,
+        );
+    });
+    let smoothPixels = true;
+    const sampling = button("Pixels: smooth", () => {
+      smoothPixels = !smoothPixels;
+      this.viewer.drawer.setImageSmoothingEnabled(smoothPixels);
+      this.viewer.forceRedraw();
+      sampling.textContent = smoothPixels
+        ? "Pixels: smooth"
+        : "Pixels: nearest";
+    });
+    sampling.title =
+      "Choose smooth resampling or nearest-pixel rendering at high magnification";
     button("Rotate ↻", () =>
       this.viewer.viewport.setRotation(
         (this.viewer.viewport.getRotation() + 90) % 360,
@@ -92,6 +113,7 @@ export class ImagePanel {
       canvas,
       this.slider,
       this.status,
+      this.cameraInfo,
       element(
         "p",
         "hint",
@@ -111,6 +133,35 @@ export class ImagePanel {
       crossOriginPolicy: false,
       gestureSettingsMouse: { clickToZoom: false },
     });
+    const updateCamera = () => {
+      const item = this.viewer.world.getItemAt(0);
+      if (!item) {
+        this.cameraInfo.textContent = "No image camera";
+        delete canvas.dataset.zoom;
+        delete canvas.dataset.centerX;
+        delete canvas.dataset.centerY;
+        return;
+      }
+      const zoom = this.viewer.viewport.getZoom(true);
+      const center = this.viewer.viewport.getCenter(true);
+      const size = item.getContentSize();
+      canvas.dataset.zoom = String(zoom);
+      canvas.dataset.centerX = String(center.x);
+      canvas.dataset.centerY = String(center.y);
+      canvas.dataset.pixelZoom = String(item.viewportToImageZoom(zoom));
+      this.cameraInfo.textContent = `${size.x} × ${size.y} native pixels · ${(item.viewportToImageZoom(zoom) * 100).toFixed(1)}% pixel magnification · pan/zoom retained while scrubbing`;
+    };
+    for (const name of [
+      "viewport-change",
+      "animation",
+      "resize",
+      "open",
+      "close",
+    ] as const) {
+      this.viewer.addHandler(name, updateCamera);
+    }
+    this.viewer.world.addHandler("add-item", updateCamera);
+    this.viewer.world.addHandler("remove-item", updateCamera);
     this.runSelect.onchange = () => void this.load();
     this.keySelect.onchange = () => this.filter();
     this.host.addEventListener("keydown", (e) => {

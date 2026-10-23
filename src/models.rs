@@ -158,5 +158,6 @@ pub struct Image {
 pub struct ImageQuery {
     pub key: String,
     pub step: i64,
+    #[serde(default = "now")]
     pub timestamp: i64,
 }

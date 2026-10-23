@@ -850,3 +850,40 @@ async fn security_headers_cover_assets_api_errors_and_image_content() {
         assert!(!headers.contains_key("access-control-allow-origin"));
     }
 }
+
+#[tokio::test]
+async fn image_timestamp_defaults_when_omitted() {
+    let app = TestApp::new();
+    let id = app.run().await;
+    let before = nset::models::now();
+    let (status, _, body) = app
+        .raw(
+            "POST",
+            &format!("/api/runs/{id}/images?key=prediction&step=0"),
+            encoded_image(image::ImageFormat::Png),
+            "image/png",
+            Some("test-secret"),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let image: Value = serde_json::from_slice(&body).unwrap();
+    let timestamp = image["timestamp"].as_i64().unwrap();
+    assert!(timestamp >= before && timestamp <= nset::models::now());
+    for invalid in ["-1", "null", "9007199254740992"] {
+        let (status, _, _) = app
+            .raw(
+                "POST",
+                &format!("/api/runs/{id}/images?key=prediction&step=0&timestamp={invalid}"),
+                encoded_image(image::ImageFormat::Png),
+                "image/png",
+                Some("test-secret"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}

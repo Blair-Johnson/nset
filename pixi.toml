@@ -14,6 +14,8 @@ serve = { cmd = "cargo run -- --data-dir ./data", depends-on = ["web-build"] }
 demo = "python examples/demo.py"
 server-debug = { cmd = "cargo build --locked", depends-on = ["web-build"] }
 api-test = { cmd = "python -m unittest discover -s tests -p 'test_*.py'", depends-on = ["server-debug"] }
+browser-install = "npm --prefix web exec -- playwright install chromium"
+browser-test = { cmd = "python scripts/browser_verify.py", depends-on = ["build"], env = { NSET_BINARY = "target/release/nset" } }
 format-check = "cargo fmt --all -- --check"
 verify = { depends-on = ["check", "api-test", "format-check"] }
 preview = { cmd = "python scripts/preview.py", depends-on = ["build"] }
