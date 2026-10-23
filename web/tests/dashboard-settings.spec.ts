@@ -74,6 +74,7 @@ async function cursor(page: Page, x: number) {
   await card
     .getByRole("button", { name: "Add vertical cursor", exact: true })
     .click();
+  await card.getByText("Edit positions", { exact: true }).click();
   await card.getByLabel("Cursor A coordinate", { exact: true }).fill(String(x));
   await card.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
   return card

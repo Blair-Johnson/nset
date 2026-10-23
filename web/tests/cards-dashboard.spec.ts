@@ -304,6 +304,7 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
     first.getByRole("button", { name: "Add vertical cursor", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(card(page, 1).locator(".card-inspection")).toBeHidden();
+  await first.getByText("Edit positions", { exact: true }).click();
   await first
     .getByRole("spinbutton", { name: "Cursor A coordinate" })
     .fill("49");
@@ -327,11 +328,13 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
   await first
     .getByRole("button", { name: "Add horizontal cursor", exact: true })
     .click();
+  await first.getByText("Edit positions", { exact: true }).click();
   await first.getByRole("spinbutton", { name: "Cursor A level" }).fill("50000");
   await first.getByRole("spinbutton", { name: "Cursor A level" }).press("Tab");
   await expect(
     first.locator(".card-crossings").first().locator("summary"),
   ).toContainText("2 crossings");
+  await first.getByText("Per-run values / crossings", { exact: true }).click();
   await first.locator(".card-crossings").first().locator("summary").click();
   await expect(
     first.locator(".card-crossings").first().locator("div"),

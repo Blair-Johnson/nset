@@ -625,7 +625,7 @@ test("full shell: one cursor activation places A then B while armed drags still 
     card.getByLabel("Cursor A coordinate", { exact: true }),
   ).toHaveValue("");
   await expect(
-    card.getByRole("button", { name: "Place vertical cursor A", exact: true }),
+    card.getByRole("button", { name: "Place vertical cursor A", exact: true, includeHidden: true }),
   ).toHaveAttribute("aria-pressed", "true");
   for (const [letter, fraction] of [
     ["A", 0.25],

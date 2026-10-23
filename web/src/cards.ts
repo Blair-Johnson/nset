@@ -64,6 +64,8 @@ function button(
 
 export class ChartCard {
   private root = element("article", "chart-card");
+  private header = element("header", "card-header");
+  private foldObserver?: ResizeObserver;
   private title = element("h3", "card-title");
   private content = element("div", "card-content");
   private status = element("div", "card-status");
@@ -115,7 +117,7 @@ export class ChartCard {
     private context: CardContext,
     private actions: CardActions,
   ) {
-    const header = element("header", "card-header");
+    const header = this.header;
     this.maximize = button("⛶", "Maximize chart", () =>
       this.setMaximized(!this.full),
     );
@@ -134,8 +136,12 @@ export class ChartCard {
       },
       { signal: this.lifetime.signal },
     );
+    // Register before PlotPanel so fold growth is compensated before its size observer.
+    this.foldObserver = new ResizeObserver(() => this.measureFolds());
     this.build();
     this.installResize();
+    for (const node of [this.root, this.legend, this.inspection])
+      this.foldObserver.observe(node);
     if (typeof IntersectionObserver !== "undefined") {
       this.observer = new IntersectionObserver(
         (entries) => {
@@ -148,6 +154,10 @@ export class ChartCard {
       );
       this.observer.observe(this.host);
     }
+    this.root.addEventListener("toggle", () => this.measureFolds(), {
+      capture: true,
+      signal: this.lifetime.signal,
+    });
     this.updateActive();
   }
 
@@ -172,8 +182,55 @@ export class ChartCard {
         ? "100%"
         : "calc(50% - 6px)";
     this.root.style.setProperty("--card-width", width);
-    this.host.style.setProperty("--card-width", width);
-    this.root.style.height = `${layout?.height ?? (this.spec.kind === "image" ? 410 : this.spec.config.height + 112)}px`;
+    if (!this.resizeGesture) this.host.style.setProperty("--card-width", width);
+    this.root.style.height = `calc(${this.baseHeight(layout)}px + var(--card-fold-height, 0px))`;
+  }
+
+  /** layout.height is the closed card height, never the transient inspector height. */
+  private baseHeight(layout = this.spec.layout) {
+    return (
+      layout?.height ??
+      (this.spec.kind === "image" ? 410 : this.spec.config.height + 112)
+    );
+  }
+
+  private measureFolds() {
+    const legend =
+      !this.legendDetails.hidden && this.legendDetails.open
+        ? this.legend.getBoundingClientRect().height
+        : 0;
+    const inspection =
+      this.inspection.hidden || !this.inspection.isConnected
+        ? 0
+        : this.inspection.getBoundingClientRect().height + 4;
+    this.root.style.setProperty(
+      "--card-fold-height",
+      `${legend + inspection}px`,
+    );
+    if (this.full && this.plot) {
+      const summary = this.legendDetails.hidden
+        ? 0
+        : this.legendDetails.querySelector("summary")!.getBoundingClientRect()
+            .height + 4;
+      const style = getComputedStyle(this.content);
+      this.root.style.setProperty(
+        "--card-full-plot-height",
+        `${Math.max(
+          100,
+          this.content.clientHeight -
+            parseFloat(style.paddingTop) -
+            parseFloat(style.paddingBottom) -
+            summary -
+            this.clipping.getBoundingClientRect().height,
+        )}px`,
+      );
+    }
+  }
+
+  private releaseResizeSlot() {
+    this.host.classList.remove("card-resizing-slot");
+    this.host.style.removeProperty("--resize-slot-width");
+    this.host.style.removeProperty("--resize-slot-height");
   }
 
   private commitDimensions(layout: CardLayout) {
@@ -195,6 +252,7 @@ export class ChartCard {
     this.resizeGesture = undefined;
     if (this.resizeHandle?.hasPointerCapture(gesture.pointer))
       this.resizeHandle.releasePointerCapture(gesture.pointer);
+    this.releaseResizeSlot();
     this.applyDimensions();
   }
 
@@ -212,7 +270,11 @@ export class ChartCard {
       if (event.button !== 0 || this.full) return;
       event.preventDefault();
       const rect = this.root.getBoundingClientRect();
-      const start = { width: rect.width, height: rect.height };
+      const start = { width: rect.width, height: this.baseHeight() };
+      // Keep the original flex/grid footprint until release; only the child previews.
+      this.host.style.setProperty("--resize-slot-width", `${rect.width}px`);
+      this.host.style.setProperty("--resize-slot-height", `${rect.height}px`);
+      this.host.classList.add("card-resizing-slot");
       this.resizeGesture = {
         pointer: event.pointerId,
         x: event.clientX,
@@ -237,6 +299,7 @@ export class ChartCard {
       if (!g || g.pointer !== event.pointerId) return;
       this.resizeGesture = undefined;
       handle.releasePointerCapture(event.pointerId);
+      this.releaseResizeSlot();
       this.commitDimensions(g.next);
     };
     handle.onpointercancel = () => this.cancelResize();
@@ -248,7 +311,7 @@ export class ChartCard {
       const rect = this.root.getBoundingClientRect();
       const current = this.spec.layout ?? {
         width: rect.width,
-        height: rect.height,
+        height: this.baseHeight(),
       };
       const step = event.shiftKey ? 50 : 10;
       const dx =
@@ -275,7 +338,8 @@ export class ChartCard {
     this.maximize.title = value ? "Restore chart" : "Maximize chart";
     this.maximize.setAttribute("aria-pressed", String(value));
     this.updateActive();
-    this.maximize.focus();
+    this.measureFolds();
+    this.maximize.focus({ preventScroll: true });
   }
 
   private build() {
@@ -297,12 +361,17 @@ export class ChartCard {
           action();
         }),
       );
+    item("Reset view", () => {
+      this.plot?.reset();
+      this.images?.fit();
+    });
     item("Edit chart", () => this.actions.onEdit(this.spec.id));
     item("Duplicate", () => this.actions.onDuplicate(this.spec.id));
     item("Move up", () => this.actions.onMove(this.spec.id, -1));
     item("Move down", () => this.actions.onMove(this.spec.id, 1));
     item("Remove", () => this.actions.onRemove(this.spec.id));
     this.menu.append(summary, items);
+    this.header.querySelector(".card-chart-toolbar")?.remove();
     this.content.replaceChildren();
     this.inputs.clear();
     this.cursorButtons.clear();
@@ -348,8 +417,9 @@ export class ChartCard {
       this.legend,
     );
     this.clipping = element("div", "card-clipping");
+    this.header.insertBefore(toolbar, this.maximize);
+    this.legendDetails.addEventListener("toggle", () => this.measureFolds());
     this.content.append(
-      toolbar,
       this.clipping,
       plotHost,
       this.legendDetails,
@@ -359,13 +429,16 @@ export class ChartCard {
     this.plot = new PlotPanel(
       plotHost,
       () => {},
-      (warnings) => {
-        // Precision details belong in a tooltip, not a permanent diagnostics paragraph.
-        plotHost.title = warnings.join("\n");
-      },
+      // Editor diagnostics remain available; never make the plot a native tooltip.
+      () => {},
       true,
     );
     this.configure();
+    if (this.foldObserver) {
+      this.foldObserver.disconnect();
+      for (const node of [this.root, this.legend, this.inspection])
+        this.foldObserver.observe(node);
+    }
   }
 
   private configure(rebuild = true) {
@@ -402,10 +475,10 @@ export class ChartCard {
         if (x === null) return;
         this.lastHoverX = x;
         this.updateLegendReadout();
-        for (const series of this.data.slice(0, 3)) {
+        for (const [index, series] of this.data.slice(0, 3).entries()) {
           const row = element("div", "card-hover-row");
-          const name = element("span", "", series.run.name);
-          name.title = series.run.name;
+          const name = element("span", "", this.seriesLabel(index));
+          name.title = name.textContent ?? "";
           row.append(name, element("span", "", this.number(series.fn.at(x))));
           this.hover.append(row);
         }
@@ -441,7 +514,10 @@ export class ChartCard {
     this.inspection.replaceChildren();
     this.inputs.clear();
     this.inspection.hidden = !this.inspectOpen && this.mode !== "threshold";
-    if (this.inspection.hidden) return;
+    if (this.inspection.hidden) {
+      this.measureFolds();
+      return;
+    }
     const fields = element("div", "card-pin-fields");
     const names: (keyof Pins)[] =
       this.mode === "threshold"
@@ -501,7 +577,9 @@ export class ChartCard {
         this.configure();
       }),
     );
-    this.inspection.append(fields, this.results);
+    const editor = element("details", "card-position-editor");
+    editor.append(element("summary", "", "Edit positions"), fields);
+    this.inspection.append(this.results, editor);
     this.renderResults();
   }
 
@@ -516,6 +594,7 @@ export class ChartCard {
       cell.textContent = x === null ? "" : this.number(series.fn.at(x));
       cell.title = cell.textContent;
     }
+    this.measureFolds();
   }
 
   private renderLegend() {
@@ -526,6 +605,8 @@ export class ChartCard {
     const advanced = config.advanced.legend as { show?: boolean } | undefined;
     this.legendDetails.hidden = !(advanced?.show ?? config.legend);
     if (this.legendDetails.hidden) return;
+    const mixed = new Set(this.sources.map((source) => source.key)).size > 1;
+    this.legend.classList.toggle("card-legend-mixed", mixed);
     this.data.forEach((series, index) => {
       const style = styleFor(config, series.run.id, index);
       const item = element("span", "card-legend-item");
@@ -543,7 +624,9 @@ export class ChartCard {
       key.title = key.textContent ?? "";
       const value = element("span", "card-legend-value");
       this.legendValues.push([value, series]);
-      item.append(swatch, name, key, value);
+      item.append(swatch, name);
+      if (mixed) item.append(key);
+      item.append(value);
       if (!style.visible) {
         item.classList.add("card-series-hidden");
         item.title = "Hidden in chart settings";
@@ -565,8 +648,23 @@ export class ChartCard {
   private number(value: number | null) {
     return value === null ? "—" : formatValue(value, this.spec.config.yFormat);
   }
+  private seriesLabel(index: number) {
+    const source = this.sources[index];
+    if (!source) return this.data[index].run.name;
+    const mixed = new Set(this.sources.map((item) => item.key)).size > 1;
+    return mixed ? `${source.run.name} · ${source.key}` : source.run.name;
+  }
+
   private renderResults() {
+    const open =
+      this.results.querySelector<HTMLDetailsElement>(".card-series-details")
+        ?.open ?? false;
     this.results.replaceChildren();
+    const secondary = element("details", "card-series-details");
+    secondary.open = open;
+    secondary.append(element("summary", "", "Per-run values / crossings"));
+    const body = element("div", "card-series-results");
+    secondary.append(body);
     if (this.inspectOpen && this.mode !== "threshold") {
       const vertical = this.cursorAxis === "x";
       const a = vertical ? this.pins.a : this.pins.yA;
@@ -622,6 +720,13 @@ export class ChartCard {
         cell.append(element("span", "", label), element("output", "", value));
         readout.append(cell);
       }
+      readout.append(
+        button("Hide", "Hide cursor details", () => {
+          this.inspectOpen = false;
+          this.mode = "zoom";
+          this.configure();
+        }),
+      );
       this.results.append(readout);
     }
     if (
@@ -634,16 +739,16 @@ export class ChartCard {
       for (const name of ["Series value", "At A", "At B", "Δ value"])
         head.append(element("th", "", name));
       table.append(head);
-      for (const series of this.data) {
+      for (const [index, series] of this.data.entries()) {
         const a = this.pins.a === null ? null : series.fn.at(this.pins.a);
         const b = this.pins.b === null ? null : series.fn.at(this.pins.b);
         const row = element("tr");
-        row.append(element("th", "", series.run.name));
+        row.append(element("th", "", this.seriesLabel(index)));
         for (const value of [a, b, a === null || b === null ? null : b - a])
           row.append(element("td", "", this.number(value)));
         table.append(row);
       }
-      this.results.append(table);
+      body.append(table);
     } else if (this.inspectOpen || this.mode === "threshold") {
       const levels: [string, number | null | undefined][] =
         this.mode === "threshold"
@@ -654,14 +759,14 @@ export class ChartCard {
             ];
       for (const [label, level] of levels) {
         if (level == null) continue;
-        for (const series of this.data) {
+        for (const [index, series] of this.data.entries()) {
           const crossings = series.fn.crossings(level);
           const details = element("details", "card-crossings");
           details.append(
             element(
               "summary",
               "",
-              `${label} · ${series.run.name} · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
+              `${label} · ${this.seriesLabel(index)} · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
             ),
           );
           const list = element("div");
@@ -680,10 +785,12 @@ export class ChartCard {
               ),
             ].join(", ") || "No crossings";
           details.append(list);
-          this.results.append(details);
+          body.append(details);
         }
       }
     }
+    if (body.childElementCount) this.results.append(secondary);
+    this.measureFolds();
   }
 
   private cancel() {
@@ -768,14 +875,13 @@ export class ChartCard {
         this.spec.outliers === "robust"
           ? robustConfig(this.data, display)
           : display;
-      this.plot?.render(this.data, config, this.pins);
       this.renderLegend();
       if (config !== display) {
         this.clipping.append(
           element("span", "", "Central 98% · display clipped"),
           button("Fit all", "Show all values in this view", () => {
-            this.plot?.render(this.data, this.displayConfig(), this.pins);
             this.clipping.replaceChildren();
+            this.plot?.render(this.data, this.displayConfig(), this.pins);
           }),
           button("Edit", "Edit chart range", () =>
             this.actions.onEdit(this.spec.id),
@@ -785,6 +891,7 @@ export class ChartCard {
       this.status.textContent = this.data.some((series) => series.points.length)
         ? ""
         : "No measurements yet";
+      this.plot?.render(this.data, config, this.pins);
       this.renderResults();
     } catch (error) {
       if (this.destroyed || generation !== this.generation || isAbort(error))
@@ -824,13 +931,19 @@ export class ChartCard {
         config: { ...config, width: null, height: 0 },
       });
     if (contentKey(spec) === contentKey(this.spec)) {
-      this.cancelResize();
+      // Unchanged shell renders must not interrupt an active pointer preview.
+      if (
+        JSON.stringify(spec.layout) !== JSON.stringify(this.spec.layout) ||
+        spec.size !== this.spec.size
+      )
+        this.cancelResize();
       this.spec = spec;
       this.title.textContent = spec.title;
       this.root.classList.toggle("card-wide", spec.size === "wide");
-      this.applyDimensions();
+      this.applyDimensions(this.resizeGesture?.next);
       return;
     }
+    this.cancelResize();
     if (spec.config.axis !== this.spec.config.axis)
       this.pins = { a: null, b: null, threshold: null };
     this.cancel();
@@ -870,6 +983,7 @@ export class ChartCard {
     this.destroyed = true;
     this.cancel();
     this.observer?.disconnect();
+    this.foldObserver?.disconnect();
     this.lifetime.abort();
     this.plot?.destroy();
     this.images?.destroy();

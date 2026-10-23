@@ -318,6 +318,7 @@ test("horizontal A/B inspection includes every crossing and plateau plus delta Y
 }) => {
   await fixture(page);
   await page.getByRole("button", { name: "Add horizontal cursor" }).click();
+  await page.getByText("Edit positions", { exact: true }).click();
   await page.getByRole("spinbutton", { name: "Cursor A level" }).fill("1");
   await page.getByRole("spinbutton", { name: "Cursor A level" }).press("Tab");
   await page.getByRole("spinbutton", { name: "Cursor B level" }).fill("2");
@@ -331,6 +332,7 @@ test("horizontal A/B inspection includes every crossing and plateau plus delta Y
   await expect(page.locator(".card-crossings").first()).toContainText(
     "5 crossings",
   );
+  await page.getByText("Per-run values / crossings", { exact: true }).click();
   await page.locator(".card-crossings").first().locator("summary").click();
   await expect(
     page.locator(".card-crossings").first().locator("div"),
@@ -712,6 +714,24 @@ test("sixty-run legends and hover readouts stay bounded without widening the car
     .toBeGreaterThan(100);
   expect(bounds.document).toBe(1500);
   await page.screenshot({ path: info.outputPath("dense-card-readouts.png") });
+  const plotHeight = (await page.locator(".u-over").boundingBox())!.height;
+  await page.getByRole("button", { name: "Add horizontal cursor" }).click();
+  await page.evaluate(() => {
+    const c = (window as any).geometry.card;
+    c.setPin("yA", 1);
+    c.setPin("yB", 2);
+  });
+  await page.getByText("Per-run values / crossings", { exact: true }).click();
+  await expect(page.locator(".card-crossings")).toHaveCount(120);
+  const results = await page
+    .locator(".card-series-results")
+    .evaluate((el) => ({ height: el.clientHeight, scroll: el.scrollHeight }));
+  expect(results.height).toBeLessThanOrEqual(190);
+  expect(results.scroll).toBeGreaterThan(500);
+  expect((await page.locator(".u-over").boundingBox())!.height).toBe(
+    plotHeight,
+  );
+  await page.screenshot({ path: info.outputPath("dense-cursor-results.png") });
 });
 
 test("pointer cancellation rolls transient geometry back without persistence", async ({
@@ -764,7 +784,10 @@ test("cursor pairs return to zoom and existing horizontal/vertical pins drag dir
     .poll(() => page.evaluate(() => (window as any).geometry.card.mode))
     .toBe("inspect");
   await expect(
-    page.getByRole("button", { name: "Place horizontal cursor B" }),
+    page.getByRole("button", {
+      name: "Place horizontal cursor B",
+      includeHidden: true,
+    }),
   ).toHaveAttribute("aria-pressed", "true");
   const second = await at(4, 1.7);
   await page.mouse.click(second.x, second.y);
@@ -774,7 +797,10 @@ test("cursor pairs return to zoom and existing horizontal/vertical pins drag dir
   );
   expect((await snapshot(page)).pins.yA).toBeCloseTo(0.8, 1);
   await expect(
-    page.getByRole("button", { name: "Place horizontal cursor A" }),
+    page.getByRole("button", {
+      name: "Place horizontal cursor A",
+      includeHidden: true,
+    }),
   ).toHaveAttribute("aria-pressed", "false");
   const before = await snapshot(page);
   await drag(3, 0.8, 3, 1.3);
@@ -823,7 +849,10 @@ test("an armed cursor drag zooms without placing or advancing", async ({
     page.getByRole("button", { name: "Add horizontal cursor", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
-    page.getByRole("button", { name: "Place horizontal cursor A" }),
+    page.getByRole("button", {
+      name: "Place horizontal cursor A",
+      includeHidden: true,
+    }),
   ).toHaveAttribute("aria-pressed", "true");
 });
 
@@ -875,10 +904,12 @@ for (const format of ["number", "iso-time"])
     await page
       .getByRole("button", { name: "Add horizontal cursor", exact: true })
       .click();
+    await page.getByText("Edit positions", { exact: true }).click();
     await page.getByLabel("Cursor A level", { exact: true }).fill("2");
     await page.getByLabel("Cursor A level", { exact: true }).press("Tab");
     const a = page.locator(".card-crossings").filter({ hasText: "Run a" });
     const b = page.locator(".card-crossings").filter({ hasText: "Run b" });
+    await page.getByText("Per-run values / crossings", { exact: true }).click();
     await a.locator("summary").click();
     await b.locator("summary").click();
     await expect(a).toContainText("5s, 15s");
@@ -905,6 +936,7 @@ for (const axis of ["step", "timestamp", "relative", "horizontal"] as const)
         exact: true,
       })
       .click();
+    await page.getByText("Edit positions", { exact: true }).click();
     const input = (letter: string) =>
       page.getByLabel(
         `Cursor ${letter} ${horizontal ? "level" : "coordinate"}`,

@@ -422,14 +422,14 @@
   flex: none;
 }
 .card-inspection {
-  flex: 0 0 130px;
-  min-height: 56px;
-  max-height: 38%;
-  overflow: auto;
+  flex: none;
+  min-height: 0;
+  overflow: visible;
   padding-top: 4px;
 }
 .card-results {
-  max-height: 150px;
+  max-height: none;
+  overflow: visible;
 }
 .card-value-table {
   table-layout: fixed;
@@ -463,7 +463,7 @@
 }
 .card-legend-item {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 10ch);
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 10ch);
   gap: 6px;
   padding: 2px 0;
 }
@@ -600,4 +600,72 @@
 }
 .card-position-value output {
   font-weight: 600;
+}
+
+/* Pointer preview overflows a fixed slot; siblings never move until commit. */
+.card-resizing-slot {
+  position: relative;
+  flex: 0 0 var(--resize-slot-width) !important;
+  width: var(--resize-slot-width) !important;
+  height: var(--resize-slot-height) !important;
+  z-index: 30;
+}
+.card-resizing-slot > .chart-card {
+  width: var(--card-width);
+}
+.card-header {
+  gap: 4px;
+}
+.card-header .card-chart-toolbar {
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+.card-header .card-chart-toolbar button {
+  padding: 3px;
+}
+.card-header > .card-button {
+  padding: 3px;
+  min-width: 28px;
+}
+.card-legend-mixed .card-legend-item {
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 10ch);
+}
+.card-position-editor,
+.card-series-details {
+  font-size: 12px;
+}
+.card-position-editor > summary,
+.card-series-details > summary {
+  cursor: pointer;
+  padding: 3px 0;
+  color: var(--muted);
+}
+.card-position-editor .card-pin-fields {
+  padding: 4px 0;
+}
+.card-series-results {
+  max-height: 190px;
+  overflow: auto;
+}
+.card-position-readout {
+  padding: 2px 0;
+  gap: 4px 12px;
+}
+.card-results {
+  margin-top: 0;
+}
+.card-hover {
+  top: 12px;
+}
+.card-maximized .card-content {
+  overflow: auto;
+}
+.card-maximized .card-plot {
+  flex: none;
+  height: var(--card-full-plot-height, calc(100dvh - 112px));
+}
+/* Editing exposes the same coordinates, not a second simultaneous A/B readout. */
+.card-inspection:has(.card-position-editor[open])
+  .card-position-value:nth-of-type(-n + 2) {
+  display: none;
 }

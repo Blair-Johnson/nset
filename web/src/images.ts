@@ -316,6 +316,11 @@ export class ImagePanel {
   async refresh() {
     await this.load();
   }
+  /** Fit the current image without clearing its source, frame, or cache. */
+  fit(): void {
+    this.viewer.viewport.goHome();
+  }
+
   private reset() {
     this.stop();
     this.requests.next();

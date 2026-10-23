@@ -254,6 +254,7 @@ test("chart state survives run-table navigation and run drawer keeps keyboard fo
   await loss
     .getByRole("button", { name: "Add vertical cursor", exact: true })
     .click();
+  await loss.getByText("Edit positions", { exact: true }).click();
   await loss.getByLabel("Cursor A coordinate", { exact: true }).fill("2.5");
   await loss.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
   await loss.getByRole("button", { name: "Zoom in", exact: true }).click();
