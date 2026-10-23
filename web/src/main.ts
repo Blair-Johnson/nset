@@ -437,6 +437,9 @@ function workspaceToolbar(workspace: Workspace) {
   const focused = host.contains(document.activeElement)
     ? document.activeElement?.getAttribute("aria-label")
     : null;
+  const focusedRun = host.contains(document.activeElement)
+    ? (document.activeElement as HTMLElement | null)?.dataset.runId
+    : undefined;
   const oldScroll = host.querySelector(".run-picker-options")?.scrollTop ?? 0;
   const openMenus = [
     ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
@@ -507,6 +510,7 @@ function workspaceToolbar(workspace: Workspace) {
       check.type = "checkbox";
       check.checked = workspace.selectedRunIds.includes(run.id);
       check.setAttribute("aria-label", `Show ${run.name}`);
+      check.dataset.runId = run.id;
       check.onchange = () =>
         updateSelection(
           workspace,
@@ -718,7 +722,11 @@ function workspaceToolbar(workspace: Workspace) {
   choices.scrollTop = oldScroll;
   if (focused)
     [...host.querySelectorAll<HTMLElement>("[aria-label]")]
-      .find((node) => node.getAttribute("aria-label") === focused)
+      .find((node) =>
+        focusedRun
+          ? node.dataset.runId === focusedRun
+          : node.getAttribute("aria-label") === focused,
+      )
       ?.focus({ preventScroll: true });
 }
 

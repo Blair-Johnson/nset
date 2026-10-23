@@ -110,7 +110,7 @@ export function experimentTable(
       state.page,
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
     );
-    count.textContent = `${rows.length} experiments`;
+    count.textContent = `${rows.length} ${rows.length === 1 ? "experiment" : "experiments"}`;
     body.replaceChildren();
     for (const experiment of rows.slice(
       state.page * pageSize,

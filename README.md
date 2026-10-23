@@ -60,10 +60,13 @@ For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, 
 
 ## Explore runs and charts
 
-1. Open **Experiments**, choose an experiment, then search or filter its run table. Check the runs you want to compare and open **Charts**; selection is shared between Runs and Charts.
-2. The initial **Overview** view places line charts and image panels together in collapsible sections. Keys such as `train/loss` and `train/prediction` share a `train` section; keys without a slash go in an Overview section. Use the **Runs** picker to adjust the comparison without leaving Charts.
-3. Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a line chart or image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
-4. Changes to named views are saved in this browser. Use **View actions (⋯) → Save as…** for another view and **Export view / Import view…** to transfer its layout and settings. These files contain data references, not credentials or logged observations; they are not data backups.
+Open **Experiments**, choose an experiment, then search or filter its run table. Check the runs you want to compare and open **Charts**; selection is shared between Runs and Charts.
+
+The initial **Overview** view places line charts and image panels together in collapsible sections. Keys such as `train/loss` and `train/prediction` share a `train` section; keys without a slash go in an Overview section. Use the **Runs** picker to adjust the comparison without leaving Charts.
+
+Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a line chart or image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
+
+Changes to named views are saved in this browser. Use **View actions (⋯) → Save as…** for another view and **Export view / Import view…** to transfer its layout and settings. These files contain data references, not credentials or logged observations; they are not data backups.
 
 Line charts start in **Pan** mode. Choose **Zoom** to drag a box, **Inspect** for A/B values and deltas, or **Threshold** for all crossings. Ordinary scrolling moves the page; **Alt + wheel** zooms a chart. **Fit**, **Back** and **+/−** provide visible navigation controls. Image panels keep the camera while you scrub or play the timeline; maximize a card for more space without losing its timeline. See `web/README.md` for shortcuts and detailed controls.
 
@@ -81,7 +84,7 @@ Authenticated `GET /api/catalog` returns `{experiments, runs, series}` for table
 
 ## Verification and architecture
 
-The API and initial component boundaries are documented in `docs/contract.md`. The detailed development checklist is retained locally in ignored `.agents/plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
+The API and initial component boundaries are documented in `docs/contract.md`. The redesign specification and reference survey are in `docs/ux-contract.md` and `docs/ux-survey.md`; the detailed development checklists are retained locally in ignored `.agents/plan.md` and `.agents/ux-redesign-plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
 
 ```sh
 pixi run check
