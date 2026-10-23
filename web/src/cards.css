@@ -631,8 +631,10 @@
   border-color: transparent;
   color: var(--muted);
 }
-.card-header .card-chart-toolbar button:hover:not(:disabled),
-.card-header > .card-button:hover:not(:disabled) {
+.card-header
+  .card-chart-toolbar
+  button:hover:not(:disabled):not([aria-pressed="true"]),
+.card-header > .card-button:hover:not(:disabled):not([aria-pressed="true"]) {
   background: var(--surface-hover);
   border-color: transparent;
   color: var(--text);
