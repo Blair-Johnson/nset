@@ -20,6 +20,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
   );
   await page.goto("/__editor_fixture");
   await page.evaluate(async (options) => {
+    await import("/src/style.css");
     const { openChartEditor } = await import("/src/chart-editor.ts");
     const { newChart } = await import("/src/workspace.ts");
     const runs = [
@@ -240,7 +241,9 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
 }
 const dialog = (page: Page) => page.getByRole("dialog", { name: "Edit chart" });
 const section = (page: Page, name: string) =>
-  dialog(page).getByRole("tab", { name, exact: true }).click();
+  dialog(page)
+    .getByRole("heading", { name, exact: true })
+    .scrollIntoViewIfNeeded();
 const state = (page: Page) =>
   page.evaluate(() => {
     const s = (window as any).__editor;
@@ -399,17 +402,16 @@ test("simple fields display effective advanced values, then remove only conflict
     dialog(page).getByLabel("Y minimum", { exact: true }),
   ).toHaveValue("1");
   await dialog(page).getByLabel("Y minimum", { exact: true }).fill("2");
-  await dialog(page)
-    .getByText("Labels & more options", { exact: true })
-    .first()
-    .click();
-  await expect(dialog(page).getByLabel("X label", { exact: true })).toHaveValue(
-    "Saved step",
-  );
+  await dialog(page).getByText("Advanced axes", { exact: true }).click();
+  await expect(
+    dialog(page).getByLabel("X axis title", { exact: true }),
+  ).toHaveValue("Saved step");
   await expect(
     dialog(page).getByLabel("X number format", { exact: true }),
   ).toHaveValue("scientific");
-  await dialog(page).getByLabel("X label", { exact: true }).fill("Iteration");
+  await dialog(page)
+    .getByLabel("X axis title", { exact: true })
+    .fill("Iteration");
   await dialog(page)
     .getByLabel("X number format", { exact: true })
     .selectOption("fixed-2");
@@ -474,8 +476,8 @@ test("image sources have no misleading numeric controls and no metric loads", as
 }) => {
   await fixture(page, { image: true });
   await expect(
-    dialog(page).getByRole("tab", { name: "Axes", exact: true }),
-  ).toBeDisabled();
+    dialog(page).getByRole("heading", { name: "Axes", exact: true }),
+  ).toHaveCount(0);
   expect(await dialog(page).locator(".ce-source-list input").count()).toBe(1);
   await expect(
     dialog(page).getByRole("checkbox", { name: /eval\/samples —/ }),
@@ -483,25 +485,58 @@ test("image sources have no misleading numeric controls and no metric loads", as
   await section(page, "Appearance");
   await expect(
     dialog(page).getByLabel("Card width", { exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     dialog(page).getByLabel("Smooth the curve", { exact: true }),
   ).toHaveCount(0);
   expect((await state(page)).loads).toHaveLength(0);
 });
 
-test("keyboard tab navigation, small viewport and component screenshot", async ({
+test("single settings scroll, persistent preview/actions, keyboard access and 390px layout", async ({
   page,
 }, testInfo) => {
   await fixture(page, { many: true });
   await expect(
     dialog(page).getByText("1 curve(s) · 301 observations", { exact: true }),
   ).toBeVisible();
-  await dialog(page).getByRole("tab", { name: "Data", exact: true }).focus();
-  await page.keyboard.press("ArrowRight");
+  await expect(dialog(page).getByRole("tab")).toHaveCount(0);
+  expect(
+    await dialog(page).locator(".ce-panel > h3").allTextContents(),
+  ).toEqual(["Data", "Axes", "Appearance"]);
   await expect(
-    dialog(page).getByRole("tab", { name: "Axes", exact: true }),
+    dialog(page).locator(".ce-settings details details"),
+  ).toHaveCount(0);
+  expect(
+    await dialog(page).locator(".ce-settings > section > details").count(),
+  ).toBe(2);
+  for (const label of [
+    "X axis title",
+    "Y axis title",
+    "X scale",
+    "Y bounds",
+    "Between observations",
+    "Line width",
+    "Point size",
+  ]) {
+    await expect(dialog(page).getByLabel(label, { exact: true })).toBeVisible();
+    expect(
+      await dialog(page)
+        .getByLabel(label, { exact: true })
+        .evaluate((node) => !!node.closest("details")),
+    ).toBe(false);
+  }
+  await dialog(page).getByLabel("Chart title", { exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog(page).getByLabel("Plot type", { exact: true }),
   ).toBeFocused();
+  const desktopPreview = await dialog(page)
+    .locator(".ce-preview")
+    .boundingBox();
+  await section(page, "Appearance");
+  expect(await dialog(page).locator(".ce-preview").boundingBox()).toEqual(
+    desktopPreview,
+  );
   await page.screenshot({ path: testInfo.outputPath("editor-preview.png") });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
@@ -509,6 +544,20 @@ test("keyboard tab navigation, small viewport and component screenshot", async (
   ).toBeInViewport();
   const box = await dialog(page).boundingBox();
   expect(box!.width).toBeLessThanOrEqual(390);
+  await expect(dialog(page).locator(".ce-preview .u-over")).toBeInViewport();
+  const mobilePreview = await dialog(page).locator(".ce-preview").boundingBox();
+  await dialog(page).getByLabel("Line width", { exact: true }).fill("3");
+  expect(await dialog(page).locator(".ce-preview").boundingBox()).toEqual(
+    mobilePreview,
+  );
+  expect(
+    await dialog(page).evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("editor-mobile.png") });
 });
 
@@ -517,20 +566,13 @@ test("style presets and individual overrides stay synchronized without touching 
 }) => {
   await fixture(page);
   await section(page, "Appearance");
-  await dialog(page).getByText("Default curve style", { exact: true }).click();
-  const defaults = dialog(page)
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: /^Default curve style$/ }),
-    })
-    .first();
+  const defaults = dialog(page).locator(".ce-default-style");
   await defaults
     .getByLabel("Curve style", { exact: true })
     .selectOption("points");
   await expect(
     defaults.getByLabel("Observation points", { exact: true }),
   ).toHaveValue("true");
-  await defaults.getByText("Line & marker details", { exact: true }).click();
   await expect(defaults.getByLabel("Line width", { exact: true })).toHaveValue(
     "0",
   );
@@ -546,7 +588,7 @@ test("style presets and individual overrides stay synchronized without touching 
   await defaults
     .getByLabel("Curve style", { exact: true })
     .selectOption("stepped-before");
-  await dialog(page).getByText("Individual curves", { exact: true }).click();
+  await dialog(page).getByText("Advanced appearance", { exact: true }).click();
   await dialog(page)
     .getByRole("button", { name: /ResNet seed 1.*train\/loss/ })
     .click();
@@ -781,4 +823,166 @@ test("plot type uses concrete names and preserves sources and interpolation acro
   await expect(
     dialog(page).getByLabel("Plot type", { exact: true }),
   ).toHaveValue("scatter");
+});
+
+test("axis titles follow metric selection until explicitly edited, without saving display defaults", async ({
+  page,
+}) => {
+  await fixture(page);
+  const title = dialog(page).getByLabel("Y axis title", { exact: true });
+  await expect(title).toHaveValue("");
+  await expect(title).toHaveAttribute("placeholder", "train/loss");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.config.yLabel)
+    .toBe("train/loss");
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .check();
+  await expect(title).toHaveAttribute(
+    "placeholder",
+    "Metric value (mixed metrics)",
+  );
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.config.yLabel)
+    .toBe("Metric value (mixed metrics)");
+  await title.fill("Validation score (%)");
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .uncheck();
+  await expect(title).toHaveValue("Validation score (%)");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.config.yLabel)
+    .toBe("Validation score (%)");
+  await title.fill("");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.config.yLabel)
+    .toBe("eval/accuracy");
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved[0].config.yLabel).toBe("");
+});
+
+test("saved axis titles remain authoritative and edits replace only the conflicting title", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const config = (window as any).__editor.card.config;
+    config.yLabel = "Saved score";
+    config.advanced.axes = [
+      { label: "Recorded iterations", stroke: "navy" },
+      { label: "Saved literal", size: 70 },
+    ];
+  });
+  await page.locator("#launch").click();
+  await expect(
+    dialog(page).getByLabel("Y axis title", { exact: true }),
+  ).toHaveValue("Saved literal");
+  await expect
+    .poll(
+      async () =>
+        (await state(page)).plots.at(-1)?.config.advanced.axes?.[1].label,
+    )
+    .toBe("Saved literal");
+  await dialog(page)
+    .getByLabel("Y axis title", { exact: true })
+    .fill("Loss (nats)");
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  const config = (await state(page)).saved[0].config;
+  expect(config.yLabel).toBe("Loss (nats)");
+  expect(config.advanced.axes).toEqual([
+    { label: "Recorded iterations", stroke: "navy" },
+    { size: 70 },
+  ]);
+});
+
+test("shared run colors refresh open previews without fetching histories or persisting derived overrides", async ({
+  page,
+}) => {
+  await fixture(page);
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .check();
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.counts.length)
+    .toBe(2);
+  const before = await state(page);
+  const colors = Object.values(before.plots.at(-1).config.runs).map(
+    (style: any) => style.color,
+  );
+  expect(colors).toHaveLength(2);
+  expect(colors[0]).toBe(colors[1]);
+  await page.evaluate(() =>
+    window.dispatchEvent(new Event("nset:run-colors-changed")),
+  );
+  await expect
+    .poll(async () => (await state(page)).plots.length)
+    .toBeGreaterThan(before.plots.length);
+  expect((await state(page)).loads).toHaveLength(before.loads.length);
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved[0].config.runs).toEqual({});
+  const after = (await state(page)).plots.length;
+  await page.evaluate(() =>
+    window.dispatchEvent(new Event("nset:run-colors-changed")),
+  );
+  await page.waitForTimeout(200);
+  expect((await state(page)).plots).toHaveLength(after);
+});
+
+test("source and style choices retain keyboard focus, irrelevant advanced errors do not block saving", async ({
+  page,
+}) => {
+  await fixture(page);
+  await dialog(page)
+    .getByLabel("Show chosen sources only", { exact: true })
+    .check();
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .click();
+  await expect(
+    dialog(page).getByRole("group", { name: "Metric sources" }),
+  ).toBeFocused();
+  await dialog(page)
+    .getByLabel("Show chosen sources only", { exact: true })
+    .uncheck();
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .check();
+  await expect(
+    dialog(page).getByRole("checkbox", { name: /train\/loss —/ }),
+  ).toBeFocused();
+  await dialog(page)
+    .getByLabel("Y scale", { exact: true })
+    .selectOption("asinh");
+  await dialog(page).getByText("Advanced axes", { exact: true }).click();
+  await dialog(page)
+    .getByLabel("Y asinh transition", { exact: true })
+    .fill("-1");
+  await expect(
+    dialog(page).getByLabel("Y asinh transition", { exact: true }),
+  ).toHaveAttribute("aria-invalid", "true");
+  await dialog(page)
+    .getByLabel("Y scale", { exact: true })
+    .selectOption("linear");
+  await expect(
+    dialog(page).getByLabel("Y asinh transition", { exact: true }),
+  ).toBeHidden();
+  await dialog(page).getByText("Advanced appearance", { exact: true }).click();
+  await dialog(page)
+    .getByRole("button", { name: /ResNet seed 1.*train\/loss/ })
+    .click();
+  await expect(
+    dialog(page).getByRole("button", { name: /ResNet seed 1.*train\/loss/ }),
+  ).toBeFocused();
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(dialog(page)).toHaveCount(0);
+  expect((await state(page)).saved).toHaveLength(1);
 });
