@@ -736,7 +736,7 @@ test("plot type uses concrete names and preserves sources and interpolation acro
   await expect(type).toHaveValue("line");
   await type.selectOption("scatter");
   await expect
-    .poll(async () => (await state(page)).plots.at(-1).config.style.width)
+    .poll(async () => (await state(page)).plots.at(-1)?.config.style.width)
     .toBe(0);
   let preview = (await state(page)).plots.at(-1);
   expect(preview.config.style.markers.show).toBe(true);
@@ -759,11 +759,11 @@ test("plot type uses concrete names and preserves sources and interpolation acro
   await expect(type).toHaveValue("scatter");
   await type.selectOption("area");
   await expect
-    .poll(async () => (await state(page)).plots.at(-1).config.style.fill)
+    .poll(async () => (await state(page)).plots.at(-1)?.config.style.fill)
     .toBe(0.15);
   await type.selectOption("step");
   await expect
-    .poll(async () => (await state(page)).plots.at(-1).config.style.path)
+    .poll(async () => (await state(page)).plots.at(-1)?.config.style.path)
     .toBe("stepped-after");
   await type.selectOption("scatter");
   await dialog(page)

@@ -64,7 +64,7 @@ Open **Experiments**, choose an experiment, then search or filter its run table.
 
 The initial **Overview** view places line charts and image panels together in collapsible sections. Keys such as `train/loss` and `train/prediction` share a `train` section; keys without a slash go in an Overview section. Use the **Runs** picker to adjust the comparison without leaving Charts.
 
-Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a line chart or image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
+Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a Line plot, Scatter plot, Area plot, Step plot or Image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
 
 Changes to named views are saved in this browser. Use **View actions (⋯) → Save as…** for another view and **Export view / Import view…** to transfer its layout and settings. These files contain data references, not credentials or logged observations; they are not data backups.
 
