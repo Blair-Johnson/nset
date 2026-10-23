@@ -599,9 +599,10 @@ test("image pointer anchoring survives actual card maximize and restore", async 
         exact: true,
       })
       .click();
-    await expect(imageCard).toHaveClass(
-      maximized ? /card-maximized/ : /chart-card/,
-    );
+    if (maximized)
+      await expect(imageCard.locator(".chart-card")).toHaveClass(/card-maximized/);
+    else
+      await expect(imageCard.locator(".chart-card")).not.toHaveClass(/card-maximized/);
     await page.evaluate(async () => {
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
