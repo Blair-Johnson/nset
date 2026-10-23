@@ -1,8 +1,8 @@
-import type { Api, Experiment, Run } from './api';
-import type { Point } from './math';
-import type { ViewConfig } from './config';
+import type { Api, Experiment, Run } from "./api";
+import type { Point } from "./math";
+import type { ViewConfig } from "./config";
 
-export type SeriesKind = 'metric' | 'image';
+export type SeriesKind = "metric" | "image";
 export interface CatalogSeries {
   run_id: string;
   key: string;
@@ -17,20 +17,29 @@ export interface Catalog {
   runs: Run[];
   series: CatalogSeries[];
 }
-export interface SeriesRef { runId: string; key: string; kind: SeriesKind }
+export interface SeriesRef {
+  runId: string;
+  key: string;
+  kind: SeriesKind;
+}
 export type ChartSource =
-  | { mode: 'selected'; keys: string[] }
-  | { mode: 'explicit'; series: SeriesRef[] };
+  | { mode: "selected"; keys: string[] }
+  | { mode: "explicit"; series: SeriesRef[] };
 export interface ChartSpec {
   id: string;
   title: string;
-  kind: 'timeseries' | 'image';
+  kind: "timeseries" | "image";
   source: ChartSource;
   config: ViewConfig;
-  outliers: 'all' | 'robust';
-  size: 'normal' | 'wide';
+  outliers: "all" | "robust";
+  size: "normal" | "wide";
 }
-export interface Section { id: string; title: string; collapsed: boolean; cards: ChartSpec[] }
+export interface Section {
+  id: string;
+  title: string;
+  collapsed: boolean;
+  cards: ChartSpec[];
+}
 export interface Workspace {
   version: 2;
   id: string;
@@ -51,7 +60,11 @@ export interface ResolvedSeries extends SeriesRef {
   label: string;
 }
 export interface MetricLoader {
-  load(ref: SeriesRef, signal?: AbortSignal, onProgress?: (done: number, total: number) => void): Promise<Point[]>;
+  load(
+    ref: SeriesRef,
+    signal?: AbortSignal,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<Point[]>;
   clear(): void;
 }
 export interface CardContext {
@@ -65,15 +78,15 @@ export interface CardActions {
   onRemove(id: string): void;
   onDuplicate(id: string): void;
   onMove(id: string, delta: -1 | 1): void;
-  onResize(id: string, size: 'normal' | 'wide'): void;
+  onResize(id: string, size: "normal" | "wide"): void;
 }
-export type InteractionMode = 'pan' | 'zoom' | 'inspect' | 'threshold';
-export type NavigationAxis = 'x' | 'y' | 'both';
+export type InteractionMode = "pan" | "zoom" | "inspect" | "threshold";
+export type NavigationAxis = "x" | "y" | "both";
 export interface PlotInteraction {
   mode: InteractionMode;
   axis: NavigationAxis;
-  activePin: 'a' | 'b';
-  onPin?: (pin: 'a' | 'b' | 'threshold', value: number) => void;
+  activePin: "a" | "b";
+  onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
   onHover?: (x: number | null) => void;
   onViewChange?: () => void;
 }

@@ -81,14 +81,14 @@ export interface ViewConfig {
   advanced: Record<string, unknown>;
 }
 export const palette = [
-  "#76d5ff",
-  "#b5a1ff",
-  "#ffc77a",
-  "#7ee3ba",
-  "#fa97b1",
-  "#d9df86",
-  "#76a6ff",
-  "#e7a4ff",
+  "#2563eb",
+  "#9333ea",
+  "#d97706",
+  "#059669",
+  "#dc2626",
+  "#0891b2",
+  "#475569",
+  "#db2777",
 ];
 export function defaults(): ViewConfig {
   return {

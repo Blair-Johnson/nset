@@ -1,687 +1,1026 @@
 import "./style.css";
-import { Api, type Experiment, type Run } from "./api";
-import { defaults, styleFor, validateConfig, type ViewConfig } from "./config";
-import { ImagePanel } from "./images";
+import { Api, type Run } from "./api";
+import { element, message, isAbort } from "./utils";
+import { fetchCatalog, MetricStore } from "./catalog";
 import {
-  analyze,
-  initialPins,
-  PlotPanel,
-  type Analyzed,
-  type Pins,
-  type PlotRun,
-} from "./plot";
-import { SettingsPanel } from "./settings";
-import { assertSafe } from "./config";
-import { readLibrary, validateView, type SavedView } from "./views";
+  defaultSections,
+  newChart,
+  newWorkspace,
+  loadLibrary,
+  saveLibrary,
+  exportWorkspace,
+  importWorkspace,
+  validateWorkspace,
+} from "./workspace";
+import type {
+  Catalog,
+  Workspace,
+  WorkspaceLibrary,
+  Section,
+  ChartSpec,
+  CardContext,
+} from "./workspace-types";
+import { ChartCard } from "./cards";
+import { openChartEditor } from "./chart-editor";
 import {
-  download,
-  element,
-  finiteInput,
-  isAbort,
-  Latest,
-  message,
-  numberText,
-} from "./utils";
+  experimentTable,
+  runTable,
+  tableState,
+  showRunDetails,
+} from "./browser-tables";
+
 const app = document.querySelector<HTMLDivElement>("#app")!;
-// Static shell only. All server strings are subsequently assigned with textContent.
-app.innerHTML = `
-<header class="app-header"><div class="brand"><span class="brand-icon">n</span><div><strong>NSET</strong><span>EXPERIMENT WORKBENCH</span></div></div><div class="header-actions"><span class="local-badge">● LOCAL-FIRST</span><button id="refresh">Refresh snapshots</button><button id="logout">Disconnect</button></div></header>
-<div id="global-error" class="global-error" role="alert" hidden></div>
-<div class="workspace"><aside class="sidebar"><div class="section-head"><h2>Experiments</h2><span class="eyebrow">BROWSER</span></div><label class="field"><span>Experiment</span><select id="experiments" aria-label="Experiment"></select></label><label class="field"><span>Find runs</span><input id="search" type="search" placeholder="Name, parameter, tag…"></label><div class="run-filters"><select id="status" aria-label="Run status"><option value="">All statuses</option><option>running</option><option>finished</option><option>failed</option></select><button id="select-all" title="Select filtered runs">Select visible</button><button id="clear-runs">Clear</button></div><div class="section-head"><h3>Runs</h3><span id="selection-count" class="muted">0 selected</span></div><div id="run-list" class="run-list"></div><div class="sidebar-foot">Full observations. No hidden sampling.<br>Names and parameters rendered as text.</div></aside>
-<main class="main"><div class="workspace-title"><div><div class="eyebrow">COMPARE / INSPECT / UNDERSTAND</div><h1 id="workspace-name">Experiment workbench</h1></div><span id="connection" class="connection">Disconnected</span></div>
-<div class="toolbar metric-toolbar"><label class="field metric-field"><span>METRIC</span><select id="metric" aria-label="Metric"></select></label><label class="field"><span>X AXIS</span><select id="axis"><option value="step">Step</option><option value="timestamp">Time (UTC)</option></select></label><label class="field"><span>INTERPOLATION</span><select id="interpolation"><option value="linear">Linear</option><option value="pchip">PCHIP · monotone</option></select></label><label class="toggle-field"><input id="smoothing" type="checkbox"> EMA</label><label class="field alpha-field"><span>ALPHA / OBS.</span><input id="alpha" type="number" step="any" min="0" max="1" value="0.2"></label><span id="transform-label" class="badge">RAW-DERIVED</span></div>
-<div class="tabs" role="tablist" aria-label="Workbench view"><button class="active" data-tab="metrics" role="tab" aria-selected="true">Timeseries</button><button data-tab="images" role="tab" aria-selected="false">Images</button><button data-tab="settings" role="tab" aria-selected="false">Plot configuration</button><button data-tab="metadata" role="tab" aria-selected="false">Run metadata</button></div>
-<section id="metrics-pane" class="tab-pane"><div class="plot-card"><div class="plot-heading"><div><h2 id="plot-title">Select runs and a metric</h2><div id="load-status" class="muted" aria-live="polite">Connect to your tracker to begin.</div></div><button id="reset-zoom">Reset zoom</button></div><div id="plot-warning" class="warning" hidden></div><div id="plot-scroll"><div id="plot"></div></div><div id="plot-empty" class="empty-state"><div class="empty-icon">⌁</div><h2>Your observations, unabridged.</h2><p>Select runs from the browser to compare full-resolution series.<br>Pin A and B, then inspect exact interpolated values and every threshold crossing.</p></div><div class="plot-foot"><span id="data-note">No metric loaded</span><span>Drag to zoom · click to pin · reset to configured ranges</span></div></div>
-<div class="inspector"><div class="inspector-controls"><div><div class="eyebrow">NUMERICAL INSPECTOR</div><h2>Pinned comparison</h2></div><label class="field"><span>ACTIVE PIN</span><select id="active-pin"><option value="a">A · cyan</option><option value="b">B · violet</option></select></label><label class="field"><span>CURSOR A · X</span><input id="pin-a" type="number" step="any" placeholder="Unset"></label><label class="field"><span>CURSOR B · X</span><input id="pin-b" type="number" step="any" placeholder="Unset"></label><label class="field"><span>THRESHOLD · Y</span><input id="threshold" type="number" step="any" placeholder="Enter threshold"></label></div><div id="readout" class="table-scroll"></div><div class="crossing-head"><h3>All threshold intersections</h3><span class="muted">Full transformed series · not limited to viewport</span></div><div id="crossings" class="table-scroll"></div></div></section>
-<section id="images-pane" class="tab-pane" hidden></section><section id="settings-pane" class="tab-pane" hidden></section><section id="metadata-pane" class="tab-pane" hidden></section>
-<div class="view-bar"><div><strong>Saved views</strong><span class="muted">Local settings, never credentials</span></div><input id="view-name" placeholder="View name" aria-label="Saved view name"><button id="save-view">Save</button><select id="saved-views" aria-label="Saved views"><option value="">Choose a view…</option></select><button id="load-view">Load</button><button id="delete-view">Delete</button><button id="export-view">Export JSON</button><label class="button">Import JSON<input id="import-view" type="file" accept=".json,application/json" hidden></label></div>
-</main></div>
-<dialog id="login-dialog"><form id="login-form"><div class="brand"><span class="brand-icon">n</span><strong>NSET / CONNECT</strong></div><h1>A clear view of your experiments.</h1><p>Enter this server’s bearer token. It stays in this tab’s session storage and is never added to a URL or exported view.</p><label class="field"><span>Access token</span><input id="token" type="password" autocomplete="off" required spellcheck="false"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect to tracker →</button><p class="hint">Remote connection? Use HTTPS or an SSH tunnel.</p></form></dialog>`;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
-let token = "";
-try {
-  token = sessionStorage.getItem("nset.token") ?? "";
-} catch {}
+app.innerHTML = `<header class="app-header"><a class="brand" href="#/experiments"><img src="/favicon.svg" alt="" width="24" height="24">NSET</a><a class="top-nav" href="#/experiments">Experiments</a><div class="header-spacer"></div><span id="connection" class="connection">Disconnected</span><button id="refresh" title="Refresh runs and charts">Refresh</button><button id="logout">Disconnect</button></header><main id="main"><div id="global-error" class="alert" role="alert" hidden></div><div id="page"></div></main><dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="connect-form"><h2 id="login-title">Connect to your tracker</h2><label>Access token<input id="token" name="token" type="password" required autocomplete="off"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>`;
+let token = sessionStorage.getItem("nset.token") ?? "";
 const api = new Api(() => token);
-let config = defaults();
-let experiments: Experiment[] = [];
-let runs: Run[] = [];
-let selected = new Set<string>();
-let raw: PlotRun[] = [];
-let derived: Analyzed[] = [];
-let pins: Pins = { a: null, b: null, threshold: null };
-let loadedKey = "";
-let snapshotsReady = false;
-let library: Record<string, SavedView> = {};
-let pendingView: SavedView | undefined;
-const connectionGeneration = new Latest();
-let connectionAbort: AbortController | undefined;
-const loadGeneration = new Latest();
-const browseGeneration = new Latest();
-let loadAbort: AbortController | undefined,
-  browseAbort: AbortController | undefined;
+const store = new MetricStore(api);
+let catalog: Catalog = { experiments: [], runs: [], series: [] };
+let library: WorkspaceLibrary = {
+  version: 2,
+  views: [],
+  activeByExperiment: {},
+};
+let catalogGeneration = 0;
+let request: AbortController | undefined;
+let connected = false;
+let currentWorkspaceId = "";
+let chartSearch = "";
+let activeEditor: { close: () => void } | undefined;
+const experimentState = tableState();
+const runStates = new Map<string, ReturnType<typeof tableState>>();
+const undo = new Map<string, Workspace[]>();
+const cards = new Map<
+  string,
+  { view: ChartCard; host: HTMLElement; spec: string; context: string }
+>();
+const sectionNodes = new Map<string, HTMLElement>();
+const scrollPositions = new Map<string, number>();
+let previousRoute = "";
+const button = (label: string, fn: () => void, className = "") => {
+  const b = element("button", className, label);
+  b.type = "button";
+  b.onclick = fn;
+  return b;
+};
 function error(text = "") {
   $("global-error").textContent = text;
   $("global-error").hidden = !text;
 }
 function persist() {
   try {
-    localStorage.setItem("nset.config", JSON.stringify(config));
+    saveLibrary(library);
   } catch (e) {
-    error(`Settings are active but could not be saved locally: ${message(e)}`);
+    error(`Could not save this view in your browser: ${message(e)}`);
   }
 }
-try {
-  const stored = localStorage.getItem("nset.config");
-  if (stored) config = validateConfig(JSON.parse(stored));
-  library = readLibrary(localStorage);
-} catch (e) {
-  error(`Stored settings were not loaded: ${message(e)}`);
+function disposeCards() {
+  for (const card of cards.values()) card.view.destroy();
+  cards.clear();
+  sectionNodes.clear();
+  currentWorkspaceId = "";
 }
-const plot = new PlotPanel(
-  $("plot"),
-  (x) => {
-    pins[$<HTMLSelectElement>("active-pin").value as "a" | "b"] = x;
-    syncPins();
-    renderReadouts();
-    plot.setPins(pins);
-  },
-  (warnings) => {
-    $("plot-warning").replaceChildren(
-      ...warnings.map((w) => element("div", "", w)),
-    );
-    $("plot-warning").hidden = !warnings.length;
-  },
-);
-const images = new ImagePanel($("images-pane"), api);
-const settings = new SettingsPanel($("settings-pane"), (next) =>
-  applyConfig(next),
-);
-function selectedRuns() {
-  return runs.filter((run) => selected.has(run.id));
-}
-function syncControls() {
-  $<HTMLSelectElement>("axis").value = config.axis;
-  $<HTMLSelectElement>("interpolation").value = config.interpolation;
-  $<HTMLInputElement>("smoothing").checked = config.smoothing;
-  $<HTMLInputElement>("alpha").value = String(config.alpha);
-  $("transform-label").textContent = config.smoothing
-    ? `EMA · α ${config.alpha}`
-    : "RAW-DERIVED";
-}
-function syncPins() {
-  $<HTMLInputElement>("pin-a").value = pins.a === null ? "" : String(pins.a);
-  $<HTMLInputElement>("pin-b").value = pins.b === null ? "" : String(pins.b);
-  $<HTMLInputElement>("threshold").value =
-    pins.threshold === null ? "" : String(pins.threshold);
-}
-function applyConfig(next: ViewConfig) {
-  try {
-    const candidate = validateConfig(next);
-    const nextPins =
-      config.axis !== candidate.axis
-        ? { a: null, b: null, threshold: pins.threshold }
-        : { ...pins };
-    renderCandidate(candidate, nextPins);
-    error();
-    persist();
-    syncControls();
-    settings.render(config, selectedRuns());
-  } catch (e) {
-    syncControls();
-    error(`Plot settings were not applied: ${message(e)}`);
-  }
-}
-function invalidate() {
-  loadGeneration.next();
-  loadAbort?.abort();
-  raw = [];
-  derived = [];
-  snapshotsReady = false;
-  plot.clear();
-  $("plot-empty").hidden = false;
-  $("plot-warning").hidden = true;
-  $("data-note").textContent = "No authoritative snapshot loaded";
-  $("load-status").textContent = "No authoritative snapshot loaded";
-  renderReadouts();
-}
-function renderAnalysis() {
-  renderCandidate(config, { ...pins });
-}
-function renderCandidate(nextConfig: ViewConfig, nextPins: Pins) {
-  if (!snapshotsReady) {
-    plot.clear();
-    config = nextConfig;
-    pins = nextPins;
-    return;
-  }
-  const nextDerived = analyze(raw, nextConfig);
-  if (nextPins.a === null && nextPins.b === null) {
-    const initial = initialPins(nextDerived);
-    nextPins.a = initial.a;
-    nextPins.b = initial.b;
-  }
-  // PlotPanel stages its canvas; commit application state only after it succeeds.
-  plot.render(nextDerived, nextConfig, nextPins);
-  config = nextConfig;
-  derived = nextDerived;
-  pins = nextPins;
-  syncPins();
-  const observations = raw.reduce((n, r) => n + r.raw.length, 0);
-  const canonical = derived.reduce((n, r) => n + r.points.length, 0);
-  $("plot-empty").hidden = canonical > 0;
-  $("data-note").textContent =
-    `${observations.toLocaleString()} observations · ${canonical.toLocaleString()} canonical x values · ${config.smoothing ? "EMA → " : ""}${config.interpolation} · no extrapolation`;
-  $("plot-title").textContent = loadedKey || "No metric selected";
-  renderReadouts();
-}
-function table(headers: string[]) {
-  const t = element("table");
-  const head = element("thead");
-  const tr = element("tr");
-  for (const title of headers) tr.append(element("th", "", title));
-  head.append(tr);
-  const body = element("tbody");
-  t.append(head, body);
-  return { t, body };
-}
-function renderReadouts() {
-  const { t, body } = table([
-    "Run / numerical curve",
-    "Observations → unique x",
-    "A · y",
-    "B · y",
-    "Δ y (B − A)",
-    "Δ x",
-  ]);
-  derived.forEach((d, i) => {
-    const row = element("tr");
-    const label = element("td");
-    const swatch = element("span", "swatch");
-    swatch.style.background = styleFor(config, d.run.id, i).color;
-    label.append(
-      swatch,
-      document.createTextNode(
-        `${d.run.name} · ${config.smoothing ? "EMA" : "raw-derived"} ${config.interpolation}`,
-      ),
-    );
-    const a = pins.a === null ? null : d.fn.at(pins.a),
-      b = pins.b === null ? null : d.fn.at(pins.b);
-    row.append(
-      label,
-      element("td", "mono", `${d.count} → ${d.points.length}`),
-      element("td", "mono", numberText(a)),
-      element("td", "mono", numberText(b)),
-      element(
-        "td",
-        "mono",
-        numberText(a === null || b === null ? null : b - a),
-      ),
-      element(
-        "td",
-        "mono",
-        numberText(pins.a === null || pins.b === null ? null : pins.b - pins.a),
-      ),
-    );
-    body.append(row);
-  });
-  $("readout").replaceChildren(t);
-  if (!derived.length)
-    $("readout").append(
-      element(
-        "p",
-        "table-empty",
-        "Complete metric snapshots are required before values become authoritative.",
-      ),
-    );
-  const crossing = table([
-    "Run",
-    "Isolated crossings · x",
-    "Plateau intervals · [x start, x end]",
-  ]);
-  for (const d of derived) {
-    const row = element("tr");
-    row.append(element("td", "", d.run.name));
-    const result =
-      pins.threshold === null ? null : d.fn.crossings(pins.threshold);
-    row.append(
-      element(
-        "td",
-        "mono wrap",
-        result
-          ? result.points.map(numberText).join(", ") || "None"
-          : "Set a threshold",
-      ),
-      element(
-        "td",
-        "mono wrap",
-        result
-          ? result.plateaus
-              .map(([a, b]) => `[${numberText(a)}, ${numberText(b)}]`)
-              .join("; ") || "None"
-          : "—",
-      ),
-    );
-    crossing.body.append(row);
-  }
-  $("crossings").replaceChildren(crossing.t);
-}
-function renderRuns() {
-  const query = $<HTMLInputElement>("search").value.toLowerCase(),
-    status = $<HTMLSelectElement>("status").value;
-  const visible = runs.filter(
-    (run) =>
-      (!status || run.status === status) &&
-      `${run.name} ${JSON.stringify(run.params)} ${JSON.stringify(run.tags)}`
-        .toLowerCase()
-        .includes(query),
-  );
-  $("run-list").replaceChildren();
-  for (const run of visible) {
-    const card = element(
-      "label",
-      `run-card ${selected.has(run.id) ? "selected" : ""}`,
-    );
-    const checkbox = element("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = selected.has(run.id);
-    checkbox.setAttribute("aria-label", `Compare ${run.name}`);
-    checkbox.onchange = () => {
-      if (checkbox.checked) selected.add(run.id);
-      else selected.delete(run.id);
-      renderRuns();
-      void selectionChanged();
-    };
-    const content = element("div", "run-content");
-    const title = element("div", "run-title", run.name);
-    const state = element("span", `status ${run.status}`, run.status);
-    const meta = element("div", "run-meta");
-    meta.append(
-      state,
-      document.createTextNode(new Date(run.created_at).toLocaleDateString()),
-    );
-    const params = element(
-      "div",
-      "run-params",
-      Object.entries(run.params)
-        .map(
-          ([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`,
-        )
-        .join(" · ") || "No parameters",
-    );
-    params.title = params.textContent ?? "";
-    content.append(title, meta, params);
-    card.append(checkbox, content);
-    $("run-list").append(card);
-  }
-  if (!visible.length)
-    $("run-list").append(element("p", "empty-list", "No matching runs."));
-  $("selection-count").textContent =
-    `${selected.size} selected / ${runs.length}`;
-  $("select-all").onclick = () => {
-    for (const run of visible) selected.add(run.id);
-    renderRuns();
-    void selectionChanged();
-  };
-}
-function renderMetadata() {
-  $("metadata-pane").replaceChildren();
-  for (const run of selectedRuns()) {
-    const box = element("article", "metadata-card");
-    box.append(
-      element("h2", "", run.name),
-      element("p", "muted", `${run.status} · ${run.id}`),
-      element("h3", "", "Parameters"),
-      element("pre", "", JSON.stringify(run.params, null, 2)),
-      element("h3", "", "Tags"),
-      element("pre", "", JSON.stringify(run.tags, null, 2)),
-    );
-    $("metadata-pane").append(box);
-  }
-  if (!selected.size)
-    $("metadata-pane").append(
-      element(
-        "p",
-        "empty-list",
-        "Select runs to inspect their parameters and tags.",
-      ),
-    );
-}
-async function selectionChanged() {
-  invalidate();
-  images.setRuns(selectedRuns());
-  settings.render(config, selectedRuns());
-  renderMetadata();
-  const generation = loadGeneration.next();
-  loadAbort = new AbortController();
-  const signal = loadAbort.signal;
-  const chosen = selectedRuns();
-  const previous = pendingView?.metric ?? $<HTMLSelectElement>("metric").value;
-  $<HTMLSelectElement>("metric").replaceChildren();
-  if (!chosen.length) {
-    $("load-status").textContent = "Select one or more runs.";
-    return;
-  }
-  $("load-status").textContent = "Loading metric keys…";
-  try {
-    const responses = await Promise.all(
-      chosen.map((run) =>
-        api.json<{ keys: string[] }>(`/runs/${run.id}/metric-keys`, signal),
-      ),
-    );
-    if (!loadGeneration.current(generation)) return;
-    const keys = [...new Set(responses.flatMap((r) => r.keys))].sort();
-    for (const key of keys) {
-      const o = element("option", "", key);
-      o.value = key;
-      $<HTMLSelectElement>("metric").append(o);
-    }
-    if (keys.includes(previous))
-      $<HTMLSelectElement>("metric").value = previous;
-    if (pendingView) {
-      pins = { ...pendingView.pins };
-      syncPins();
-      pendingView = undefined;
-    }
-    await loadMetrics();
-  } catch (e) {
-    if (!isAbort(e) && loadGeneration.current(generation)) {
-      error(message(e));
-      $("load-status").textContent = "Metric keys could not be loaded.";
-    }
-  }
-}
-async function loadMetrics() {
-  invalidate();
-  const generation = loadGeneration.next();
-  loadAbort = new AbortController();
-  const signal = loadAbort.signal;
-  const key = $<HTMLSelectElement>("metric").value;
-  const chosen = selectedRuns();
-  if (!chosen.length || !key) {
-    $("load-status").textContent = "No metric in the current selection.";
-    return;
-  }
-  error();
-  const progress = new Map<string, [number, number]>();
-  $("load-status").textContent = "Capturing full snapshots…";
-  try {
-    const data = await Promise.all(
-      chosen.map(async (run) => ({
-        run,
-        raw: await api.metrics(run.id, key, signal, (done, total) => {
-          if (!loadGeneration.current(generation)) return;
-          progress.set(run.id, [done, total]);
-          let loaded = 0,
-            expected = 0;
-          for (const [n, t] of progress.values()) {
-            loaded += n;
-            expected += t;
-          }
-          $("load-status").textContent =
-            `Loading ${loaded.toLocaleString()} / ${expected.toLocaleString()} observations · ${progress.size}/${chosen.length} streams discovered · analysis waits for completion`;
-        }),
-      })),
-    );
-    if (!loadGeneration.current(generation)) return;
-    raw = data;
-    loadedKey = key;
-    snapshotsReady = true;
-    $("load-status").textContent =
-      `Snapshot complete · ${chosen.length} runs · ${new Date().toLocaleTimeString()}`;
-    renderAnalysis();
-  } catch (e) {
-    if (!isAbort(e) && loadGeneration.current(generation)) {
-      loadAbort?.abort();
-      $("load-status").textContent =
-        "Snapshot failed — no partial analysis displayed.";
-      error(message(e));
-    }
-  }
-}
-async function loadRuns(ids: string[] = []) {
-  browseAbort?.abort();
-  browseAbort = new AbortController();
-  const generation = browseGeneration.next();
-  invalidate();
-  runs = [];
-  selected.clear();
-  renderRuns();
-  images.setRuns([]);
-  const experiment = $<HTMLSelectElement>("experiments").value;
-  $("workspace-name").textContent =
-    experiments.find((e) => e.id === experiment)?.name ??
-    "Experiment workbench";
-  if (!experiment) {
-    await selectionChanged();
-    return;
-  }
-  try {
-    const result = await api.json<{ runs: Run[] }>(
-      `/runs?experiment_id=${encodeURIComponent(experiment)}`,
-      browseAbort.signal,
-    );
-    if (!browseGeneration.current(generation)) return;
-    runs = result.runs;
-    selected = new Set(ids.filter((id) => runs.some((r) => r.id === id)));
-    renderRuns();
-    await selectionChanged();
-  } catch (e) {
-    if (!isAbort(e) && browseGeneration.current(generation)) error(message(e));
-  }
-}
-async function connect() {
-  const generation = connectionGeneration.next();
-  connectionAbort?.abort();
-  connectionAbort = new AbortController();
-  const result = await api.json<{ experiments: Experiment[] }>(
-    "/experiments",
-    connectionAbort.signal,
-  );
-  if (!connectionGeneration.current(generation)) return;
-  experiments = result.experiments;
-  const previous =
-    pendingView?.experiment ?? $<HTMLSelectElement>("experiments").value;
-  $<HTMLSelectElement>("experiments").replaceChildren();
-  for (const experiment of experiments) {
-    const option = element("option", "", experiment.name);
-    option.value = experiment.id;
-    $<HTMLSelectElement>("experiments").append(option);
-  }
-  if (experiments.some((e) => e.id === previous))
-    $<HTMLSelectElement>("experiments").value = previous;
-  $("connection").textContent = "Connected";
-  $("connection").classList.add("connected");
-  $("login-dialog").hasAttribute("open") &&
-    $<HTMLDialogElement>("login-dialog").close();
-  await loadRuns(pendingView?.runIds ?? [...selected]);
-}
-function currentView(): SavedView {
+function currentRoute() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/");
   return {
-    format: "nset-view",
-    version: 1,
-    config: structuredClone(config),
-    experiment: $<HTMLSelectElement>("experiments").value,
-    runIds: [...selected],
-    metric: $<HTMLSelectElement>("metric").value,
-    pins: { ...pins },
+    experimentId:
+      parts[0] === "experiments" && parts[1]
+        ? decodeURIComponent(parts[1])
+        : "",
+    view: parts[2] === "charts" ? "charts" : "runs",
   };
 }
-function renderLibrary() {
-  const select = $<HTMLSelectElement>("saved-views");
-  select.replaceChildren(element("option", "", "Choose a view…"));
-  select.options[0].value = "";
-  for (const name of Object.keys(library).sort()) {
-    const option = element("option", "", name);
-    option.value = name;
-    select.append(option);
+function navigate(experimentId = "", view = "runs") {
+  location.hash = experimentId
+    ? `/experiments/${encodeURIComponent(experimentId)}/${view}`
+    : "/experiments";
+}
+function context(workspace: Workspace): CardContext {
+  return { api, catalog, selectedRunIds: workspace.selectedRunIds, store };
+}
+
+function workspaceFor(experimentId: string): Workspace {
+  let workspace = library.views.find(
+    (v) =>
+      v.id === library.activeByExperiment[experimentId] &&
+      v.experimentId === experimentId,
+  );
+  if (!workspace) {
+    workspace = library.views.find((v) => v.experimentId === experimentId);
+  }
+  if (!workspace) {
+    workspace = newWorkspace(experimentId, "Overview", [], catalog);
+    workspace.sections = defaultSections(
+      catalog,
+      catalog.runs
+        .filter((r) => r.experiment_id === experimentId)
+        .map((r) => r.id),
+    );
+    library.views.push(workspace);
+  }
+  library.activeByExperiment[experimentId] = workspace.id;
+  return workspace;
+}
+function remember(workspace: Workspace) {
+  const stack = undo.get(workspace.id) ?? [];
+  stack.push(structuredClone(workspace));
+  if (stack.length > 15) stack.shift();
+  undo.set(workspace.id, stack);
+}
+function change(workspace: Workspace, mutate: () => void) {
+  remember(workspace);
+  mutate();
+  workspace.updatedAt = Date.now();
+  persist();
+  renderCharts(workspace);
+}
+function locate(workspace: Workspace, id: string) {
+  for (const section of workspace.sections) {
+    const index = section.cards.findIndex((c) => c.id === id);
+    if (index >= 0) return { section, index, card: section.cards[index] };
+  }
+  return null;
+}
+function updateSelection(workspace: Workspace, ids: string[]) {
+  workspace.selectedRunIds = [...new Set(ids)];
+  workspace.updatedAt = Date.now();
+  persist();
+  if (currentRoute().view === "charts") renderCharts(workspace);
+}
+function pageHeader(experimentId: string, view: string): HTMLElement {
+  const head = element("div", "page-heading");
+  const experiment = catalog.experiments.find((e) => e.id === experimentId);
+  if (!experiment) {
+    head.append(element("h1", "", "Experiments"));
+    return head;
+  }
+  const crumb = element("div", "breadcrumb");
+  crumb.append(
+    button("Experiments", () => navigate(), "text-link"),
+    element("span", "", "/"),
+    element("span", "", experiment.name),
+  );
+  head.append(crumb, element("h1", "", experiment.name));
+  const tabs = element("nav", "view-tabs");
+  tabs.setAttribute("aria-label", "Experiment views");
+  for (const [key, label] of [
+    ["runs", "Runs"],
+    ["charts", "Charts"],
+  ]) {
+    const tab = button(label, () => navigate(experimentId, key));
+    tab.classList.toggle("active", view === key);
+    if (view === key) tab.setAttribute("aria-current", "page");
+    tabs.append(tab);
+  }
+  head.append(tabs);
+  return head;
+}
+function renderPage() {
+  if (!connected) return;
+  activeEditor?.close();
+  activeEditor = undefined;
+  if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
+  const route = currentRoute();
+  const key = location.hash;
+  const routeChanged = key !== previousRoute;
+  previousRoute = key;
+  if (!route.experimentId) {
+    disposeCards();
+    $("page").replaceChildren(
+      pageHeader("", ""),
+      experimentTable(catalog, (id) => navigate(id), experimentState),
+    );
+  } else {
+    const experiment = catalog.experiments.find(
+      (e) => e.id === route.experimentId,
+    );
+    if (!experiment) {
+      disposeCards();
+      $("page").replaceChildren(
+        element("h1", "", "Experiment not found"),
+        button("Back to experiments", () => navigate()),
+      );
+      return;
+    }
+    const workspace = workspaceFor(experiment.id);
+    if (route.view === "runs") {
+      disposeCards();
+      let state = runStates.get(experiment.id);
+      if (!state) {
+        state = tableState();
+        runStates.set(experiment.id, state);
+      }
+      $("page").replaceChildren(
+        pageHeader(experiment.id, "runs"),
+        runTable(
+          catalog,
+          experiment,
+          workspace.selectedRunIds,
+          (ids) => updateSelection(workspace, ids),
+          () => navigate(experiment.id, "charts"),
+          (run) =>
+            showRunDetails(run, () => {
+              updateSelection(workspace, [run.id]);
+              navigate(experiment.id, "charts");
+            }),
+          state,
+        ),
+      );
+    } else {
+      if (currentWorkspaceId !== workspace.id) {
+        disposeCards();
+        $("page").replaceChildren(pageHeader(experiment.id, "charts"));
+        const tools = element("div", "workspace-toolbar");
+        tools.id = "workspace-toolbar";
+        const grid = element("div", "dashboard");
+        grid.id = "dashboard";
+        $("page").append(tools, grid);
+        currentWorkspaceId = workspace.id;
+      }
+      renderCharts(workspace);
+    }
+  }
+  if (routeChanged)
+    requestAnimationFrame(() =>
+      window.scrollTo(0, scrollPositions.get(key) ?? 0),
+    );
+}
+function editCard(workspace: Workspace, card: ChartSpec, add = false) {
+  activeEditor?.close();
+  activeEditor = openChartEditor({
+    card: structuredClone(card),
+    catalog,
+    selectedRunIds: workspace.selectedRunIds,
+    api,
+    store,
+    onSave: (next) => {
+      const current = library.views.find((v) => v.id === workspace.id);
+      if (!current) throw new Error("This view is no longer available.");
+      change(current, () => {
+        const found = locate(current, card.id);
+        if (found && !add) found.section.cards[found.index] = next;
+        else {
+          let section = current.sections.find(
+            (s) => s.title === "Custom charts",
+          );
+          if (!section) {
+            section = {
+              id: crypto.randomUUID(),
+              title: "Custom charts",
+              collapsed: false,
+              cards: [],
+            };
+            current.sections.push(section);
+          }
+          section.cards.push(next);
+        }
+      });
+    },
+  });
+}
+function download(workspace: Workspace) {
+  const blob = new Blob([exportWorkspace(workspace)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = element("a");
+  a.href = url;
+  a.download = `${workspace.name.replace(/[^a-z0-9_-]/gi, "-") || "view"}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function ask(
+  title: string,
+  label: string,
+  value = "",
+): Promise<string | null> {
+  const previous = document.activeElement as HTMLElement | null;
+  const dialog = element("dialog", "small-dialog");
+  const form = element("form");
+  const heading = element("h2", "", title);
+  heading.id = `dialog-${crypto.randomUUID()}`;
+  dialog.setAttribute("aria-labelledby", heading.id);
+  const field = element("label", "field");
+  const input = element("input");
+  input.value = value;
+  input.required = true;
+  input.maxLength = 160;
+  field.append(document.createTextNode(label), input);
+  const actions = element("div", "dialog-actions");
+  const cancel = button("Cancel", () => dialog.close());
+  const apply = element("button", "primary", "Save");
+  apply.type = "submit";
+  actions.append(cancel, apply);
+  form.append(heading, field, actions);
+  dialog.append(form);
+  document.body.append(dialog);
+  return new Promise((resolve) => {
+    let result: string | null = null;
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      if (!input.value.trim()) return;
+      result = input.value.trim();
+      dialog.close();
+    };
+    dialog.onclose = () => {
+      dialog.remove();
+      previous?.focus();
+      resolve(result);
+    };
+    dialog.showModal();
+    input.focus();
+    input.select();
+  });
+}
+async function confirmRemoval(
+  title: string,
+  description: string,
+): Promise<boolean> {
+  const previous = document.activeElement as HTMLElement | null;
+  const dialog = element("dialog", "small-dialog");
+  dialog.setAttribute("aria-label", title);
+  const actions = element("div", "dialog-actions");
+  let accepted = false;
+  actions.append(
+    button("Cancel", () => dialog.close()),
+    button(
+      "Remove",
+      () => {
+        accepted = true;
+        dialog.close();
+      },
+      "danger",
+    ),
+  );
+  dialog.append(
+    element("h2", "", title),
+    element("p", "muted", description),
+    actions,
+  );
+  document.body.append(dialog);
+  return new Promise((resolve) => {
+    dialog.onclose = () => {
+      dialog.remove();
+      previous?.focus();
+      resolve(accepted);
+    };
+    dialog.showModal();
+  });
+}
+
+function workspaceToolbar(workspace: Workspace) {
+  const host = $("workspace-toolbar");
+  const openMenus = [
+    ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
+  ].map((d) => d.dataset.menu);
+  const oldQuery =
+    host.querySelector<HTMLInputElement>("[data-role=run-search]")?.value ?? "";
+  host.replaceChildren();
+  const views = element("select");
+  views.id = "view-select";
+  views.setAttribute("aria-label", "Saved view");
+  for (const view of library.views.filter(
+    (v) => v.experimentId === workspace.experimentId,
+  )) {
+    const o = element("option", "", view.name);
+    o.value = view.id;
+    views.append(o);
+  }
+  views.value = workspace.id;
+  views.onchange = () => {
+    scrollPositions.set(workspace.id, window.scrollY);
+    library.activeByExperiment[workspace.experimentId] = views.value;
+    persist();
+    renderPage();
+    requestAnimationFrame(() =>
+      window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
+    );
+  };
+  const chooseRuns = element("details", "menu run-picker");
+  chooseRuns.dataset.menu = "runs";
+  const runSummary = element(
+    "summary",
+    "",
+    `Runs (${workspace.selectedRunIds.length})`,
+  );
+  chooseRuns.append(runSummary);
+  const runMenu = element("div", "menu-popover");
+  const runSearch = element("input");
+  runSearch.type = "search";
+  runSearch.placeholder = "Find runs";
+  runSearch.setAttribute("aria-label", "Find runs");
+  runSearch.dataset.role = "run-search";
+  runSearch.value = oldQuery;
+  const choices = element("div", "run-picker-options");
+  runMenu.append(
+    runSearch,
+    choices,
+    button(
+      "Open run table",
+      () => navigate(workspace.experimentId),
+      "text-link",
+    ),
+  );
+  chooseRuns.append(runMenu);
+  const renderRunChoices = () => {
+    choices.replaceChildren();
+    const matches = catalog.runs.filter(
+      (r) =>
+        r.experiment_id === workspace.experimentId &&
+        r.name.toLowerCase().includes(runSearch.value.toLowerCase()),
+    );
+    for (const run of matches.slice(0, 100)) {
+      const label = element("label", "check-option");
+      const check = element("input");
+      check.type = "checkbox";
+      check.checked = workspace.selectedRunIds.includes(run.id);
+      check.setAttribute("aria-label", `Show ${run.name}`);
+      check.onchange = () =>
+        updateSelection(
+          workspace,
+          check.checked
+            ? [...workspace.selectedRunIds, run.id]
+            : workspace.selectedRunIds.filter((id) => id !== run.id),
+        );
+      label.append(check, document.createTextNode(run.name));
+      choices.append(label);
+    }
+    if (matches.length > 100)
+      choices.append(
+        element(
+          "p",
+          "muted",
+          `Showing 100 of ${matches.length}. Refine your search.`,
+        ),
+      );
+  };
+  runSearch.oninput = renderRunChoices;
+  renderRunChoices();
+  const search = element("input");
+  search.type = "search";
+  search.id = "chart-search";
+  search.placeholder = "Search charts";
+  search.setAttribute("aria-label", "Search charts");
+  search.value = chartSearch;
+  search.oninput = () => {
+    chartSearch = search.value;
+    applyChartFilter(workspace);
+  };
+  const add = element("details", "menu");
+  add.dataset.menu = "add";
+  const addSummary = element("summary", "primary", "Add chart");
+  add.append(addSummary);
+  const addMenu = element("div", "menu-popover");
+  for (const [kind, label] of [
+    ["timeseries", "Line chart"],
+    ["image", "Image panel"],
+  ] as const)
+    addMenu.append(
+      button(label, () => {
+        add.open = false;
+        editCard(
+          workspace,
+          newChart(kind, [], kind === "timeseries" ? "New chart" : "Images"),
+          true,
+        );
+      }),
+    );
+  add.append(addMenu);
+  const more = element("details", "menu");
+  more.dataset.menu = "view";
+  const moreSummary = element("summary", "icon-button", "⋯");
+  moreSummary.setAttribute("aria-label", "View actions");
+  more.append(moreSummary);
+  const menu = element("div", "menu-popover");
+  const action = (label: string, fn: () => void) =>
+    menu.append(
+      button(label, () => {
+        more.open = false;
+        fn();
+      }),
+    );
+  action(
+    "Save as…",
+    () =>
+      void (async () => {
+        const name = await ask(
+          "Save view as",
+          "View name",
+          `${workspace.name} copy`,
+        );
+        if (!name) return;
+        if (
+          library.views.some(
+            (v) => v.experimentId === workspace.experimentId && v.name === name,
+          )
+        ) {
+          error("A view with that name already exists.");
+          return;
+        }
+        const copy = structuredClone(workspace);
+        copy.id = crypto.randomUUID();
+        copy.name = name;
+        copy.updatedAt = Date.now();
+        library.views.push(copy);
+        library.activeByExperiment[copy.experimentId] = copy.id;
+        persist();
+        renderPage();
+      })(),
+  );
+  action(
+    "Rename view",
+    () =>
+      void (async () => {
+        const name = await ask("Rename view", "View name", workspace.name);
+        if (name) {
+          change(workspace, () => {
+            workspace.name = name;
+          });
+        }
+      })(),
+  );
+  action(
+    "Add section",
+    () =>
+      void (async () => {
+        const title = await ask("Add section", "Section name");
+        if (title)
+          change(workspace, () =>
+            workspace.sections.push({
+              id: crypto.randomUUID(),
+              title,
+              collapsed: false,
+              cards: [],
+            }),
+          );
+      })(),
+  );
+  action("Expand all sections", () =>
+    change(workspace, () =>
+      workspace.sections.forEach((s) => (s.collapsed = false)),
+    ),
+  );
+  action("Collapse all sections", () =>
+    change(workspace, () =>
+      workspace.sections.forEach((s) => (s.collapsed = true)),
+    ),
+  );
+  action("Export view", () => download(workspace));
+  const file = element("input");
+  file.type = "file";
+  file.accept = "application/json,.json";
+  file.hidden = true;
+  file.setAttribute("aria-label", "Import view file");
+  file.onchange = async () => {
+    try {
+      const selected = file.files?.[0];
+      if (!selected) return;
+      if (selected.size > 2_000_000) throw new Error("View file is too large.");
+      const imported = importWorkspace(await selected.text());
+      if (!catalog.experiments.some((e) => e.id === imported.experimentId))
+        throw new Error(
+          "This view belongs to an experiment that is not on this server.",
+        );
+      imported.id = crypto.randomUUID();
+      library.views.push(imported);
+      library.activeByExperiment[imported.experimentId] = imported.id;
+      persist();
+      if (currentRoute().experimentId === imported.experimentId) {
+        renderPage();
+      } else navigate(imported.experimentId, "charts");
+    } catch (e) {
+      error(message(e));
+    } finally {
+      file.value = "";
+    }
+  };
+  action("Import view…", () => file.click());
+  action("Add missing metric charts", () =>
+    change(workspace, () => {
+      const generated = defaultSections(catalog, workspace.selectedRunIds);
+      const existing = new Set(
+        workspace.sections.flatMap((s) =>
+          s.cards.map(
+            (c) =>
+              `${c.kind}:${c.source.mode === "selected" ? c.source.keys.join("|") : c.id}`,
+          ),
+        ),
+      );
+      for (const s of generated) {
+        const missing = s.cards.filter(
+          (c) =>
+            !existing.has(
+              `${c.kind}:${c.source.mode === "selected" ? c.source.keys.join("|") : c.id}`,
+            ),
+        );
+        if (!missing.length) continue;
+        const target = workspace.sections.find((x) => x.title === s.title);
+        if (target) target.cards.push(...missing);
+        else workspace.sections.push({ ...s, cards: missing });
+      }
+    }),
+  );
+  action(
+    "Remove view",
+    () =>
+      void (async () => {
+        if (
+          !(await confirmRemoval(
+            "Remove view?",
+            `Remove “${workspace.name}”? Experiment data will not be deleted.`,
+          ))
+        )
+          return;
+        library.views = library.views.filter((v) => v.id !== workspace.id);
+        delete library.activeByExperiment[workspace.experimentId];
+        persist();
+        renderPage();
+      })(),
+  );
+  more.append(menu, file);
+  const undoButton = button("Undo", () => {
+    const previous = undo.get(workspace.id)?.pop();
+    if (previous) {
+      Object.assign(workspace, previous);
+      persist();
+      renderCharts(workspace);
+    }
+  });
+  undoButton.disabled = !undo.get(workspace.id)?.length;
+  undoButton.title = "Undo the last view edit";
+  host.append(views, chooseRuns, search, undoButton, add, more);
+  for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
+    if (openMenus.includes(d.dataset.menu)) d.open = true;
+}
+
+function renderCharts(workspace: Workspace) {
+  if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
+    return;
+  workspaceToolbar(workspace);
+  const dashboard = $("dashboard");
+  const keep = new Set<string>();
+  const contextKey = `${catalogGeneration}:${workspace.selectedRunIds.join(",")}`;
+  for (const section of workspace.sections) {
+    let node = sectionNodes.get(section.id);
+    if (!node) {
+      node = element("section", "chart-section");
+      node.dataset.sectionId = section.id;
+      const header = element("div", "section-heading");
+      const body = element("div", "chart-grid");
+      body.dataset.role = "section-cards";
+      node.append(header, body);
+      sectionNodes.set(section.id, node);
+    }
+    const header = node.querySelector<HTMLElement>(".section-heading")!;
+    header.replaceChildren();
+    const toggle = button(
+      `${section.collapsed ? "▸" : "▾"} ${section.title}`,
+      () => {
+        section.collapsed = !section.collapsed;
+        workspace.updatedAt = Date.now();
+        persist();
+        renderCharts(workspace);
+      },
+      "section-toggle",
+    );
+    toggle.setAttribute("aria-expanded", String(!section.collapsed));
+    header.append(
+      toggle,
+      element("span", "section-count", String(section.cards.length)),
+    );
+    const menu = element("details", "menu section-menu");
+    const summary = element("summary", "icon-button", "⋯");
+    summary.setAttribute("aria-label", `${section.title} section actions`);
+    const actions = element("div", "menu-popover");
+    actions.append(
+      button(
+        "Rename section",
+        () =>
+          void (async () => {
+            menu.open = false;
+            const title = await ask(
+              "Rename section",
+              "Section name",
+              section.title,
+            );
+            if (title) change(workspace, () => (section.title = title));
+          })(),
+      ),
+      button("Move section up", () => {
+        const index = workspace.sections.indexOf(section);
+        if (index > 0)
+          change(workspace, () => {
+            workspace.sections.splice(index, 1);
+            workspace.sections.splice(index - 1, 0, section);
+          });
+      }),
+      button("Move section down", () => {
+        const index = workspace.sections.indexOf(section);
+        if (index < workspace.sections.length - 1)
+          change(workspace, () => {
+            workspace.sections.splice(index, 1);
+            workspace.sections.splice(index + 1, 0, section);
+          });
+      }),
+      button(
+        "Remove section",
+        () =>
+          void (async () => {
+            menu.open = false;
+            if (
+              await confirmRemoval(
+                "Remove section?",
+                `Remove “${section.title}” and its ${section.cards.length} charts? Logged data is not deleted.`,
+              )
+            )
+              change(workspace, () => {
+                workspace.sections = workspace.sections.filter(
+                  (s) => s.id !== section.id,
+                );
+              });
+          })(),
+      ),
+    );
+    menu.append(summary, actions);
+    header.append(menu);
+    const grid = node.querySelector<HTMLElement>("[data-role=section-cards]")!;
+    grid.hidden = section.collapsed;
+    grid.ondragover = (e) => {
+      if (e.dataTransfer?.types.includes("application/x-nset-card")) {
+        e.preventDefault();
+        grid.classList.add("drop-target");
+      }
+    };
+    grid.ondragleave = () => grid.classList.remove("drop-target");
+    grid.ondrop = (e) => {
+      e.preventDefault();
+      grid.classList.remove("drop-target");
+      const id = e.dataTransfer?.getData("application/x-nset-card");
+      const found = id ? locate(workspace, id) : null;
+      if (found && found.section !== section)
+        change(workspace, () => {
+          found.section.cards.splice(found.index, 1);
+          section.cards.push(found.card);
+        });
+    };
+    for (const spec of section.cards) {
+      keep.add(spec.id);
+      let entry = cards.get(spec.id);
+      const serialized = JSON.stringify(spec);
+      if (!entry) {
+        const host = element("article", "dashboard-cell");
+        host.dataset.cardId = spec.id;
+        host.dataset.cardKind = spec.kind;
+        host.setAttribute("aria-label", spec.title);
+        const view = new ChartCard(host, spec, context(workspace), {
+          onEdit: (id) => {
+            const found = locate(workspace, id);
+            if (found) editCard(workspace, found.card);
+          },
+          onRemove: (id) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (found) found.section.cards.splice(found.index, 1);
+            }),
+          onDuplicate: (id) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (found) {
+                const copy = structuredClone(found.card);
+                copy.id = crypto.randomUUID();
+                copy.title += " copy";
+                found.section.cards.splice(found.index + 1, 0, copy);
+              }
+            }),
+          onMove: (id, delta) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (found) {
+                const next = found.index + delta;
+                if (next >= 0 && next < found.section.cards.length) {
+                  found.section.cards.splice(found.index, 1);
+                  found.section.cards.splice(next, 0, found.card);
+                }
+              }
+            }),
+          onResize: (id, size) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (found) found.card.size = size;
+            }),
+        });
+        entry = { view, host, spec: serialized, context: contextKey };
+        cards.set(spec.id, entry);
+        host.addEventListener("dragstart", (e) => {
+          if (
+            (e.target as HTMLElement).closest(
+              "button,input,select,canvas,.u-over,.image-canvas",
+            )
+          )
+            return;
+          e.dataTransfer?.setData("application/x-nset-card", spec.id);
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+        });
+        const title = host.querySelector<HTMLElement>("h2,h3");
+        if (title) {
+          title.draggable = true;
+          title.title = "Drag to another section";
+        }
+      } else {
+        if (entry.spec !== serialized) {
+          entry.view.setSpec(spec);
+          entry.spec = serialized;
+          entry.host.setAttribute("aria-label", spec.title);
+          entry.host.dataset.cardKind = spec.kind;
+        }
+        if (entry.context !== contextKey) {
+          entry.view.setContext(context(workspace));
+          entry.context = contextKey;
+        }
+      }
+      entry.host.classList.toggle("wide", spec.size === "wide");
+      grid.append(entry.host);
+    }
+    for (const child of [...grid.children]) {
+      const id = (child as HTMLElement).dataset.cardId;
+      if (id && !section.cards.some((c) => c.id === id)) child.remove();
+    }
+    let empty = grid.querySelector(".empty-section");
+    if (!section.cards.length) {
+      if (!empty) {
+        empty = element(
+          "div",
+          "empty-section",
+          "No charts in this section. Drag a chart here to move it.",
+        );
+        grid.append(empty);
+      }
+    } else empty?.remove();
+    dashboard.append(node);
+  }
+  for (const [id, entry] of cards)
+    if (!keep.has(id)) {
+      entry.view.destroy();
+      entry.host.remove();
+      cards.delete(id);
+    }
+  for (const [id, node] of sectionNodes)
+    if (!workspace.sections.some((s) => s.id === id)) {
+      node.remove();
+      sectionNodes.delete(id);
+    }
+  applyChartFilter(workspace);
+}
+function applyChartFilter(workspace: Workspace) {
+  const query = chartSearch.trim().toLowerCase();
+  let visible = 0;
+  for (const section of workspace.sections) {
+    let matches = 0;
+    for (const spec of section.cards) {
+      const entry = cards.get(spec.id);
+      if (!entry) continue;
+      const keys =
+        spec.source.mode === "selected"
+          ? spec.source.keys
+          : spec.source.series.map((s) => s.key);
+      const match =
+        (!query ||
+          `${section.title} ${spec.title} ${keys.join(" ")}`
+            .toLowerCase()
+            .includes(query)) &&
+        (spec.source.mode === "explicit" ||
+          workspace.selectedRunIds.length > 0);
+      entry.host.hidden = !match;
+      entry.view.setActive(match && !section.collapsed);
+      if (match) matches++;
+    }
+    const node = sectionNodes.get(section.id);
+    if (node) node.hidden = section.cards.length > 0 && !matches;
+    visible += matches;
+  }
+  let empty = $("dashboard").querySelector<HTMLElement>(".dashboard-empty");
+  if (!visible) {
+    if (!empty) {
+      empty = element("div", "dashboard-empty");
+      $("dashboard").append(empty);
+    }
+    empty.replaceChildren(
+      element(
+        "h2",
+        "",
+        workspace.selectedRunIds.length
+          ? "No charts to show"
+          : "Select runs to get started",
+      ),
+      element(
+        "p",
+        "muted",
+        query
+          ? "Try another chart name."
+          : workspace.selectedRunIds.length
+            ? "Add a chart, or add missing metric charts from View actions."
+            : "Choose runs above or open the run table.",
+      ),
+      button("Open run table", () => navigate(workspace.experimentId)),
+    );
+  } else empty?.remove();
+}
+
+async function connect(refresh = false) {
+  const generation = ++catalogGeneration;
+  request?.abort();
+  request = new AbortController();
+  const signal = request.signal;
+  const submit = $("login-form").querySelector<HTMLButtonElement>(
+    "button[type=submit]",
+  )!;
+  submit.disabled = true;
+  $<HTMLButtonElement>("refresh").disabled = true;
+  $("login-error").textContent = "";
+  error();
+  try {
+    const next = await fetchCatalog(api, signal);
+    if (generation !== catalogGeneration || signal.aborted) return;
+    store.clear();
+    catalog = next;
+    connected = true;
+    sessionStorage.setItem("nset.token", token);
+    $("connection").textContent = "Connected";
+    $("connection").classList.add("connected");
+    $<HTMLDialogElement>("login-dialog").close();
+    $<HTMLButtonElement>("logout").disabled = false;
+    if (refresh && currentRoute().view === "charts" && currentWorkspaceId) {
+      const workspace = workspaceFor(currentRoute().experimentId);
+      renderCharts(workspace);
+    } else renderPage();
+  } catch (e) {
+    if (isAbort(e) || generation !== catalogGeneration) return;
+    if (connected)
+      error(`Could not refresh. Previous data is still shown. ${message(e)}`);
+    else {
+      $("login-error").textContent = message(e);
+      if (!$<HTMLDialogElement>("login-dialog").open)
+        $<HTMLDialogElement>("login-dialog").showModal();
+    }
+  } finally {
+    if (generation === catalogGeneration) {
+      submit.disabled = false;
+      $<HTMLButtonElement>("refresh").disabled = !connected;
+    }
   }
 }
-function saveLibrary() {
-  localStorage.setItem("nset.views", JSON.stringify(library));
-  renderLibrary();
-}
-async function restore(view: SavedView) {
-  pendingView = validateView(view);
-  config = pendingView.config;
-  persist();
-  syncControls();
-  pins = { ...view.pins };
-  syncPins();
-  if (experiments.some((e) => e.id === view.experiment))
-    $<HTMLSelectElement>("experiments").value = view.experiment;
-  else
-    error(
-      "Saved experiment is unavailable; settings loaded against the current experiment.",
-    );
-  await loadRuns(view.runIds);
-}
-for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]"))
-  button.onclick = () => {
-    const tab = button.dataset.tab;
-    for (const b of document.querySelectorAll<HTMLButtonElement>(
-      "[data-tab]",
-    )) {
-      b.classList.toggle("active", b === button);
-      b.setAttribute("aria-selected", String(b === button));
-    }
-    for (const name of ["metrics", "images", "settings", "metadata"])
-      $(`${name}-pane`).hidden = name !== tab;
-    images.setActive(tab === "images");
-    if (tab === "settings") settings.render(config, selectedRuns());
-  };
-$("login-form").onsubmit = async (e) => {
+$("login-form").onsubmit = (e) => {
   e.preventDefault();
   token = $<HTMLInputElement>("token").value.trim();
-  if (!token) return;
-  try {
-    await connect();
-    sessionStorage.setItem("nset.token", token);
-    $<HTMLInputElement>("token").value = "";
-    $("login-error").textContent = "";
-  } catch (err) {
-    $("login-error").textContent = message(err);
-  }
+  if (token) void connect();
 };
+$("refresh").onclick = () => void connect(true);
 $("logout").onclick = () => {
-  connectionGeneration.next();
-  connectionAbort?.abort();
+  catalogGeneration++;
+  request?.abort();
+  activeEditor?.close();
+  activeEditor = undefined;
+  disposeCards();
+  store.clear();
   token = "";
-  try {
-    sessionStorage.removeItem("nset.token");
-  } catch {}
-  invalidate();
-  browseGeneration.next();
-  browseAbort?.abort();
-  images.clear();
-  selected.clear();
-  runs = [];
-  experiments = [];
-  renderRuns();
-  renderMetadata();
-  $<HTMLSelectElement>("experiments").replaceChildren();
-  $<HTMLSelectElement>("metric").replaceChildren();
+  connected = false;
+  sessionStorage.removeItem("nset.token");
+  catalog = { experiments: [], runs: [], series: [] };
   $("connection").textContent = "Disconnected";
   $("connection").classList.remove("connected");
+  $("page").replaceChildren();
+  error();
+  $<HTMLInputElement>("token").value = "";
+  $<HTMLButtonElement>("refresh").disabled = true;
+  $<HTMLButtonElement>("logout").disabled = true;
   $<HTMLDialogElement>("login-dialog").showModal();
 };
-$("refresh").onclick = () =>
-  void connect()
-    .then(() => images.refresh())
-    .catch((e) => error(message(e)));
-$("experiments").onchange = () => {
-  pendingView = undefined;
-  pins = { a: null, b: null, threshold: null };
-  void loadRuns();
-};
-$("metric").onchange = () => {
-  pins = { a: null, b: null, threshold: pins.threshold };
-  void loadMetrics();
-};
-$("search").oninput = renderRuns;
-$("status").onchange = renderRuns;
-$("clear-runs").onclick = () => {
-  selected.clear();
-  renderRuns();
-  void selectionChanged();
-};
-$("reset-zoom").onclick = () => plot.reset();
-for (const id of ["axis", "interpolation", "smoothing", "alpha"])
-  $(id).onchange = () => {
-    const next = structuredClone(config);
-    next.axis = $<HTMLSelectElement>("axis").value as ViewConfig["axis"];
-    next.interpolation = $<HTMLSelectElement>("interpolation")
-      .value as ViewConfig["interpolation"];
-    next.smoothing = $<HTMLInputElement>("smoothing").checked;
-    next.alpha = Number($<HTMLInputElement>("alpha").value);
-    applyConfig(next);
-  };
-for (const [id, key] of [
-  ["pin-a", "a"],
-  ["pin-b", "b"],
-  ["threshold", "threshold"],
-] as const)
-  $(id).oninput = () => {
-    pins[key] = finiteInput($<HTMLInputElement>(id).value);
-    plot.setPins(pins);
-    renderReadouts();
-  };
-$("save-view").onclick = () => {
+window.addEventListener("hashchange", () => {
   try {
-    const name = $<HTMLInputElement>("view-name").value.trim();
-    if (!name) throw new Error("Enter a name for the saved view.");
-    assertSafe(JSON.parse(`{${JSON.stringify(name)}:null}`));
-    library[name] = currentView();
-    saveLibrary();
-    $<HTMLSelectElement>("saved-views").value = name;
-    error();
+    renderPage();
   } catch (e) {
     error(message(e));
   }
-};
-$("load-view").onclick = () => {
-  const view = library[$<HTMLSelectElement>("saved-views").value];
-  if (view) void restore(view).catch((e) => error(message(e)));
-};
-$("delete-view").onclick = () => {
-  delete library[$<HTMLSelectElement>("saved-views").value];
-  try {
-    saveLibrary();
-  } catch (e) {
-    error(message(e));
-  }
-};
-$("export-view").onclick = () =>
-  download("nset-view.json", JSON.stringify(currentView(), null, 2));
-$("import-view").onchange = async () => {
-  const input = $<HTMLInputElement>("import-view");
-  const file = input.files?.[0];
-  if (!file) return;
-  try {
-    if (file.size > 1024 * 1024)
-      throw new Error("View files are limited to 1 MiB.");
-    await restore(validateView(JSON.parse(await file.text())));
-  } catch (e) {
-    error(`View import rejected: ${message(e)}`);
-  } finally {
-    input.value = "";
-  }
-};
-syncControls();
-syncPins();
-renderLibrary();
-renderReadouts();
-settings.render(config, []);
-if (token)
-  void connect().catch((e) => {
-    $("login-error").textContent = message(e);
-    $<HTMLDialogElement>("login-dialog").showModal();
-  });
-else $<HTMLDialogElement>("login-dialog").showModal();
-window.addEventListener("beforeunload", () => {
-  images.destroy();
-  plot.destroy();
-  loadAbort?.abort();
-  browseAbort?.abort();
 });
+document.addEventListener("click", (event) => {
+  for (const menu of document.querySelectorAll<HTMLDetailsElement>(
+    "details.menu[open]",
+  ))
+    if (!menu.contains(event.target as Node)) menu.open = false;
+});
+window.addEventListener("beforeunload", () => {
+  request?.abort();
+  disposeCards();
+  store.clear();
+});
+try {
+  library = loadLibrary();
+} catch (e) {
+  error(`Saved views could not be loaded: ${message(e)}`);
+}
+if (!location.hash) history.replaceState(null, "", "#/experiments");
+$<HTMLButtonElement>("refresh").disabled = true;
+$<HTMLButtonElement>("logout").disabled = true;
+if (token) void connect();
+else $<HTMLDialogElement>("login-dialog").showModal();
