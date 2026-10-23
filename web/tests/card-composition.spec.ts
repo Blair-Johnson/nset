@@ -702,7 +702,7 @@ test("first cursor results and live pin dragging never resize the canvas or canc
   expect((await geometry(page)).viewport).toEqual(before.viewport);
 });
 
-test("maximized folds retain both canvas dimensions with an allocated scrollbar gutter", async ({
+test("maximized folds retain both canvas dimensions under the browser scrollbar policy", async ({
   page,
 }, info) => {
   await fixture(page);
@@ -714,12 +714,23 @@ test("maximized folds retain both canvas dimensions with an allocated scrollbar 
     .getByRole("button", { name: "Maximize chart", exact: true })
     .click();
   const before = await geometry(page);
-  const gutter = await card.locator(".card-content").evaluate((node) => ({
-    policy: getComputedStyle(node).scrollbarGutter,
-    width: node.getBoundingClientRect().width - node.clientWidth,
-  }));
+  const gutter = await card.locator(".card-content").evaluate((node) => {
+    const probe = document.createElement("div");
+    probe.className = "card-content";
+    probe.style.cssText =
+      "position:fixed;left:-1000px;width:100px;height:100px;padding:0;border:0;overflow:scroll;scrollbar-gutter:stable;";
+    document.body.append(probe);
+    const nativeWidth = probe.getBoundingClientRect().width - probe.clientWidth;
+    probe.remove();
+    return {
+      policy: getComputedStyle(node).scrollbarGutter,
+      width: node.getBoundingClientRect().width - node.clientWidth,
+      nativeWidth,
+    };
+  });
   expect(gutter.policy).toBe("stable");
-  expect(gutter.width).toBeGreaterThanOrEqual(16);
+  expect(gutter.width).toBe(gutter.nativeWidth);
+  console.log(JSON.stringify({ kind: "fullscreen-scrollbar", ...gutter }));
   for (let i = 0; i < 3; i++) {
     await card.getByText("Show legend", { exact: true }).click();
     await card
@@ -729,7 +740,13 @@ test("maximized folds retain both canvas dimensions with an allocated scrollbar 
     expect(open.plot.width).toBe(before.plot.width);
     expect(open.plot.height).toBe(before.plot.height);
     expect(open.viewport).toEqual(before.viewport);
-    await card.getByText("Edit positions", { exact: true }).click();
+    if (
+      !(await card
+        .locator(".card-position-editor")
+        .evaluate((node) => (node as HTMLDetailsElement).open))
+    ) {
+      await card.getByText("Edit positions", { exact: true }).click();
+    }
     await card
       .getByRole("button", { name: "Place vertical cursor A", exact: true })
       .click();

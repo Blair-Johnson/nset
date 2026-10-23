@@ -328,7 +328,10 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
   await first
     .getByRole("button", { name: "Add horizontal cursor", exact: true })
     .click();
-  await first.getByText("Edit positions", { exact: true }).click();
+  await expect(first.locator(".card-position-editor")).toHaveAttribute(
+    "open",
+    "",
+  );
   await first.getByRole("spinbutton", { name: "Cursor A level" }).fill("50000");
   await first.getByRole("spinbutton", { name: "Cursor A level" }).press("Tab");
   await expect(

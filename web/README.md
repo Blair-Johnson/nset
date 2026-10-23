@@ -22,7 +22,9 @@ Axes → X values offers Step, Wall time or Relative time (run start), alongside
 
 Save changes updates only this card; Cancel or Escape discards the draft. Invalid settings keep the editor open. Add chart uses the same editor and finishes with Add chart.
 
-Drag the corner Resize chart handle to change width and height independently; arrow keys also adjust it, with Shift for larger steps. Dimensions persist in the view. Maximize chart fills the available space; Restore chart returns to the saved size. The card menu offers Duplicate, Move up / Move down and Remove. Drag a title between sections; section menus rename, reorder or remove sections. Removing cards or sections never deletes logged data.
+Drag the corner Resize chart handle to change width and height independently; the card stays anchored while dragging, and neighboring cards rearrange only after release. Escape cancels. Arrow keys also resize, with Shift for larger steps. Dimensions persist in the view. Maximize chart fills the available space; Restore chart returns to the saved size. Opening a legend or cursor readout adds space below the plot rather than shrinking its canvas.
+
+The card menu offers Reset view, Duplicate, Move up / Move down and Remove. Reset view fits the configured axes or image camera without changing chart settings or dimensions. Drag a title to reorder cards within or between sections; the insertion marker shows the destination. Section menus rename, reorder or remove sections. Removing cards or sections never deletes logged data.
 
 ## Keep and share views
 
@@ -36,7 +38,9 @@ Left-drag to zoom: a mostly horizontal gesture selects X, a mostly vertical gest
 
 The icon controls have accessible labels: Zoom out (−), Zoom in (+), Fit configured range and Previous view (back). Double-click also fits. With the plot focused, +/− zoom, arrow keys pan, 0 fits and Backspace goes back; shortcuts do not take over text fields.
 
-Hover for interpolated values. Activate Add vertical cursor or Add horizontal cursor once, then click to place A and B. Empty-space dragging still zooms while either cursor is waiting; right-button or Space + left-drag still pans. Drag an existing cursor line to move it or enter an exact coordinate. The primary delta is B − A between cursor positions: steps or a signed duration for vertical cursors, metric values for horizontal cursors. Per-run values, crossings and equal-value intervals remain available as secondary results. Clear cursors removes both pairs. Wall-time coordinates are UTC epoch milliseconds; relative-time coordinates are milliseconds from run creation.
+With the pointer over a plot, press C to cycle vertical cursor placement → horizontal placement → off. A cyan vertical or amber horizontal crosshair previews the orientation you will place; off restores the neutral hover crosshair and keeps existing measurements. The Add vertical cursor and Add horizontal cursor icons are alternatives. Activate once, then click to place A and B. Empty-space dragging still zooms while either cursor is waiting; right-button or Space + left-drag still pans.
+
+Drag an existing cursor line to move it, or expand Edit positions to enter exact coordinates. The primary delta is B − A between cursor positions: steps or a signed duration for vertical cursors, metric values for horizontal cursors. Expand Per-run values / crossings for secondary results, or Show legend for aligned run values at the hover position. Clear cursors in Edit positions removes both pairs. Wall-time coordinates are UTC epoch milliseconds; relative-time coordinates are milliseconds from run creation.
 
 Each comparison uses complete histories. Duplicate coordinates use the latest inserted observation; values between observations are estimates, and out-of-range answers show an em dash rather than extrapolation. Smoothing uses the full ordered history, so moving the viewport does not change answers. Smooth interpolation is shape-preserving. Stepped and other display-only line styles do not change numerical cursor answers. Central 98% displays a clipping notice and Fit all; choose All values in the editor to disable that policy permanently.
 
