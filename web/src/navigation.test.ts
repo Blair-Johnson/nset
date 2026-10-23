@@ -81,3 +81,46 @@ test("no-op nonlinear navigation does not drift or create new history", () => {
     assert.deepEqual(navigateRange([1.23, 99.87], scale), [1.23, 99.87]);
   }
 });
+
+test("inferred axes use 12 CSS pixels of perpendicular tolerance in every direction", async () => {
+  const { inferZoomAxes, AXIS_TOLERANCE } = await import("./navigation");
+  assert.equal(AXIS_TOLERANCE, 12);
+  for (const sx of [-1, 1])
+    for (const sy of [-1, 1]) {
+      for (const perpendicular of [0, 3, 8, 11.99, 12]) {
+        assert.equal(inferZoomAxes(sx * 150, sy * perpendicular), "x");
+        assert.equal(inferZoomAxes(sx * perpendicular, sy * 150), "y");
+      }
+      assert.equal(inferZoomAxes(sx * 150, sy * 12.01), "both");
+      assert.equal(inferZoomAxes(sx * 12.01, sy * 150), "both");
+      assert.equal(inferZoomAxes(sx * 2.99, sy * 2.99), null);
+      assert.equal(inferZoomAxes(sx * 3, sy * 2), "x");
+      assert.equal(inferZoomAxes(sx * 2, sy * 3), "y");
+    }
+  for (const invalid of [NaN, Infinity, -Infinity]) {
+    assert.equal(inferZoomAxes(invalid, 100), null);
+    assert.equal(inferZoomAxes(100, invalid), null);
+  }
+});
+
+test("reversed nonlinear navigation stays affine at arbitrary anchors and round trips", () => {
+  for (const scale of [
+    { distr: 3, dir: -1 },
+    { distr: 4, asinh: 7, dir: -1 },
+  ]) {
+    const initial: [number, number] =
+      scale.distr === 3 ? [0.01, 1000] : [-300, 1000];
+    const [lo, hi] = initial.map((value) => transform(value, scale));
+    const zoom = navigateRange(initial, scale, 3.5, 0, 0.17)!;
+    close(transform(zoom[0], scale), lo + (hi - lo) * 0.17 * (1 - 1 / 3.5));
+    close(
+      transform(zoom[1], scale) - transform(zoom[0], scale),
+      (hi - lo) / 3.5,
+    );
+    const restored = navigateRange(zoom, scale, 1 / 3.5, 0, 0.17)!;
+    restored.forEach((value, i) => close(value, initial[i]));
+    const pan = navigateRange(initial, scale, 1, 0.23)!;
+    const returned = navigateRange(pan, scale, 1, -0.23)!;
+    returned.forEach((value, i) => close(value, initial[i]));
+  }
+});
