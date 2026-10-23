@@ -2,50 +2,47 @@
 
 ## From experiments to Charts
 
-Open **Experiments** and choose an experiment. In **Runs**, search names, parameters or tags, filter by status, and sort columns to find a comparison. The table includes latest metric values. Check runs and open **Charts**; switching between Runs and Charts keeps the current view’s selection. The **Runs** picker in Charts lets you change it in place.
+Open Experiments and choose an experiment. In Runs, search names, parameters or tags, filter by status, and sort columns; the table includes latest metric values. Use checkboxes—not row highlighting—to select runs. Charts keeps that selection and provides a persistent left Runs drawer for changing it in place. Collapse the drawer for more plot space.
 
-The initial **Overview** view mixes line charts and image panels in one grid. Sections use the part of each key before its last slash: `train/loss` and `train/prediction` share `train`, while `train/batch/loss` belongs to `train/batch`. Keys without a slash appear in an Overview section. Collapse sections or search charts to focus on a smaller group. **Refresh** reloads the catalog and chart data; **View actions → Add missing metric charts** adds cards for newly available metric or image keys without replacing your existing cards.
+Click a run name to open its dedicated detail page. The configuration viewer groups dotted keys and nested objects, shows typed values, and searches paths and values. Copy JSON and Export JSON preserve the logged configuration; tags remain separate. This is a viewer for parsed run parameters, not a raw YAML file or artifact browser. Click a color swatch to choose a shared run color across the table, drawer and plots. Run-color overrides are browser-local preferences, separate from saved views and their exports.
 
-## Edit a chart
+The initial Overview view mixes scalar charts and image panels. Sections use the part of each key before its last slash: `train/loss` and `train/prediction` share `train`, while `train/batch/loss` belongs to `train/batch`. Keys without a slash appear in Overview. Collapse sections or search charts to focus the workspace. Refresh reloads the catalog and chart data; View actions → Add missing metric charts adds cards for newly available metric or image keys without replacing existing cards.
 
-Open the card’s **three-dot menu (⋯) → Edit chart**. The dialog shows a live preview next to three groups of controls:
+## Dashboard controls
 
-**Data** names the chart, chooses its plot type (Line, Scatter, Area, Step, or an Image panel), and selects its sources. Scatter draws logged observation markers without connecting paths; interpolation and smoothing remain separate inspection settings. **Follow selected runs** draws the chosen metric or image keys from the current run selection. For a fixed comparison, select **Choose any run and metric** (or **Choose any run and image**) and search across experiments, runs and keys; changing the dashboard’s run selection will not change those sources.
+X axis offers Step, Wall time and Relative time. Wall time uses logged timestamps; Relative time is timestamp minus the run’s `created_at`, in milliseconds—not time since the first observation. Smoothing ranges from None to More, with more smoothing giving new observations less weight.
 
-**Axes** chooses step or time, linear/logarithmic/asinh scales, automatic or manual bounds, labels and number formats. **Y auto range → Central 98%** limits the display, not the data or numerical results. Manual Y bounds take precedence.
+Changing a global control updates that setting in every scalar card’s saved configuration, including cards in collapsed sections. Image panels are unaffected. Mixed per-chart settings display Mixed and are not changed on load. You can override individual charts in the editor until the next global change to that setting. Changing the coordinate system resets coordinate-dependent X bounds and navigation/cursors; a smoothing-only change preserves axis settings.
 
-**Appearance** controls smoothing strength, linear or smooth interpolation, line/point/area/step styles, grid, legend and size. Expand individual-curve settings for colors and visibility. Image panels show the controls relevant to images instead of numeric axes.
+## Edit and arrange charts
 
-Use **Save changes** to update only this card, or **Cancel** / Escape to discard the draft. Invalid settings show errors without closing the editor. **Add chart → Line plot / Scatter plot / Area plot / Step plot / Image panel** opens the same editor; finish with **Add chart**. No hand-written configuration is needed.
+Use ⋯ → Edit chart for a live preview beside Data, Axes and Appearance controls. Data selects Line, Scatter, Area, Step or Image panel and its sources. Follow selected runs tracks the current comparison; Choose any run and metric (or image) fixes sources across experiments. Scatter draws observation markers; interpolation and smoothing remain separate inspection settings.
 
-The card menu also offers **Duplicate**, **Wide / Normal width**, **Move up / Move down** and **Remove**. Drag a card title to move it to another section. Use section menus to rename, reorder or remove sections. Removing cards or sections never deletes logged data. **Maximize** gives either card type more space.
+Axes → X values offers Step, Wall time or Relative time (run start), alongside scales, bounds, labels and formats. Y auto range → Central 98% clips the display, not the numerical results; manual Y bounds take precedence. Appearance includes smoothing, interpolation, styles, grid and an optional compact legend; expand Show legend on the card when enabled. Individual-curve settings control colors and visibility. Image panels show image-specific settings.
+
+Save changes updates only this card; Cancel or Escape discards the draft. Invalid settings keep the editor open. Add chart uses the same editor and finishes with Add chart.
+
+Drag the corner Resize chart handle to change width and height independently; arrow keys also adjust it, with Shift for larger steps. Dimensions persist in the view. Maximize chart fills the available space; Restore chart returns to the saved size. The card menu offers Duplicate, Move up / Move down and Remove. Drag a title between sections; section menus rename, reorder or remove sections. Removing cards or sections never deletes logged data.
 
 ## Keep and share views
 
 A named view remembers the selected runs, sections, card sources and chart settings. Edits save automatically in this browser’s local storage; views are not stored on the tracker server or synchronized between browsers. Switch views with **Saved view**, and use the **View actions (⋯)** menu to **Save as…**, rename, export, import or remove a view. Export before clearing browser storage if you want to keep a copy.
 
-**Export view** downloads a file that **Import view…** can read without manual editing. It contains layout, settings and experiment/run/key references—not tokens, metric histories or image bytes. Import requires the original experiment to exist on the connected server; it does not copy experiments or match runs by name. Unavailable sources chosen for a fixed comparison stay listed as unavailable so you can repair the selection. Temporary zoom positions and A/B/threshold cursors are not saved in these files.
+**Export view** downloads a file that **Import view…** can read without manual editing. It contains layout, settings and experiment/run/key references—not tokens, metric histories, image bytes or shared run-color overrides. Saved-view files are not data backups. Import requires the original experiment to exist on the connected server; it does not copy experiments or match runs by name. Unavailable sources chosen for a fixed comparison stay listed as unavailable so you can repair the selection. Temporary zoom positions and vertical/horizontal A/B cursors are not saved in these files.
 
-## Navigate and inspect a line chart
+## Navigate and inspect a scalar chart
 
-| Action | Control |
-| --- | --- |
-| Move around | **Pan**, then drag; **Space + drag** temporarily pans in other modes. |
-| Zoom into a region | **Zoom**, then drag a box; choose **X**, **Y** or **X + Y**. |
-| Zoom near the pointer | **Alt + wheel**; **Shift + Alt + wheel** zooms X only. Ordinary wheel scrolling moves the page. |
-| Zoom with buttons | **+ / −**. |
-| Restore the configured range | **Fit** or double-click. |
-| Return to the previous range | **Back**. |
+Left-drag to zoom: a mostly horizontal gesture selects X, a mostly vertical gesture selects Y, and a diagonal gesture selects both. Right-button drag or Space + left-drag pans. Hover crosshairs, markers and readouts hide during panning; pinned cursors remain. Alt + wheel zooms near the pointer; Shift + Alt + wheel zooms X only. Ordinary scrolling moves the page.
 
-With the plot focused, **+ / −** zoom, **arrow keys** pan, **0** fits and **Backspace** goes back. These shortcuts do not take over text fields.
+The icon controls have accessible labels: Zoom out (−), Zoom in (+), Fit configured range and Previous view (back). Double-click also fits. With the plot focused, +/− zoom, arrow keys pan, 0 fits and Backspace goes back; shortcuts do not take over text fields.
 
-Hover for interpolated curve values. In **Inspect**, select **A** or **B** and click to place it, drag either vertical line, or enter its coordinate. The table shows each curve’s A/B values and difference. In **Threshold**, click or drag the horizontal line, or enter a value; expand each curve’s result to see every crossing and equal-value interval. **Clear** removes the cursors. On a time axis, numeric cursor coordinates are UTC epoch milliseconds.
+Hover for interpolated values. Add vertical cursor or Add horizontal cursor starts A/B placement; select A or B, click to place it, drag its line, or enter a coordinate. Vertical cursors report each curve’s A/B values and Δ B − A. Horizontal cursors report Δ Y and expandable results containing every crossing and equal-value interval at each level. Clear cursors removes both pairs. Wall-time coordinates are UTC epoch milliseconds; relative-time coordinates are milliseconds from run creation.
 
-Each comparison uses complete histories. Duplicate coordinates use the latest inserted observation; values between observations are estimates, and out-of-range answers show an em dash rather than extrapolation. Smoothing is applied to the full ordered history, so moving the viewport does not change answers. Smooth interpolation is shape-preserving. Optional stepped or other display-only line styles do not change the values reported by Inspect or Threshold. **Central 98%** displays a clipping notice and **Fit all**; choose **All values** in the editor to turn that policy off permanently.
+Each comparison uses complete histories. Duplicate coordinates use the latest inserted observation; values between observations are estimates, and out-of-range answers show an em dash rather than extrapolation. Smoothing uses the full ordered history, so moving the viewport does not change answers. Smooth interpolation is shape-preserving. Stepped and other display-only line styles do not change numerical cursor answers. Central 98% displays a clipping notice and Fit all; choose All values in the editor to disable that policy permanently.
 
 ## Inspect images
 
-Each image panel displays one run/key source at a time; choose a source when the panel has several. Different panels are independent. Drag to pan, use **+/−** or **Alt + wheel** to zoom, and use the timeline, previous/next buttons or playback to move between frames. The caption identifies the actual logged step. Frame changes preserve the camera, so you can inspect the same region across a sequence.
+Each image panel displays one run/key source at a time; choose a source when the panel has several. Different panels are independent. Drag to pan, use **+/−** or **Alt + wheel** to zoom, and use the timeline, previous/next buttons or playback to move between frames. The caption identifies the actual logged step. Frame changes preserve the camera, so you can inspect the same region across a sequence. The current decoded image and its caption remain until the replacement is ready, rather than flashing a Loading frame.
 
 **Fit** resets the view, and **1:1 pixels** shows native pixel size. **More** contains smooth/nearest pixel display, rotation and flip. **Maximize** keeps the image and timeline together. Images are not recompressed or interpolated between steps. Playback waits for frames to load, so its selected rate is a target rather than guaranteed playback speed.
 
@@ -70,6 +67,6 @@ Run the Rust server separately using the root README’s instructions. Vite forw
 
 Full histories consume browser memory; this is not a claim of unlimited scale. Curves use adaptive drawing where needed, with bounded approximation rather than an exact analytic canvas path. Numerical queries use the underlying complete series, not drawing samples. Log scales leave nonpositive values out of the display rather than changing observations. Images use a bounded compressed-byte cache, but decoded images can require more memory; there is no tiled image server.
 
-Custom charts support multiple scalar series, including different metrics from the same run or sources across experiments. The X axis is step or timestamp, not an arbitrary metric; extra axes, expression charts and overlaid image comparisons are not implemented. These workflows do not imply feature parity with MLflow or W&B.
+Custom charts support multiple scalar series, including different metrics from the same run or sources across experiments. The X axis is step, wall time or run-relative time, not an arbitrary metric; extra axes, expression charts and overlaid image comparisons are not implemented. These workflows do not imply feature parity with MLflow or W&B.
 
 Executed checks and current limitations are recorded in `../docs/verification.md`. The browser tests retain failure screenshots and traces in `web/test-results`.
