@@ -197,7 +197,7 @@ export function resolveOptions(
             : config.axis === "relative"
               ? 100
               : 50,
-        size: 64,
+        size: 32,
         labelSize: 20,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },
         ticks: { show: config.ticks, stroke: "#737b84" },

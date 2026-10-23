@@ -29,3 +29,20 @@ test("explicit advanced timestamp formatter and spacing remain configurable", ()
   const values = axis.values as (...args: unknown[]) => string[];
   assert.match(values({}, [1735689600000], 0, 80, 5000)[0], /e\+12/);
 });
+
+test("single-line X tick gutters leave room for data and retain explicit sizing", () => {
+  for (const axis of ["step", "timestamp", "relative"] as const) {
+    const options = resolveOptions({ ...defaults(), axis }, 600, [{}]);
+    assert.equal(options.axes![0].size, 32);
+    assert.equal(options.axes![0].labelSize, 20);
+    assert.equal(options.axes![0].font, "11px ui-monospace, monospace");
+  }
+  const custom = validateConfig({
+    ...defaults(),
+    advanced: { axes: [{ size: 96, labelSize: 40, rotate: 45 }] },
+  });
+  const axis = resolveOptions(custom, 600, [{}]).axes![0];
+  assert.equal(axis.size, 96);
+  assert.equal(axis.labelSize, 40);
+  assert.equal(axis.rotate, 45);
+});
