@@ -1,9 +1,10 @@
 import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
 import { withRunColors } from "./series-colors";
-import { metricAxisLabel } from "./card-label";
+import { loadPlotRuns, metricAxisLabel, xMetricLabel } from "./card-label";
 import {
   applyDashboardControls,
+  resetXAxis,
   strengthToSmoothing,
   smoothingToStrength,
 } from "./dashboard-controls";
@@ -24,8 +25,14 @@ import type {
   MetricLoader,
   ResolvedSeries,
   SeriesRef,
+  XBinding,
 } from "./workspace-types";
-import { resolveSources, seriesId, validateChart } from "./workspace";
+import {
+  cameraAxis,
+  resolveSources,
+  seriesId,
+  validateChart,
+} from "./workspace";
 import type { PlotPanel, PlotRun } from "./plot";
 import type { ImageCamera, ImagePanel } from "./images";
 
@@ -118,11 +125,13 @@ export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
   const saved = card.config[`${axis}Label`];
   if (saved) return saved;
   if (axis === "x")
-    return card.config.axis === "relative"
-      ? "Elapsed time"
-      : card.config.axis === "timestamp"
-        ? "Time"
-        : "Step";
+    return card.kind === "timeseries" && card.x
+      ? xMetricLabel(card.x)
+      : card.config.axis === "relative"
+        ? "Elapsed time"
+        : card.config.axis === "timestamp"
+          ? "Time"
+          : "Step";
   return metricAxisLabel(card.source);
 }
 
@@ -214,6 +223,95 @@ export function editorSourceChoices(
   return [...choices.values()].sort(
     (a, b) => a.detail.localeCompare(b.detail) || a.key.localeCompare(b.key),
   );
+}
+export interface XChoice {
+  value: string;
+  label: string;
+  available: boolean;
+}
+/** X metric choices from catalog metadata only. Key mode lists metric keys
+ * (preferring those logged by the Y traces' runs); series mode lists every
+ * metric series across experiments. A saved but missing choice is kept. */
+export function editorXChoices(
+  card: ChartSpec,
+  catalog: Catalog,
+  selectedRunIds: string[],
+  mode: XBinding["mode"],
+): XChoice[] {
+  const runs = new Map(catalog.runs.map((run) => [run.id, run]));
+  const experiments = new Map(
+    catalog.experiments.map((experiment) => [experiment.id, experiment.name]),
+  );
+  const metrics = catalog.series.filter((series) => series.kind === "metric");
+  if (mode === "key") {
+    const yRuns = new Set(
+      card.source.mode === "selected"
+        ? selectedRunIds
+        : card.source.series.map((ref) => ref.runId),
+    );
+    const counts = new Map<string, number>();
+    for (const series of metrics)
+      if (!yRuns.size || yRuns.has(series.run_id))
+        counts.set(series.key, (counts.get(series.key) ?? 0) + 1);
+    const saved = card.x?.mode === "key" ? card.x.key : undefined;
+    const keys = [...new Set([...counts.keys(), ...(saved ? [saved] : [])])];
+    return keys.sort().map((key) => ({
+      value: key,
+      label: counts.has(key)
+        ? `${key} (${counts.get(key)} run${counts.get(key) === 1 ? "" : "s"})`
+        : `${key} · unavailable`,
+      available: counts.has(key),
+    }));
+  }
+  const choices = new Map<string, XChoice>();
+  const describe = (runId: string, key: string) => {
+    const run = runs.get(runId);
+    return `${experiments.get(run?.experiment_id ?? "") ?? "Unknown experiment"} / ${run?.name ?? runId} · ${key}`;
+  };
+  for (const series of metrics) {
+    const ref: SeriesRef = { runId: series.run_id, key: series.key, kind: "metric" };
+    choices.set(seriesId(ref), {
+      value: seriesId(ref),
+      label: describe(series.run_id, series.key),
+      available: runs.has(series.run_id),
+    });
+  }
+  if (card.x?.mode === "series" && !choices.has(seriesId(card.x.series)))
+    choices.set(seriesId(card.x.series), {
+      value: seriesId(card.x.series),
+      label: `${describe(card.x.series.runId, card.x.series.key)} · unavailable`,
+      available: false,
+    });
+  return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+/** Default X binding when switching to "Another metric": prefer a key all Y
+ * runs share, otherwise the first available series. */
+export function defaultXBinding(
+  card: ChartSpec,
+  catalog: Catalog,
+  selectedRunIds: string[],
+  mode: XBinding["mode"],
+): XBinding | undefined {
+  const choices = editorXChoices(card, catalog, selectedRunIds, mode).filter(
+    (choice) => choice.available,
+  );
+  const yKeys = new Set(
+    card.source.mode === "selected"
+      ? card.source.keys
+      : card.source.series.map((ref) => ref.key),
+  );
+  if (mode === "key") {
+    const key =
+      choices.find((choice) => !yKeys.has(choice.value))?.value ??
+      choices[0]?.value;
+    return key ? { mode: "key", key } : undefined;
+  }
+  const value =
+    choices.find((choice) => !yKeys.has(JSON.parse(choice.value)[2]))?.value ??
+    choices[0]?.value;
+  if (!value) return undefined;
+  const [, runId, key] = JSON.parse(value) as [string, string, string];
+  return { mode: "series", series: { runId, key, kind: "metric" } };
 }
 export function choicePage(
   choices: SourceChoice[],
@@ -575,6 +673,7 @@ export function openChartEditor(options: ChartEditorOptions): {
           clone(draft.source),
         );
         setPlotType(draft, value as PlotType);
+        if (draft.kind === "image") delete draft.x;
         draft.source = clone(
           sourceMemory.get(`${draft.kind}/${draft.source.mode}`) ??
             (draft.source.mode === "selected"
@@ -751,6 +850,7 @@ export function openChartEditor(options: ChartEditorOptions): {
           renderChoices();
           list.scrollTop = scrollTop;
           refreshAxisTitles();
+          if (draft.x?.mode === "key") renderAxes();
           renderAppearance();
           change();
           (
@@ -768,16 +868,96 @@ export function openChartEditor(options: ChartEditorOptions): {
     renderChoices();
   }
 
-  function renderAxes() {
-    const panel = clearPanel("Axes");
-    panel.hidden = draft.kind === "image";
-    if (draft.kind === "image") return;
-    const advanced = more(panel, "Advanced axes");
-    advanced.open = advancedOpen.get("Axes") ?? false;
+  /** Changing what X means invalidates X bounds/format/ticks, not labels. */
+  function setXBinding(binding: XBinding) {
+    const before = draft.x ? cameraAxis(draft) : null;
+    draft.x = binding;
+    if (cameraAxis(draft) !== before) resetXAxis(draft.config);
+    refreshAxisTitles();
+  }
+  function renderXBinding(panel: HTMLElement, binding: XBinding) {
+    const group = el("fieldset", "ce-group");
+    group.append(el("legend", "", "X metric"));
+    panel.append(group);
     select(
-      panel,
-      "axis",
-      "X values",
+      group,
+      "x-mode",
+      "Pair each curve with",
+      binding.mode,
+      [
+        ["key", "The same metric from each curve’s run"],
+        ["series", "One specific series (any run)"],
+      ],
+      (value) => {
+        // Keep the same metric key across the switch when it is available.
+        const key = binding.mode === "key" ? binding.key : binding.series.key;
+        const series = editorXChoices(
+          draft,
+          options.catalog,
+          options.selectedRunIds,
+          "series",
+        ).find(
+          (choice) => choice.available && JSON.parse(choice.value)[2] === key,
+        );
+        const next: XBinding | undefined =
+          value === "key"
+            ? { mode: "key", key }
+            : series
+              ? {
+                  mode: "series",
+                  series: {
+                    runId: JSON.parse(series.value)[1],
+                    key,
+                    kind: "metric",
+                  },
+                }
+              : defaultXBinding(
+                  draft,
+                  options.catalog,
+                  options.selectedRunIds,
+                  "series",
+                );
+        if (!next) {
+          setError("x-mode", "No metrics are available for this choice.");
+          return;
+        }
+        setXBinding(next);
+        renderAxes();
+        fields.get("x-mode")?.control.focus({ preventScroll: true });
+      },
+      binding.mode === "key"
+        ? "Category × category: every selected run gets its own curve."
+        : "One-off comparison: every curve uses this exact X series, joined on the parameter below.",
+    );
+    const choices = editorXChoices(
+      draft,
+      options.catalog,
+      options.selectedRunIds,
+      binding.mode,
+    );
+    select(
+      group,
+      "x-metric",
+      "X metric",
+      binding.mode === "key" ? binding.key : seriesId(binding.series),
+      choices.map((choice) => [choice.value, choice.label]),
+      (value) => {
+        if (binding.mode === "key") setXBinding({ mode: "key", key: value });
+        else {
+          const [, runId, key] = JSON.parse(value) as string[];
+          setXBinding({ mode: "series", series: { runId, key, kind: "metric" } });
+        }
+        renderAxes();
+        fields.get("x-metric")?.control.focus({ preventScroll: true });
+      },
+      binding.mode === "key"
+        ? "Runs that did not log this metric are left out of the chart."
+        : "Search the list by typing while it is focused.",
+    );
+    select(
+      group,
+      "x-join",
+      "Match X and Y at the same",
       draft.config.axis,
       [
         ["step", "Step"],
@@ -785,14 +965,56 @@ export function openChartEditor(options: ChartEditorOptions): {
         ["relative", "Relative time (run start)"],
       ],
       (value) => {
-        draft.config = applyDashboardControls(draft.config, {
-          axis: value as ViewConfig["axis"],
-        });
+        // The join parameter is hidden; X bounds stay meaningful.
+        draft.config.axis = value as ViewConfig["axis"];
+      },
+      "Values are interpolated between observations, never extrapolated; only the overlap of both series is drawn.",
+    );
+  }
+  function renderAxes() {
+    const panel = clearPanel("Axes");
+    panel.hidden = draft.kind === "image";
+    if (draft.kind === "image") return;
+    const advanced = more(panel, "Advanced axes");
+    advanced.open = advancedOpen.get("Axes") ?? false;
+    const xMode = draft.x ? "metric" : draft.config.axis;
+    select(
+      panel,
+      "axis",
+      "X values",
+      xMode,
+      [
+        ["step", "Step"],
+        ["timestamp", "Wall time"],
+        ["relative", "Relative time (run start)"],
+        ["metric", "Another metric (XY)…"],
+      ],
+      (value) => {
+        if (value === "metric") {
+          const binding =
+            defaultXBinding(draft, options.catalog, options.selectedRunIds, "key") ??
+            defaultXBinding(draft, options.catalog, options.selectedRunIds, "series");
+          if (!binding) {
+            setError("axis", "No metrics are available to use as X.");
+            return;
+          }
+          setXBinding(binding);
+        } else {
+          const changed = !!draft.x || value !== draft.config.axis;
+          delete draft.x;
+          draft.config = applyDashboardControls(draft.config, {
+            axis: value as ViewConfig["axis"],
+          });
+          if (changed) resetXAxis(draft.config);
+        }
         renderAxes();
         fields.get("axis")?.control.focus({ preventScroll: true });
       },
-      "Relative time starts at each run’s creation time.",
+      draft.x
+        ? "Oscilloscope XY mode: each curve plots its Y metric against an X metric, matched at the same step or time."
+        : "Relative time starts at each run’s creation time.",
     );
+    if (draft.x) renderXBinding(panel, draft.x);
     for (const axis of ["x", "y"] as const) {
       const name = axis.toUpperCase();
       const group = el("fieldset", "ce-group");
@@ -1563,7 +1785,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       return {
         scalar: {
           view,
-          axis: card.config.axis,
+          axis: cameraAxis(card),
           xScale: card.config.xScale,
           yScale: card.config.yScale,
         },
@@ -1599,7 +1821,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     );
     const token = JSON.stringify([
       draft.kind,
-      sources.map((source) => source.id),
+      sources.map((source) => [source.id, source.x ? seriesId(source.x.ref) : null]),
     ]);
     if (token !== sourceToken) {
       loadAbort?.abort();
@@ -1710,12 +1932,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       if (!pendingLoad) {
         loadAbort = new AbortController();
         const signal = loadAbort.signal;
-        pendingLoad = Promise.all(
-          sources.map(async (source) => ({
-            run: { ...source.run, id: source.id, name: source.label },
-            raw: await options.store!.load(source, signal),
-          })),
-        );
+        pendingLoad = loadPlotRuns(sources, options.store, signal);
       }
       previewStatus.textContent = hasPreviousScalarPreview()
         ? "Previous preview · updating sources…"
@@ -1800,7 +2017,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       }
       const initial =
         pendingScalarView &&
-        pendingScalarView.axis === config.axis &&
+        pendingScalarView.axis === cameraAxis(valid) &&
         pendingScalarView.xScale === config.xScale &&
         pendingScalarView.yScale === config.yScale
           ? pendingScalarView.view

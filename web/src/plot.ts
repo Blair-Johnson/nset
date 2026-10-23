@@ -1,12 +1,8 @@
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
-import {
-  canonicalize,
-  ema,
-  makeInterpolator,
-  type Point,
-  type XY,
-} from "./math";
+import { type XY } from "./math";
+import { analyze, xQuantity, type Analyzed, type PlotRun } from "./analysis";
+export { analyze, xQuantity, type Analyzed, type PlotRun };
 import {
   validateConfig,
   formatValue,
@@ -21,9 +17,9 @@ import {
   rawMarkerOptions,
   pairedVisibility,
   formatDuration,
+  type XQuantity,
 } from "./options";
 import { matchedPath } from "./matched-path";
-import type { Run } from "./api";
 import {
   PlotNavigation,
   readViewport,
@@ -31,17 +27,6 @@ import {
   type Viewport,
 } from "./navigation";
 import type { NavigationAxis, PlotInteraction } from "./workspace-types";
-export interface PlotRun {
-  run: Run;
-  raw: Point[];
-}
-export interface Analyzed {
-  run: Run;
-  observations: XY[];
-  points: XY[];
-  fn: ReturnType<typeof makeInterpolator>;
-  count: number;
-}
 export interface Pins {
   a: number | null;
   b: number | null;
@@ -49,20 +34,33 @@ export interface Pins {
   yA?: number | null;
   yB?: number | null;
 }
-export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
-  return data.map(({ run, raw }) => {
-    const observations = canonicalize(raw, config.axis, run.created_at);
-    const points = config.smoothing
-      ? ema(observations, config.alpha)
-      : observations;
-    return {
-      run,
-      observations,
-      points,
-      fn: makeInterpolator(points, config.interpolation),
-      count: raw.length,
-    };
-  });
+const xSignature = (data: Analyzed[]) =>
+  JSON.stringify([...new Set(data.map((d) => d.x?.key ?? null))]);
+
+/** Draws an XY trace as straight segments in parameter order, in the current
+ * viewport. Samples outside a log domain break the line rather than bridge it. */
+function parametricPath(
+  points: XY[],
+  valid: (x: number, y: number) => boolean,
+): uPlot.Series.PathBuilder {
+  return (u) => {
+    const stroke = new Path2D();
+    let drawing = false;
+    for (const [x, y] of points) {
+      if (!valid(x, y)) {
+        drawing = false;
+        continue;
+      }
+      const px = u.valToPos(x, "x", true),
+        py = u.valToPos(y, "y", true);
+      if (drawing) stroke.lineTo(px, py);
+      else stroke.moveTo(px, py);
+      drawing = true;
+    }
+    const clip = new Path2D();
+    clip.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+    return { stroke, fill: null, clip };
+  };
 }
 export class PlotPanel {
   private chart?: uPlot;
@@ -202,6 +200,7 @@ export class PlotPanel {
       !!this.chart &&
       !!this.config &&
       this.config.axis === config.axis &&
+      xSignature(this.analyzed) === xSignature(data) &&
       this.config.xScale === config.xScale &&
       this.config.yScale === config.yScale;
     const carried =
@@ -218,14 +217,58 @@ export class PlotPanel {
       return;
     }
     const generation = this.generation + 1;
+    const quantity = xQuantity(data, config);
+    const xy = quantity === "metric";
+    const valid = (x: number, y: number | null) =>
+      y !== null &&
+      Number.isFinite(y) &&
+      (config.xScale !== "log" || x > 0) &&
+      (config.yScale !== "log" || y > 0)
+        ? y
+        : null;
     // Only observation coordinates enter aligned data. Display subdivisions belong
     // to each run's path builder, never to its numeric engine or another run's grid.
-    const xs = unionSorted(data.map((d) => d.points.map((p) => p[0]))).filter(
-      (x) => config.xScale !== "log" || x > 0,
-    );
+    let xs: number[];
+    let column: (index: number, raw: boolean) => (number | null)[];
+    if (xy) {
+      // XY traces may revisit an x. Every joined sample gets its own aligned
+      // slot (duplicate x allowed) so ranging and markers see all of them.
+      const entries: [number, number, number][] = [];
+      data.forEach((d, i) => {
+        for (const [x, y] of d.points) entries.push([x, 2 * i, y]);
+        for (const [x, y] of d.observations) entries.push([x, 2 * i + 1, y]);
+      });
+      const kept = entries
+        .filter(([x]) => config.xScale !== "log" || x > 0)
+        .sort((a, b) => a[0] - b[0]);
+      xs = kept.map((entry) => entry[0]);
+      const columns = Array.from({ length: data.length * 2 }, () =>
+        new Array<number | null>(xs.length).fill(null),
+      );
+      kept.forEach(([x, slot, y], k) => {
+        columns[slot][k] = valid(x, y);
+      });
+      column = (index, raw) => columns[2 * index + (raw ? 1 : 0)];
+    } else {
+      xs = unionSorted(data.map((d) => d.points.map((p) => p[0]))).filter(
+        (x) => config.xScale !== "log" || x > 0,
+      );
+      column = (index, raw) => {
+        const d = data[index];
+        if (!raw) return xs.map((x) => valid(x, d.fn.at(x)));
+        const observed = new Map(d.observations);
+        return xs.map((x) => valid(x, observed.get(x) ?? null));
+      };
+    }
     const aligned: uPlot.AlignedData = [xs];
     const series: uPlot.Series[] = [
-      { label: config.axis === "step" ? "Step" : "Timestamp (ms)" },
+      {
+        label: xy
+          ? [...new Set(data.map((d) => d.x?.key).filter(Boolean))].join(", ")
+          : config.axis === "step"
+            ? "Step"
+            : "Timestamp (ms)",
+      },
     ];
     const warnings: string[] = [];
     const limited = new Map<string, string>();
@@ -255,13 +298,10 @@ export class PlotPanel {
       warnings.push(
         "Live hover legend reports the nearest aligned observation-grid point, not an exact interpolated cursor value. The pinned inspector remains authoritative.",
       );
-    const valid = (x: number, y: number | null) =>
-      y !== null &&
-      Number.isFinite(y) &&
-      (config.xScale !== "log" || x > 0) &&
-      (config.yScale !== "log" || y > 0)
-        ? y
-        : null;
+    if (xy && data.some((d) => !d.fn.monotonic))
+      warnings.push(
+        "X is not monotonic for some traces, so a single X can map to several Y values. A/B value readouts show — there; threshold crossings remain exact.",
+      );
     data.forEach((d, i) => {
       const s = styleFor(config, d.run.id, i);
       rawEnabled.push(
@@ -287,11 +327,12 @@ export class PlotPanel {
         warnings.push(
           `${d.run.name}: ${rawExcluded} raw point markers are excluded from log display only.`,
         );
-      if (s.path !== "matched")
+      if (s.path !== "matched" && !xy)
         warnings.push(
           `${d.run.name}: ${s.path} is a cosmetic display path; readouts use ${config.interpolation}. Choose “matched” for adaptive numerical-curve approximation.`,
         );
       const adaptive =
+        !xy &&
         s.path === "matched" &&
         (config.interpolation === "pchip" ||
           config.xScale !== "linear" ||
@@ -301,7 +342,7 @@ export class PlotPanel {
         (adaptive
           ? ((config.advanced.pxAlign as boolean | number | undefined) ?? false)
           : undefined);
-      aligned.push(xs.map((x) => valid(x, d.fn.at(x))));
+      aligned.push(column(i, false));
       series.push({
         label: `${d.run.name}${config.smoothing ? " · smoothed" : ""}`,
         show: s.visible,
@@ -312,24 +353,26 @@ export class PlotPanel {
         alpha: s.alpha ?? 1,
         pxAlign: alignment,
         auto: s.auto ?? true,
-        fill: fillColor(s),
+        // An XY trace is a curve, not a function of x: area fill has no meaning.
+        fill: xy ? undefined : fillColor(s),
         fillTo:
           s.fillTo ?? ((u) => (config.yScale === "log" ? u.scales.y.min! : 0)),
         paths:
           s.width === 0 && s.fill === 0 && rawEnabled[i]
             ? () => null
-            : adaptive
-              ? matchedPath(d.points, (x) => d.fn.at(x), {
-                  fillTo: s.fillTo,
-                  onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
-                })
-              : cosmeticPath(s),
+            : xy
+              ? parametricPath(d.points, (x, y) => valid(x, y) !== null)
+              : adaptive
+                ? matchedPath(d.points, (x) => d.fn.at(x), {
+                    fillTo: s.fillTo,
+                    onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
+                  })
+                : cosmeticPath(s),
         spanGaps: false,
         points: { ...rawMarkerOptions(s), show: d.points.length === 1 },
         value: (_u, v) => (v == null ? "—" : formatValue(v, config.yFormat)),
       });
-      const raw = new Map(d.observations);
-      aligned.push(xs.map((x) => valid(x, raw.get(x) ?? null)));
+      aligned.push(column(i, true));
       series.push({
         label: `${d.run.name} · observations`,
         show: s.visible && rawEnabled[i],
@@ -355,9 +398,19 @@ export class PlotPanel {
       return;
     }
     let visibilityChanges = 0;
-    const opts = resolveOptions(config, this.host.clientWidth, series, {
+    const opts = resolveOptions(
+      config,
+      this.host.clientWidth,
+      series,
+      {
       draw: [
-        (u) => this.drawPins(u, this.chart === u ? this.pins : pins, config),
+        (u) =>
+          this.drawPins(
+            u,
+            this.chart === u ? this.pins : pins,
+            config,
+            quantity,
+          ),
       ],
       setSeries: [
         (_u, _idx, patch) => {
@@ -410,7 +463,9 @@ export class PlotPanel {
           });
         },
       ],
-    });
+      },
+      quantity,
+    );
     if (this.fillHost) {
       opts.width = Math.max(1, this.host.clientWidth);
       opts.height = Math.max(100, this.host.clientHeight);
@@ -493,6 +548,9 @@ export class PlotPanel {
     u: uPlot,
     pins: Pins = this.pins,
     config: ViewConfig | undefined = this.config,
+    quantity: XQuantity | undefined = config
+      ? xQuantity(this.analyzed, config)
+      : undefined,
   ) {
     const ctx = u.ctx;
     const { left, top, width, height } = u.bbox;
@@ -567,7 +625,7 @@ export class PlotPanel {
       ctx.fillStyle = label.color;
       ctx.fillText(label.text, label.x + 3 * ratio, label.y + 11 * ratio);
     }
-    this.drawDeltas(u, pins, config, ratio);
+    this.drawDeltas(u, pins, config, ratio, quantity);
     ctx.restore();
   }
   /** Oscilloscope-style Δ: a bracket between each complete A/B pair with its separation. */
@@ -576,6 +634,7 @@ export class PlotPanel {
     pins: Pins,
     config: ViewConfig | undefined,
     ratio: number,
+    quantity?: XQuantity,
   ) {
     const ctx = u.ctx;
     const { left, top, width, height } = u.bbox;
@@ -596,7 +655,7 @@ export class PlotPanel {
       const p0 = Math.max(lo, Math.min(pa, pb)),
         p1 = Math.min(hi, Math.max(pa, pb));
       if (p1 - p0 < 1) continue;
-      const text = `Δ${axis === "x" ? "X" : "Y"} ${deltaText(b - a, axis, config)}`;
+      const text = `Δ${axis === "x" ? "X" : "Y"} ${deltaText(b - a, axis, config, quantity)}`;
       const tw = ctx.measureText(text).width + 8 * ratio,
         th = 16 * ratio;
       // Bracket sits along the bottom (ΔX) or left (ΔY) edge, clear of the A/B badges.
@@ -650,10 +709,17 @@ function deltaText(
   delta: number,
   axis: "x" | "y",
   config: ViewConfig | undefined,
+  quantity: XQuantity = config?.axis ?? "step",
 ): string {
   if (axis === "y" || !config)
     return formatValue(delta, config?.yFormat ?? "number");
-  if (config.axis === "step") return formatValue(delta, "number");
+  if (config.axis === "step" || quantity === "metric")
+    return formatValue(
+      delta,
+      quantity === "metric" && config.xFormat !== "iso-time"
+        ? config.xFormat
+        : "number",
+    );
   return formatDuration(delta);
 }
 export interface PinLabel {

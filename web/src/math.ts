@@ -194,3 +194,90 @@ export function makeInterpolator(points: XY[], kind: Interpolation): Interpolato
   }
   return { at, crossings };
 }
+
+/** Oscilloscope XY join of two canonical [parameter, value] channels that share
+ * one parameter (step, wall time, or relative time). Output is [x, y] in
+ * parameter order over the overlap of both domains; at every knot of either
+ * channel the other is interpolated, never extrapolated. With linear channels the
+ * returned polyline is exactly the parametric curve. Inputs are not mutated.
+ * `knots: 'y'` samples only at Y knots (raw observation markers).
+ */
+export function joinXY(y: XY[], x: XY[], kind: Interpolation, knots: 'union' | 'y' = 'union'): XY[] {
+  if (!y.length || !x.length) return [];
+  const fy = makeInterpolator(y, kind), fx = makeInterpolator(x, kind);
+  const params: number[] = [];
+  if (knots === 'y') for (const p of y) params.push(p[0]);
+  else {
+    let i = 0, j = 0;
+    while (i < y.length || j < x.length) {
+      const a = i < y.length ? y[i][0] : Infinity, b = j < x.length ? x[j][0] : Infinity;
+      const t = Math.min(a, b);
+      if (a === t) i++;
+      if (b === t) j++;
+      params.push(t);
+    }
+  }
+  const result: XY[] = [];
+  for (const t of params) {
+    const xv = fx.at(t), yv = fy.at(t);
+    if (xv !== null && yv !== null) result.push([xv, yv]);
+  }
+  return result;
+}
+
+export type XYInterpolator = Interpolator & { monotonic: boolean };
+
+/** Readouts for a parametric polyline (points in parameter order, any x order).
+ * at(x) is defined only when x is monotonic after merging consecutive repeated x
+ * (the later sample wins, matching duplicate-coordinate semantics elsewhere);
+ * otherwise one x can map to several y and at() returns null. crossings(level)
+ * reports every x where the polyline meets the level, sorted, with plateaus as
+ * closed x intervals. Straight segments between joined samples are exact for
+ * linear channels.
+ */
+export function makeXYInterpolator(points: XY[]): XYInterpolator {
+  const data = points.map(([x, y]): XY => [finite(x, 'x'), finite(y, 'y')]);
+  const merged: XY[] = [];
+  for (const p of data) {
+    if (merged.length && merged[merged.length - 1][0] === p[0]) merged[merged.length - 1] = p;
+    else merged.push(p);
+  }
+  const increasing = merged.every((p, i) => i === 0 || p[0] > merged[i - 1][0]);
+  const decreasing = !increasing && merged.every((p, i) => i === 0 || p[0] < merged[i - 1][0]);
+  const ordered = increasing ? merged : decreasing ? [...merged].reverse() : null;
+  const fn = ordered ? makeInterpolator(ordered, 'linear') : null;
+  function at(x: number): number | null {
+    finite(x, 'Query x');
+    return fn ? fn.at(x) : null;
+  }
+  function crossings(level: number): Crossings {
+    finite(level, 'Threshold');
+    const roots: number[] = [], plateaus: [number, number][] = [];
+    const n = data.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = data[i];
+      if (y0 === level && (i === 0 || data[i - 1][1] !== level) &&
+          (i === n - 1 || data[i + 1][1] !== level)) roots.push(x0);
+      if (i === n - 1) continue;
+      const [x1, y1] = data[i + 1];
+      if (y0 === level && y1 === level) {
+        const lo = Math.min(x0, x1), hi = Math.max(x0, x1);
+        const previous = plateaus[plateaus.length - 1];
+        if (previous && lo <= previous[1] && hi >= previous[0]) {
+          previous[0] = Math.min(previous[0], lo);
+          previous[1] = Math.max(previous[1], hi);
+        } else plateaus.push([lo, hi]);
+      } else if ((y0 < level && level < y1) || (y1 < level && level < y0)) {
+        const delta = y1 - y0;
+        const scale = Math.max(Math.abs(y0), Math.abs(y1));
+        const t = Number.isFinite(delta) ? (level - y0) / delta :
+          (level / scale - y0 / scale) / (y1 / scale - y0 / scale);
+        roots.push(mix(x0, x1, t));
+      }
+    }
+    roots.sort((a, b) => a - b);
+    plateaus.sort((a, b) => a[0] - b[0]);
+    return { points: roots.filter((x, i) => i === 0 || x !== roots[i - 1]), plateaus };
+  }
+  return { at, crossings, monotonic: !!ordered };
+}

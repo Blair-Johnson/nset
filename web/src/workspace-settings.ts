@@ -5,6 +5,9 @@ import {
 } from "./dashboard-controls";
 import type { ViewConfig } from "./config";
 import type { Workspace, Section } from "./workspace-types";
+/** XY charts plot a metric on X; the dashboard X control (step / time) does
+ * not describe them, so they neither count toward it nor follow it. Their
+ * join parameter is edited per chart. Smoothing applies to every scalar chart. */
 export function dashboardSettings(workspace: Workspace): {
   count: number;
   axis: ViewConfig["axis"] | null;
@@ -15,12 +18,15 @@ export function dashboardSettings(workspace: Workspace): {
     .filter((card) => card.kind === "timeseries");
   if (!charts.length) return { count: 0, axis: null, smoothing: null };
   const first = charts[0].config;
+  const timed = charts.filter((card) => !card.x);
   const weight = (config: ViewConfig) => (config.smoothing ? config.alpha : 1);
   return {
     count: charts.length,
-    axis: charts.every((card) => card.config.axis === first.axis)
-      ? first.axis
-      : null,
+    axis:
+      timed.length &&
+      timed.every((card) => card.config.axis === timed[0].config.axis)
+        ? timed[0].config.axis
+        : null,
     smoothing: charts.every((card) => weight(card.config) === weight(first))
       ? smoothingToStrength(first)
       : null,
@@ -35,7 +41,10 @@ export function withDashboardSettings(
     ...section,
     cards: section.cards.map((card) => {
       if (card.kind !== "timeseries") return card;
-      const config = applyDashboardControls(card.config, controls);
+      const config = applyDashboardControls(
+        card.config,
+        card.x ? { ...controls, axis: undefined } : controls,
+      );
       return JSON.stringify(config) === JSON.stringify(card.config)
         ? card
         : { ...card, config };

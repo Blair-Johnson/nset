@@ -25,6 +25,17 @@ export interface SeriesRef {
 export type ChartSource =
   | { mode: "selected"; keys: string[] }
   | { mode: "explicit"; series: SeriesRef[] };
+/** Oscilloscope XY mode: what supplies each trace's horizontal coordinate.
+ * The chart's `config.axis` (step / wall time / relative time) is the join
+ * parameter shared by the Y and X series; it no longer appears on screen.
+ * - "key": each Y trace pairs with the metric `key` from the Y trace's own run
+ *   (category × category, one curve per run).
+ * - "series": every Y trace pairs with one specific series, from any run or
+ *   experiment (one-off comparisons).
+ * Either binding combines with either Y source mode. */
+export type XBinding =
+  | { mode: "key"; key: string }
+  | { mode: "series"; series: SeriesRef };
 export interface CardLayout {
   width: number;
   height: number;
@@ -34,6 +45,8 @@ export interface ChartSpec {
   title: string;
   kind: "timeseries" | "image";
   source: ChartSource;
+  /** Absent: X is the join parameter itself (classic step/time plot). */
+  x?: XBinding;
   config: ViewConfig;
   outliers: "all" | "robust";
   size: "normal" | "wide";
@@ -63,6 +76,8 @@ export interface ResolvedSeries extends SeriesRef {
   id: string;
   run: Run;
   label: string;
+  /** Present for XY charts: the series supplying this trace's X coordinate. */
+  x?: { ref: SeriesRef; run: Run; label: string };
 }
 export interface MetricLoader {
   load(

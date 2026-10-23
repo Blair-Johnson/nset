@@ -10,10 +10,15 @@ import type { EditorCamera } from "./chart-editor";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
-import { withMetricLabel } from "./card-label";
+import { loadPlotRuns, withMetricLabel } from "./card-label";
 import { nextCursorPlacement } from "./cursor-placement";
 import { plotIcon, type PlotIconName } from "./plot-icons";
-import { formatDuration, formatXValue } from "./options";
+import {
+  formatDuration,
+  formatXValue,
+  type XQuantity,
+} from "./options";
+import { cameraAxis } from "./workspace";
 import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
@@ -182,7 +187,17 @@ export class ChartCard {
     return withMetricLabel(
       withRunColors(this.spec.config, this.sources, this.context.catalog),
       this.spec.source,
+      this.spec.kind === "timeseries" ? this.spec.x : undefined,
     );
+  }
+  /** What the X axis shows; XY charts read X in metric units. */
+  private xAxis(): XQuantity {
+    return this.spec.kind === "timeseries" && this.spec.x
+      ? "metric"
+      : this.spec.config.axis;
+  }
+  private xText(value: number): string {
+    return formatXValue(value, this.xAxis(), this.spec.config.xFormat);
   }
 
   /** Derived colors only: keep observations, interpolators, pins and navigation alive. */
@@ -615,7 +630,7 @@ export class ChartCard {
     this.legendCoordinate.textContent =
       x === null
         ? ""
-        : `At ${this.spec.config.axis === "step" ? "step " : ""}${formatXValue(x, this.spec.config.axis, this.spec.config.xFormat)}`;
+        : `At ${this.xAxis() === "step" ? "step " : ""}${this.xText(x)}`;
     for (const [cell, series] of this.legendValues) {
       cell.textContent = x === null ? "" : this.number(series.fn.at(x));
       cell.title = cell.textContent;
@@ -710,20 +725,18 @@ export class ChartCard {
         const a = vertical ? this.pins.a : this.pins.yA;
         const b = vertical ? this.pins.b : this.pins.yB;
         const delta = a == null || b == null ? null : b - a;
+        const quantity = this.xAxis();
         const position = (value: number | null | undefined) =>
           value == null
             ? "—"
             : vertical
-              ? formatXValue(
-                  value,
-                  this.spec.config.axis,
-                  this.spec.config.xFormat,
-                )
+              ? this.xText(value)
               : this.number(value);
         const difference =
           delta === null
             ? "—"
-            : vertical && this.spec.config.axis !== "step"
+            : vertical &&
+                (quantity === "timestamp" || quantity === "relative")
               ? formatDuration(delta)
               : vertical
                 ? formatValue(
@@ -740,11 +753,13 @@ export class ChartCard {
             "strong",
             "",
             vertical
-              ? this.spec.config.axis === "step"
-                ? "Step"
-                : this.spec.config.axis === "timestamp"
-                  ? "Time (UTC)"
-                  : "Elapsed time"
+              ? quantity === "metric"
+                ? this.displayConfig().xLabel || "X"
+                : quantity === "step"
+                  ? "Step"
+                  : quantity === "timestamp"
+                    ? "Time (UTC)"
+                    : "Elapsed time"
               : "Value",
           ),
         );
@@ -811,16 +826,9 @@ export class ChartCard {
           const list = element("div");
           list.textContent =
             [
-              ...crossings.points.map((x) =>
-                formatXValue(
-                  x,
-                  this.spec.config.axis,
-                  this.spec.config.xFormat,
-                ),
-              ),
+              ...crossings.points.map((x) => this.xText(x)),
               ...crossings.plateaus.map(
-                ([a, b]) =>
-                  `${formatXValue(a, this.spec.config.axis, this.spec.config.xFormat)} – ${formatXValue(b, this.spec.config.axis, this.spec.config.xFormat)}`,
+                ([a, b]) => `${this.xText(a)} – ${this.xText(b)}`,
               ),
             ].join(", ") || "No crossings";
           details.append(list);
@@ -899,11 +907,10 @@ export class ChartCard {
     }
     this.status.textContent = "Loading…";
     try {
-      const data = await Promise.all(
-        sources.map(async (source) => ({
-          run: { ...source.run, id: source.id, name: source.label },
-          raw: await this.context.store.load(source, controller.signal),
-        })),
+      const data = await loadPlotRuns(
+        sources,
+        this.context.store,
+        controller.signal,
       );
       if (
         this.destroyed ||
@@ -939,7 +946,7 @@ export class ChartCard {
       this.plot?.render(this.data, config, this.pins, {
         initialView:
           handed &&
-          handed.axis === config.axis &&
+          handed.axis === cameraAxis(this.spec) &&
           handed.xScale === config.xScale &&
           handed.yScale === config.yScale
             ? handed.view
@@ -982,7 +989,7 @@ export class ChartCard {
       ? {
           scalar: {
             view,
-            axis: this.spec.config.axis,
+            axis: cameraAxis(this.spec),
             xScale: this.spec.config.xScale,
             yScale: this.spec.config.yScale,
           },
@@ -1005,7 +1012,11 @@ export class ChartCard {
     ) {
       const s = camera.scalar;
       const c = this.spec.config;
-      if (s.axis === c.axis && s.xScale === c.xScale && s.yScale === c.yScale) {
+      if (
+        s.axis === cameraAxis(this.spec) &&
+        s.xScale === c.xScale &&
+        s.yScale === c.yScale
+      ) {
         this.plot.showView(s.view);
         return;
       }
@@ -1074,7 +1085,7 @@ export class ChartCard {
       this.renderResults();
       return;
     }
-    if (spec.config.axis !== this.spec.config.axis)
+    if (cameraAxis(spec) !== cameraAxis(this.spec))
       this.pins = { a: null, b: null, threshold: null };
     this.cancel();
     this.plot?.destroy();

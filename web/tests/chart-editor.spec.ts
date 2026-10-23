@@ -1138,6 +1138,7 @@ test("all three X axes reset incompatible bounds and preview relative to each ru
     "Step",
     "Wall time",
     "Relative time (run start)",
+    "Another metric (XY)…",
   ]);
   for (const [value, title, xEnds] of [
     [

@@ -7,7 +7,9 @@ import type {
   SeriesRef,
   Workspace,
   WorkspaceLibrary,
+  XBinding,
 } from "./workspace-types";
+import type { Run } from "./api";
 
 const STORAGE_KEY = "nset.workspaces.v2";
 const forbidden = new Set(["__proto__", "constructor", "prototype"]);
@@ -55,6 +57,16 @@ function enumValue<T extends string>(value: unknown, choices: readonly T[]): T {
 export function seriesId(ref: SeriesRef): string {
   return JSON.stringify([ref.kind, ref.runId, ref.key]);
 }
+/** Identity of what a chart's X coordinate means. Cameras, cursors and zoom
+ * history are only meaningful while this is unchanged. */
+export function cameraAxis(card: ChartSpec): string {
+  const x = card.kind === "timeseries" ? card.x : undefined;
+  if (!x) return card.config.axis;
+  return JSON.stringify([
+    card.config.axis,
+    x.mode === "key" ? ["key", x.key] : ["series", seriesId(x.series)],
+  ]);
+}
 export function resolveSources(
   card: ChartSpec,
   selectedRunIds: string[],
@@ -80,6 +92,22 @@ export function resolveSources(
   const names = new Map<string, number>();
   for (const run of catalog.runs)
     names.set(run.name, (names.get(run.name) ?? 0) + 1);
+  const runLabel = (run: Run) =>
+    names.get(run.name)! > 1 ? `${run.name} (${run.id})` : run.name;
+  // XY charts: a trace exists only when both of its channels exist. A fixed
+  // X series may come from any run; a keyed X follows the Y trace's own run.
+  const binding = kind === "metric" ? card.x : undefined;
+  const xFor = (ref: SeriesRef): ResolvedSeries["x"] | null => {
+    if (!binding) return undefined;
+    const xRef: SeriesRef =
+      binding.mode === "series"
+        ? binding.series
+        : { runId: ref.runId, key: binding.key, kind: "metric" };
+    const xRun = runs.get(xRef.runId);
+    if (xRef.kind !== "metric" || !xRun || !available.has(seriesId(xRef)))
+      return null;
+    return { ref: { ...xRef }, run: xRun, label: `${runLabel(xRun)} \u00b7 ${xRef.key}` };
+  };
   for (const ref of refs) {
     const identity = seriesId(ref),
       run = runs.get(ref.runId);
@@ -90,14 +118,15 @@ export function resolveSources(
       seen.has(identity)
     )
       continue;
+    const x = xFor(ref);
+    if (x === null) continue;
     seen.add(identity);
-    const runLabel =
-      names.get(run.name)! > 1 ? `${run.name} (${run.id})` : run.name;
     result.push({
       ...ref,
       id: identity,
       run,
-      label: `${runLabel} \u00b7 ${ref.key}`,
+      label: `${runLabel(run)} \u00b7 ${ref.key}`,
+      ...(x ? { x } : {}),
     });
   }
   return result;
@@ -200,6 +229,7 @@ export function validateChart(value: unknown): ChartSpec {
     "title",
     "kind",
     "source",
+    "x",
     "config",
     "outliers",
     "size",
@@ -227,6 +257,28 @@ export function validateChart(value: unknown): ChartSpec {
     distinct(series.map(seriesId), "series identity");
     binding = { mode: "explicit", series };
   } else throw new Error("Unknown source mode.");
+  let x: XBinding | undefined;
+  if (v.x !== undefined) {
+    if (kind !== "timeseries")
+      throw new Error("Only scalar charts can use a metric X axis.");
+    const raw = object(v.x);
+    if (raw.mode === "key") {
+      object(raw, ["mode", "key"]);
+      x = { mode: "key", key: text(raw.key, "X metric key") };
+    } else if (raw.mode === "series") {
+      object(raw, ["mode", "series"]);
+      const s = object(raw.series, ["runId", "key", "kind"]);
+      if (s.kind !== "metric") throw new Error("X series must be a metric.");
+      x = {
+        mode: "series",
+        series: {
+          runId: id(s.runId),
+          key: text(s.key, "X metric key"),
+          kind: "metric",
+        },
+      };
+    } else throw new Error("Unknown X binding mode.");
+  }
   let layout: ChartSpec["layout"];
   if (v.layout !== undefined) {
     const dimensions = object(v.layout, ["width", "height"]);
@@ -252,6 +304,7 @@ export function validateChart(value: unknown): ChartSpec {
     title: text(v.title, "chart title", 256),
     kind,
     source: binding,
+    ...(x ? { x } : {}),
     config: validateConfig(v.config),
     outliers: enumValue(v.outliers, ["all", "robust"]),
     size: enumValue(v.size, ["normal", "wide"]),

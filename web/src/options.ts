@@ -142,13 +142,14 @@ export function formatDuration(milliseconds: number): string {
   return sign + parts.join(" ");
 }
 
+/** What the horizontal axis shows: the join parameter itself, or a metric
+ * (XY charts, where `config.axis` is only the hidden join parameter). */
+export type XQuantity = ViewConfig["axis"] | "metric";
+
 /** Relative axes interpret default/legacy ISO formatting as elapsed duration.
  * Explicit numeric formats and static advanced labels remain user-controlled.
  */
-function xFormatter(
-  axis: ViewConfig["axis"],
-  name: Formatter,
-): uPlot.Axis.Values {
+function xFormatter(axis: XQuantity, name: Formatter): uPlot.Axis.Values {
   return (_u, values) =>
     values.map((value) =>
       value == null ? "" : formatXValue(value, axis, name),
@@ -158,7 +159,7 @@ function xFormatter(
 /** Coordinate readouts and ticks share axis semantics, including legacy ISO on elapsed axes. */
 export function formatXValue(
   value: number,
-  axis: ViewConfig["axis"],
+  axis: XQuantity,
   name: Formatter,
 ): string {
   if (axis === "relative" && (name === "number" || name === "iso-time"))
@@ -175,9 +176,12 @@ export function resolveOptions(
   width: number,
   series: uPlot.Series[],
   hooks: uPlot.Hooks.Arrays = {},
+  quantity: XQuantity = config.axis,
 ): uPlot.Options {
   config = validateConfig(config);
-  const labelLayout = defaultLabelLayout(config);
+  const labelLayout = quantity === "metric"
+    ? { ...defaultLabelLayout(config), multilineTime: false }
+    : defaultLabelLayout(config);
   const { scales: scalePatches, ...presentation } = config.advanced;
   const patches = (scalePatches ?? {}) as { x?: ScalePatch; y?: ScalePatch };
   const opts: uPlot.Options = {
@@ -193,30 +197,36 @@ export function resolveOptions(
       {
         label:
           config.xLabel ||
-          (config.axis === "step"
-            ? "Step"
-            : config.axis === "relative"
-              ? "Relative time · from run start"
-              : "Timestamp · UTC epoch milliseconds"),
+          (quantity === "metric"
+            ? "Metric value"
+            : quantity === "step"
+              ? "Step"
+              : quantity === "relative"
+                ? "Relative time · from run start"
+                : "Timestamp · UTC epoch milliseconds"),
         stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
         values: labelLayout.multilineTime
           ? (_u, values) =>
               values.map((v) => (v == null ? "" : formatTimestampTick(v)))
-          : xFormatter(config.axis, config.xFormat),
+          : quantity === "metric" && config.xFormat === "number"
+            ? (_u, values) => formatNumberTicks(values)
+            : xFormatter(quantity, config.xFormat),
         // End native multiline UTC labels at the tick; no moving gutters,
         // hidden endpoint ticks, or shorter coordinate readouts.
         ...(labelLayout.multilineTime
           ? { align: 2 as const, incrs: timestampTickIncrements }
           : {}),
         space:
-          config.axis === "timestamp"
+          quantity === "timestamp"
             ? labelLayout.multilineTime
               ? 100
               : 170
-            : config.axis === "relative"
+            : quantity === "relative"
               ? 100
-              : 50,
+              : quantity === "metric"
+                ? 70
+                : 50,
         size: labelLayout.multilineTime ? 44 : 32,
         labelSize: 20,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },
@@ -256,8 +266,8 @@ export function resolveOptions(
   resolved.axes?.forEach((axis, index) => {
     if (typeof axis.values === "string")
       axis.values =
-        index === 0 && config.axis === "relative"
-          ? xFormatter(config.axis, axis.values as Formatter)
+        index === 0 && quantity === "relative"
+          ? xFormatter(quantity, axis.values as Formatter)
           : formatter(axis.values as Formatter);
     else if (Array.isArray(axis.values)) {
       // Static labels must stay attached to their split value when zoomed or

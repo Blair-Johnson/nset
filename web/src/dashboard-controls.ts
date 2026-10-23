@@ -47,6 +47,29 @@ export function smoothingToStrength(config: SmoothingConfig): number {
  * interpolation, run styles and other presentation overrides stay untouched.
  * The caller applies this to scalar charts and clears stale navigation/pins.
  */
+/** Clear coordinate-dependent X settings (bounds, distribution, format, ticks)
+ * after X changes meaning. Explicit labels and cosmetics stay. Mutates. */
+export function resetXAxis(next: ViewConfig): void {
+  next.xMin = null;
+  next.xMax = null;
+  next.xScale = "linear";
+  next.xFormat = "number";
+  const scales = next.advanced.scales as
+    Record<string, ScaleOptions> | undefined;
+  if (scales?.x) {
+    delete scales.x.range;
+    delete scales.x.auto;
+    delete scales.x.log;
+    delete scales.x.asinh;
+  }
+  const axes = next.advanced.axes as Record<string, unknown>[] | undefined;
+  if (axes?.[0]) {
+    delete axes[0].splits;
+    delete axes[0].incrs;
+    delete axes[0].values;
+  }
+}
+
 export function applyDashboardControls(
   config: ViewConfig,
   controls: DashboardControls,
@@ -54,24 +77,7 @@ export function applyDashboardControls(
   const next = validateConfig(config);
   if (controls.axis !== undefined && controls.axis !== next.axis) {
     next.axis = controls.axis;
-    next.xMin = null;
-    next.xMax = null;
-    next.xScale = "linear";
-    next.xFormat = "number";
-    const scales = next.advanced.scales as
-      Record<string, ScaleOptions> | undefined;
-    if (scales?.x) {
-      delete scales.x.range;
-      delete scales.x.auto;
-      delete scales.x.log;
-      delete scales.x.asinh;
-    }
-    const axes = next.advanced.axes as Record<string, unknown>[] | undefined;
-    if (axes?.[0]) {
-      delete axes[0].splits;
-      delete axes[0].incrs;
-      delete axes[0].values;
-    }
+    resetXAxis(next);
   }
   if (controls.smoothingStrength !== undefined)
     Object.assign(next, strengthToSmoothing(controls.smoothingStrength));
