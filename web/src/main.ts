@@ -709,6 +709,7 @@ function workspaceToolbar(workspace: Workspace) {
       renderCharts(workspace);
     }
   });
+  undoButton.setAttribute("aria-label", "Undo");
   undoButton.disabled = !undo.get(workspace.id)?.length;
   undoButton.title = "Undo the last view edit";
   if (runDrawer) host.append(runDrawer.toggle);

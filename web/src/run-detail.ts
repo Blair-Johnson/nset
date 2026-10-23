@@ -1,6 +1,6 @@
 import type { Run } from "./api";
 import type { Catalog } from "./workspace-types";
-import { runColorButton } from "./run-color-picker";
+import { runSwatch } from "./run-drawer";
 import { element } from "./utils";
 import { configJSON, configType, renderRunConfig } from "./run-config";
 import "./run-detail.css";
@@ -28,7 +28,7 @@ export function renderRunDetail(
   charts.type = "button";
   charts.onclick = options.onCharts;
   header.append(back);
-  if (options.catalog) header.append(runColorButton(options.catalog, run.id));
+  if (options.catalog) header.append(runSwatch(options.catalog, run.id));
   header.append(name, status, charts);
   const metadata = element("dl", "run-detail-metadata");
   const add = (label: string, value: HTMLElement) => {

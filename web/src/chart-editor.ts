@@ -1090,11 +1090,14 @@ export function openChartEditor(options: ChartEditorOptions): {
     );
     renderStyle(
       styleDetails,
-      draft.config.style,
+      {},
       "default",
       draft.config.style,
       draft.config.palette,
-      () => {},
+      (patch) => {
+        // Axis changes replace the config; never rely on the captured style identity.
+        draft.config.style = deepMerge(draft.config.style, patch);
+      },
       strokeDetails,
     );
     const details = el("fieldset", "ce-group");
@@ -1254,7 +1257,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     key: string,
     effective: RunStyle,
     palette: boolean,
-    commit = () => {},
+    commit: (patch: Partial<RunStyle>) => void = () => {},
     extra: HTMLElement = parent,
   ) {
     const shapeFor = (style: RunStyle) =>
@@ -1269,7 +1272,7 @@ export function openChartEditor(options: ChartEditorOptions): {
             : style.path;
     const changed = () => {
       effective = deepMerge(effective, patch);
-      commit();
+      commit(patch);
       if (key === "default") {
         const type = fields.get("kind")?.control as
           HTMLSelectElement | undefined;
@@ -1653,7 +1656,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       config.width = null;
       config.height = Math.min(
         config.height,
-        window.matchMedia("(max-width: 760px)").matches ? 180 : 440,
+        window.matchMedia("(max-width: 760px)").matches ? 240 : 440,
       );
       const analyzed = module.analyze(data, config);
       if (valid.outliers === "robust") {

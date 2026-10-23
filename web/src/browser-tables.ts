@@ -161,17 +161,24 @@ function pagination(
   state: TableState,
   render: () => void,
 ) {
+  const active = document.activeElement;
+  const focusedAction =
+    active instanceof HTMLButtonElement && host.contains(active)
+      ? active.dataset.pageAction
+      : undefined;
   host.replaceChildren();
   if (total <= pageSize) return;
   const previous = button("Previous", () => {
     state.page--;
     render();
   });
+  previous.dataset.pageAction = "previous";
   previous.disabled = state.page === 0;
   const next = button("Next", () => {
     state.page++;
     render();
   });
+  next.dataset.pageAction = "next";
   next.disabled = (state.page + 1) * pageSize >= total;
   host.append(
     element(
@@ -182,6 +189,12 @@ function pagination(
     previous,
     next,
   );
+  if (focusedAction) {
+    const target = focusedAction === "next" ? next : previous;
+    (target.disabled ? (target === next ? previous : next) : target).focus({
+      preventScroll: true,
+    });
+  }
 }
 
 export function runTable(
@@ -309,7 +322,11 @@ export function runTable(
         : null;
     const focusedRunId = focused?.dataset.runId;
     const focusedAll = focused?.dataset.selectAll !== undefined;
-    let restoreFocus: HTMLInputElement | undefined;
+    const focusedSort =
+      active instanceof HTMLButtonElement && head.contains(active)
+        ? active.dataset.sortKey
+        : undefined;
+    let restoreFocus: HTMLElement | undefined;
     const rows = visible();
     state.page = Math.min(
       state.page,
@@ -362,6 +379,8 @@ export function runTable(
         },
         "sort-button",
       );
+      control.dataset.sortKey = key;
+      if (focusedSort === key) restoreFocus = control;
       control.title = key.startsWith("metric:") ? "Latest logged value" : label;
       th.append(control);
       header.append(th);
