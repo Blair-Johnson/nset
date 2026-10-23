@@ -616,3 +616,25 @@ test("byte budget counts JSON escaping, punctuation and multibyte values", () =>
   assert.throws(() => assertSafe(value), /bytes/);
   assert.equal(isSafeColor("hsl(20% 30% 40%)"), false);
 });
+
+test("all X axes round-trip in v1 configs without changing legacy smoothing", () => {
+  for (const axis of ["step", "timestamp", "relative"] as const) {
+    const config = validateConfig({
+      version: 1,
+      axis,
+      smoothing: true,
+      alpha: 0.0001,
+    });
+    assert.equal(config.axis, axis);
+    assert.equal(config.alpha, 0.0001);
+    assert.deepEqual(
+      validateConfig(JSON.parse(JSON.stringify(config))),
+      config,
+    );
+    assert.equal(validateView({ ...saved(), config }).config.axis, axis);
+  }
+  assert.deepEqual(validateConfig({ version: 1 }), defaults());
+  assert.equal(validateConfig({ smoothing: false, alpha: 0.2 }).alpha, 0.2);
+  for (const axis of ["elapsed", "wall", "", null])
+    assert.throws(() => validateConfig({ axis }), /axis/);
+});

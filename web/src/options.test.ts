@@ -4,6 +4,7 @@ import uPlot from "uplot";
 import { defaults, validateConfig, styleFor } from "./config";
 import {
   resolveOptions,
+  formatDuration,
   resolveScale,
   rawMarkerOptions,
   fillColor,
@@ -281,4 +282,86 @@ test("explicit log fill baselines reject nonpositive defaults and inherited run 
     validateConfig({ yScale: "log", style: { fillTo: 2 } }).style.fillTo,
     2,
   );
+});
+
+test("elapsed duration formatting handles signs, milliseconds, carries and long runs", () => {
+  for (const [value, expected] of [
+    [0, "0 ms"],
+    [-0, "0 ms"],
+    [0.125, "0.125 ms"],
+    [-25, "-25 ms"],
+    [999, "999 ms"],
+    [1000, "1s"],
+    [-1501, "-1.501s"],
+    [60_000, "1m"],
+    [59_999.9, "1m"],
+    [3_600_001, "1h 0.001s"],
+    [86_400_000, "1d"],
+    [183_845_006, "2d 3h 4m 5.006s"],
+    [-183_845_006, "-2d 3h 4m 5.006s"],
+    [400 * 86_400_000, "400d"],
+  ] as const)
+    assert.equal(formatDuration(value), expected);
+  for (const value of [NaN, Infinity, -Infinity])
+    assert.equal(formatDuration(value), "\u2014");
+  assert.equal(formatDuration(Number.MIN_VALUE), "5e-324 ms");
+  assert.match(formatDuration(Number.MAX_VALUE), /^\d[.\de+]*d$/);
+  assert.doesNotMatch(
+    formatDuration(Number.MAX_SAFE_INTEGER),
+    /NaN|Infinity|Z/,
+  );
+});
+
+const axisValues = (options: uPlot.Options, values: number[], index = 0) =>
+  (options.axes![index].values as (...args: unknown[]) => unknown[])(
+    {},
+    values,
+    index,
+    100,
+    1000,
+  );
+
+test("relative axes default to elapsed durations, never legacy ISO dates", () => {
+  for (const xFormat of ["number", "iso-time"] as const) {
+    const opts = resolve({}, { axis: "relative", xFormat });
+    assert.match(String(opts.axes![0].label), /Relative time.*run start/);
+    assert.deepEqual(axisValues(opts, [-1000, 0, 500, 90_000]), [
+      "-1s",
+      "0 ms",
+      "500 ms",
+      "1m 30s",
+    ]);
+    assert.equal(opts.scales!.x.time, false);
+  }
+  const legacyAdvanced = resolve(
+    { axes: [{ values: "iso-time" }] },
+    { axis: "relative" },
+  );
+  assert.deepEqual(axisValues(legacyAdvanced, [0, 1000]), ["0 ms", "1s"]);
+});
+
+test("relative axes preserve explicit labels and numeric formatting overrides", () => {
+  const basic = resolve(
+    {},
+    { axis: "relative", xLabel: "Training elapsed", xFormat: "fixed-2" },
+  );
+  assert.equal(basic.axes![0].label, "Training elapsed");
+  assert.deepEqual(axisValues(basic, [1234]), ["1234.00"]);
+  const numeric = resolve(
+    { axes: [{ label: "Custom title", values: "scientific" }] },
+    { axis: "relative" },
+  );
+  assert.equal(numeric.axes![0].label, "Custom title");
+  assert.match(String(axisValues(numeric, [1234])[0]), /e\+3/);
+  const labels = resolve(
+    { axes: [{ splits: [0, 1000], values: ["Launch", "Warmup"] }] },
+    { axis: "relative" },
+  );
+  assert.deepEqual(axisValues(labels, [1000, 0]), ["Warmup", "Launch"]);
+  // Relative formatting applies to X only, not an explicitly date-formatted Y.
+  const y = resolve(
+    { axes: [{}, { values: "iso-time" }] },
+    { axis: "relative" },
+  );
+  assert.deepEqual(axisValues(y, [0], 1), ["1970-01-01 00:00:00Z"]);
 });

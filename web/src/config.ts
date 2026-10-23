@@ -54,7 +54,7 @@ export interface RunStyle {
 }
 export interface ViewConfig {
   version: 1;
-  axis: "step" | "timestamp";
+  axis: "step" | "timestamp" | "relative";
   interpolation: "linear" | "pchip";
   smoothing: boolean;
   alpha: number;
@@ -691,7 +691,7 @@ export function validateConfig(value: unknown): ViewConfig {
     if (!Object.hasOwn(d, k)) throw new Error(`${p}: unknown setting.`);
     if (k === "version") {
       if (v !== 1) throw new Error("Unsupported view version.");
-    } else if (k === "axis") choice(v, p, ["step", "timestamp"]);
+    } else if (k === "axis") choice(v, p, ["step", "timestamp", "relative"]);
     else if (k === "interpolation") choice(v, p, ["linear", "pchip"]);
     else if (["xScale", "yScale"].includes(k))
       choice(v, p, ["linear", "log", "asinh"]);

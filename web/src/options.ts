@@ -110,6 +110,46 @@ export const formatter =
   (_u, values) =>
     values.map((v) => formatValue(v, name));
 
+/** Elapsed backend milliseconds, never a calendar date. Preserve sub-ms values,
+ * carry rounded milliseconds across unit boundaries, and do not wrap at 24h.
+ * Beyond exact integer milliseconds, use compact days instead of false precision.
+ */
+export function formatDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds)) return "—";
+  const sign = milliseconds < 0 ? "-" : "";
+  const absolute = Math.abs(milliseconds);
+  if (absolute < 1000) return `${sign}${Number(absolute.toPrecision(6))} ms`;
+  if (absolute > Number.MAX_SAFE_INTEGER)
+    return `${sign}${Number((absolute / 86_400_000).toPrecision(6))}d`;
+  let remaining = Math.round(absolute);
+  const parts: string[] = [];
+  for (const [unit, size] of [
+    ["d", 86_400_000],
+    ["h", 3_600_000],
+    ["m", 60_000],
+  ] as const) {
+    const amount = Math.floor(remaining / size);
+    if (amount) parts.push(`${amount}${unit}`);
+    remaining %= size;
+  }
+  if (remaining || !parts.length) parts.push(`${remaining / 1000}s`);
+  return sign + parts.join(" ");
+}
+
+/** Relative axes interpret default/legacy ISO formatting as elapsed duration.
+ * Explicit numeric formats and static advanced labels remain user-controlled.
+ */
+function xFormatter(
+  axis: ViewConfig["axis"],
+  name: Formatter,
+): uPlot.Axis.Values {
+  if (axis === "relative" && (name === "number" || name === "iso-time"))
+    return (_u, values) => values.map(formatDuration);
+  return formatter(
+    axis === "timestamp" && name === "number" ? "iso-time" : name,
+  );
+}
+
 /** All user literals pass validation; internal callbacks/series/hooks are never patched. */
 export function resolveOptions(
   config: ViewConfig,
@@ -135,15 +175,18 @@ export function resolveOptions(
           config.xLabel ||
           (config.axis === "step"
             ? "Step"
-            : "Timestamp · UTC epoch milliseconds"),
+            : config.axis === "relative"
+              ? "Relative time · from run start"
+              : "Timestamp · UTC epoch milliseconds"),
         stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
-        values: formatter(
-          config.axis === "timestamp" && config.xFormat === "number"
-            ? "iso-time"
-            : config.xFormat,
-        ),
-        space: config.axis === "timestamp" ? 170 : 50,
+        values: xFormatter(config.axis, config.xFormat),
+        space:
+          config.axis === "timestamp"
+            ? 170
+            : config.axis === "relative"
+              ? 100
+              : 50,
         size: 64,
         labelSize: 20,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },
@@ -176,9 +219,12 @@ export function resolveOptions(
   if (resolved.cursor?.drag?.uni === null) delete resolved.cursor.drag.uni;
   if (resolved.cursor?.hover?.skip)
     resolved.cursor.hover.skip = [undefined, ...resolved.cursor.hover.skip];
-  resolved.axes?.forEach((axis) => {
+  resolved.axes?.forEach((axis, index) => {
     if (typeof axis.values === "string")
-      axis.values = formatter(axis.values as Formatter);
+      axis.values =
+        index === 0 && config.axis === "relative"
+          ? xFormatter(config.axis, axis.values as Formatter)
+          : formatter(axis.values as Formatter);
     else if (Array.isArray(axis.values)) {
       // Static labels must stay attached to their split value when zoomed or
       // when uPlot filters log ticks. Resolve to trusted callbacks, not index labels.

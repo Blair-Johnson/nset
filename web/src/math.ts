@@ -11,14 +11,18 @@ function finite(value: number, name: string): number {
 
 /** Ascending x; largest seq wins duplicate x, with last input winning tied seq.
  * Does not mutate inputs. Numeric fields must be finite (even discarded rows).
+ * Relative x is timestamp - runStart, in backend milliseconds. The explicit
+ * finite run origin is required even for empty data; first logging is not start.
  */
-export function canonicalize(points: Point[], axis: 'step' | 'timestamp'): XY[] {
-  if (axis !== 'step' && axis !== 'timestamp') throw new RangeError('Unknown axis');
+export function canonicalize(points: Point[], axis: 'step' | 'timestamp' | 'relative', runStart?: number): XY[] {
+  if (axis !== 'step' && axis !== 'timestamp' && axis !== 'relative') throw new RangeError('Unknown axis');
+  if (axis === 'relative') finite(runStart!, 'runStart');
   const latest = new Map<number, Point>();
   for (const p of points) {
     for (const key of ['seq', 'step', 'timestamp', 'value'] as const) finite(p[key], key);
-    const prior = latest.get(p[axis]);
-    if (!prior || p.seq >= prior.seq) latest.set(p[axis], p);
+    const x = axis === 'relative' ? finite(p.timestamp - runStart!, 'Relative timestamp') : p[axis];
+    const prior = latest.get(x);
+    if (!prior || p.seq >= prior.seq) latest.set(x, p);
   }
   return Array.from(latest, ([x, p]): XY => [x, p.value]).sort((a, b) => a[0] - b[0]);
 }
