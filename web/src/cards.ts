@@ -4,6 +4,7 @@ import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { withMetricLabel } from "./card-label";
+import { nextCursorPlacement } from "./cursor-placement";
 import { formatDuration, formatXValue } from "./options";
 import { element, isAbort, message } from "./utils";
 import type {
@@ -379,6 +380,17 @@ export class ChartCard {
       onPin: (pin, value) => this.setPin(pin, value),
       onHorizontalPin: (pin, value) =>
         this.setPin(pin === "a" ? "yA" : "yB", value),
+      onCursorModeCycle: () => {
+        const next = nextCursorPlacement({
+          mode: this.mode,
+          cursorAxis: this.cursorAxis,
+        });
+        this.mode = next.mode;
+        this.cursorAxis = next.cursorAxis;
+        this.activePin = next.activePin;
+        if (next.mode === "inspect") this.inspectOpen = true;
+        this.configure();
+      },
       onPlacementComplete: (pin) => {
         const first = pin === "a" || pin === "yA";
         this.activePin = first ? "b" : this.activePin;
