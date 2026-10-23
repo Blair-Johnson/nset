@@ -19,13 +19,25 @@ use serde_json::{Value, json};
 pub fn router(state: AppState) -> Router {
     // Only supported writes pass through admission. Authentication below wraps
     // this layer, so unauthorized requests return 401 even when slots are full.
+    let admission = middleware::from_fn_with_state(state.clone(), admit_write);
     let writes = Router::new()
-        .route("/experiments", post(create_experiment))
-        .route("/runs", post(create_run))
-        .route("/runs/{id}", patch(patch_run))
-        .route("/runs/{id}/metrics", post(insert_metrics))
-        .route("/runs/{id}/images", post(insert_image))
-        .route_layer(middleware::from_fn_with_state(state.clone(), admit_write));
+        .route(
+            "/experiments",
+            post(create_experiment).route_layer(admission.clone()),
+        )
+        .route("/runs", post(create_run).route_layer(admission.clone()))
+        .route(
+            "/runs/{id}",
+            patch(patch_run).route_layer(admission.clone()),
+        )
+        .route(
+            "/runs/{id}/metrics",
+            post(insert_metrics).route_layer(admission.clone()),
+        )
+        .route(
+            "/runs/{id}/images",
+            post(insert_image).route_layer(admission),
+        );
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/catalog", get(catalog))

@@ -133,6 +133,13 @@ async fn saturated_writes_do_not_block_reads_health_assets_or_route_errors() {
     assert!(!response.headers().contains_key(header::RETRY_AFTER));
     for (method, uri, status) in [
         ("POST", "/api/health", StatusCode::METHOD_NOT_ALLOWED),
+        ("PATCH", "/api/experiments", StatusCode::METHOD_NOT_ALLOWED),
+        ("POST", "/api/runs/missing", StatusCode::METHOD_NOT_ALLOWED),
+        (
+            "PATCH",
+            "/api/runs/missing/metrics",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
         ("POST", "/api/missing", StatusCode::NOT_FOUND),
         (
             "DELETE",

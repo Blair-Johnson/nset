@@ -769,10 +769,17 @@ async fn concurrent_writers_and_readers_keep_every_observation() {
     let app = TestApp::new();
     let id = app.run().await;
     let mut tasks = Vec::new();
+    // Keep the integrity workload within admission capacity. Saturation and
+    // fail-fast rejection are exercised independently in backend_admission.
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        nset::config::MAX_ACTIVE_WRITES,
+    ));
     for batch in 0..20 {
         let router = app.app.clone();
         let id = id.clone();
+        let slots = slots.clone();
         tasks.push(tokio::spawn(async move {
+            let _permit = slots.acquire().await.unwrap();
             let metrics: Vec<_> = (0..100)
                 .map(|offset| json!({"key":"x","step":batch*100+offset,"value":offset}))
                 .collect();
