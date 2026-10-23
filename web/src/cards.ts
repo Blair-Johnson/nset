@@ -2,13 +2,16 @@ import { analyze, PlotPanel, type Analyzed, type Pins } from "./plot";
 import { ImagePanel } from "./images";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
+import { withRunColors } from "./series-colors";
+import { withMetricLabel } from "./card-label";
 import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
   CardContext,
   ChartSpec,
   InteractionMode,
-  NavigationAxis,
+  CardLayout,
+  ResolvedSeries,
 } from "./workspace-types";
 import "./cards.css";
 
@@ -78,12 +81,23 @@ export class ChartCard {
   private visible = typeof IntersectionObserver === "undefined";
   private loaded = false;
   private data: Analyzed[] = [];
-  private mode: InteractionMode = "pan";
-  private axis: NavigationAxis = "both";
+  private mode: InteractionMode = "zoom";
+  private cursorAxis: "x" | "y" = "x";
+  private inspectOpen = false;
+  private sources: ResolvedSeries[] = [];
+  private legendDetails = element("details", "card-legend-details");
+  private cursorButtons = new Map<"x" | "y", HTMLButtonElement>();
+  private resizeHandle?: HTMLButtonElement;
+  private resizeGesture?: {
+    pointer: number;
+    x: number;
+    y: number;
+    start: CardLayout;
+    next: CardLayout;
+  };
   private activePin: "a" | "b" = "a";
   private pins: Pins = { a: null, b: null, threshold: null };
   private inputs = new Map<keyof Pins, HTMLInputElement>();
-  private modes = new Map<InteractionMode, HTMLButtonElement>();
   private backButton?: HTMLButtonElement;
   private full = false;
   private maximize: HTMLButtonElement;
@@ -109,12 +123,14 @@ export class ChartCard {
       (event) => {
         if (event.key === "Escape") {
           this.menu.open = false;
+          this.cancelResize();
           if (this.full) this.setMaximized(false);
         }
       },
       { signal: this.lifetime.signal },
     );
     this.build();
+    this.installResize();
     if (typeof IntersectionObserver !== "undefined") {
       this.observer = new IntersectionObserver(
         (entries) => {
@@ -130,7 +146,121 @@ export class ChartCard {
     this.updateActive();
   }
 
+  private displayConfig(): ViewConfig {
+    return withMetricLabel(
+      withRunColors(this.spec.config, this.sources, this.context.catalog),
+      this.spec.source,
+    );
+  }
+
+  /** Derived colors only: keep observations, interpolators, pins and navigation alive. */
+  refreshColors(): void {
+    if (this.destroyed || !this.plot) return;
+    this.plot.refreshColors(this.displayConfig());
+    this.renderLegend();
+  }
+
+  private applyDimensions(layout = this.spec.layout) {
+    const width = layout
+      ? `${layout.width}px`
+      : this.spec.size === "wide"
+        ? "100%"
+        : "calc(50% - 6px)";
+    this.root.style.setProperty("--card-width", width);
+    this.host.style.setProperty("--card-width", width);
+    this.root.style.height = `${layout?.height ?? (this.spec.kind === "image" ? 410 : this.spec.config.height + 112)}px`;
+  }
+
+  private commitDimensions(layout: CardLayout) {
+    try {
+      if (this.actions.onDimensions?.(this.spec.id, layout) === false) {
+        this.applyDimensions();
+        return;
+      }
+      this.spec = { ...this.spec, layout };
+      this.applyDimensions();
+    } catch {
+      this.applyDimensions();
+    }
+  }
+
+  private cancelResize() {
+    const gesture = this.resizeGesture;
+    if (!gesture) return;
+    this.resizeGesture = undefined;
+    if (this.resizeHandle?.hasPointerCapture(gesture.pointer))
+      this.resizeHandle.releasePointerCapture(gesture.pointer);
+    this.applyDimensions();
+  }
+
+  private installResize() {
+    if (!this.actions.onDimensions) return;
+    const handle = (this.resizeHandle = button("◢", "Resize chart", () => {}));
+    handle.classList.add("card-resize-handle");
+    handle.title =
+      "Drag to resize; arrow keys adjust width and height (Shift: larger steps)";
+    const bounded = (width: number, height: number): CardLayout => ({
+      width: Math.round(Math.min(4096, Math.max(300, width))),
+      height: Math.round(Math.min(2160, Math.max(240, height))),
+    });
+    handle.onpointerdown = (event) => {
+      if (event.button !== 0 || this.full) return;
+      event.preventDefault();
+      const rect = this.root.getBoundingClientRect();
+      const start = { width: rect.width, height: rect.height };
+      this.resizeGesture = {
+        pointer: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        start,
+        next: start,
+      };
+      handle.setPointerCapture(event.pointerId);
+      handle.focus();
+    };
+    handle.onpointermove = (event) => {
+      const g = this.resizeGesture;
+      if (!g || g.pointer !== event.pointerId) return;
+      g.next = bounded(
+        g.start.width + event.clientX - g.x,
+        g.start.height + event.clientY - g.y,
+      );
+      this.applyDimensions(g.next);
+    };
+    handle.onpointerup = (event) => {
+      const g = this.resizeGesture;
+      if (!g || g.pointer !== event.pointerId) return;
+      this.resizeGesture = undefined;
+      handle.releasePointerCapture(event.pointerId);
+      this.commitDimensions(g.next);
+    };
+    handle.onpointercancel = () => this.cancelResize();
+    handle.onlostpointercapture = () => this.cancelResize();
+    handle.onkeydown = (event) => {
+      if (!event.key.startsWith("Arrow") || this.full || this.resizeGesture)
+        return;
+      event.preventDefault();
+      const rect = this.root.getBoundingClientRect();
+      const current = this.spec.layout ?? {
+        width: rect.width,
+        height: rect.height,
+      };
+      const step = event.shiftKey ? 50 : 10;
+      const dx =
+        event.key === "ArrowRight"
+          ? step
+          : event.key === "ArrowLeft"
+            ? -step
+            : 0;
+      const dy =
+        event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0;
+      this.commitDimensions(bounded(current.width + dx, current.height + dy));
+    };
+    this.root.append(handle);
+  }
+
   private setMaximized(value: boolean) {
+    this.cancelResize();
     this.full = value;
     this.root.classList.toggle("card-maximized", value);
     this.maximize.setAttribute(
@@ -148,6 +278,7 @@ export class ChartCard {
     this.host.dataset.cardId = this.spec.id;
     this.host.dataset.cardKind = this.spec.kind;
     this.root.classList.toggle("card-wide", this.spec.size === "wide");
+    this.applyDimensions();
     this.title.textContent = this.spec.title;
     this.menu.replaceChildren();
     const summary = element("summary", "card-menu-toggle", "⋯");
@@ -163,19 +294,13 @@ export class ChartCard {
       );
     item("Edit chart", () => this.actions.onEdit(this.spec.id));
     item("Duplicate", () => this.actions.onDuplicate(this.spec.id));
-    item(this.spec.size === "wide" ? "Normal width" : "Wide", () =>
-      this.actions.onResize(
-        this.spec.id,
-        this.spec.size === "wide" ? "normal" : "wide",
-      ),
-    );
     item("Move up", () => this.actions.onMove(this.spec.id, -1));
     item("Move down", () => this.actions.onMove(this.spec.id, 1));
     item("Remove", () => this.actions.onRemove(this.spec.id));
     this.menu.append(summary, items);
     this.content.replaceChildren();
     this.inputs.clear();
-    this.modes.clear();
+    this.cursorButtons.clear();
     if (this.spec.kind === "image") {
       this.images = new ImagePanel(this.content, this.context.api, {
         compact: true,
@@ -183,64 +308,47 @@ export class ChartCard {
       return;
     }
     const toolbar = element("div", "card-chart-toolbar");
-    for (const [mode, label, hint] of [
-      ["pan", "Pan", "Drag to pan; Alt + scroll to zoom"],
-      ["zoom", "Zoom", "Drag a box to zoom"],
-      ["inspect", "Inspect", "Place or drag A and B to compare values"],
-      [
-        "threshold",
-        "Threshold",
-        "Place or drag a value to find every crossing",
-      ],
-    ] as const) {
-      const control = button(label, hint, () => {
-        this.mode = mode;
-        this.configure();
-      });
-      control.setAttribute("aria-label", label);
-      this.modes.set(mode, control);
-      toolbar.append(control);
-    }
-    const axis = element("select", "card-axis");
-    axis.setAttribute("aria-label", "Navigation axes");
-    axis.title = "Axes to zoom";
-    for (const [value, label] of [
-      ["both", "X + Y"],
-      ["x", "X"],
-      ["y", "Y"],
-    ]) {
-      const option = element("option", "", label);
-      option.value = value;
-      axis.append(option);
-    }
-    axis.value = this.axis;
-    axis.onchange = () => {
-      this.axis = axis.value as NavigationAxis;
-      this.configure();
-    };
-    this.backButton = button("Back", "Previous view", () => this.plot?.back());
+    this.backButton = button("↶", "Previous view", () => this.plot?.back());
     toolbar.append(
-      axis,
-      button("−", "Zoom out", () => this.plot?.zoom(1 / 1.5, this.axis)),
-      button("+", "Zoom in", () => this.plot?.zoom(1.5, this.axis)),
-      button("Fit", "Fit configured range", () => this.plot?.reset()),
+      button("−", "Zoom out", () => this.plot?.zoom(1 / 1.5, "both")),
+      button("+", "Zoom in", () => this.plot?.zoom(1.5, "both")),
+      button("⛶", "Fit configured range", () => this.plot?.reset()),
       this.backButton,
     );
+    for (const [axis, icon, label] of [
+      ["x", "┆", "Add vertical cursor"],
+      ["y", "╌", "Add horizontal cursor"],
+    ] as const) {
+      const control = button(icon, label, () => {
+        this.cursorAxis = axis;
+        this.activePin =
+          (axis === "x" ? this.pins.a : this.pins.yA) == null ? "a" : "b";
+        this.mode = "inspect";
+        this.inspectOpen = true;
+        this.configure();
+      });
+      this.cursorButtons.set(axis, control);
+      toolbar.append(control);
+    }
     const plotHost = element("div", "card-plot");
     plotHost.dataset.role = "plot";
-    plotHost.style.minHeight = `${this.spec.config.height}px`;
     this.inspection = element("div", "card-inspection");
     this.results = element("div", "card-results");
     this.hover = element("div", "card-hover");
     this.legend = element("div", "card-legend");
     this.legend.setAttribute("role", "list");
     this.legend.setAttribute("aria-label", "Chart series");
+    this.legendDetails = element("details", "card-legend-details");
+    this.legendDetails.append(
+      element("summary", "", "Show legend"),
+      this.legend,
+    );
     this.clipping = element("div", "card-clipping");
     this.content.append(
       toolbar,
       this.clipping,
       plotHost,
-      this.legend,
+      this.legendDetails,
       this.hover,
       this.inspection,
     );
@@ -251,55 +359,91 @@ export class ChartCard {
         // Precision details belong in a tooltip, not a permanent diagnostics paragraph.
         plotHost.title = warnings.join("\n");
       },
+      true,
     );
     this.configure();
   }
 
-  private configure() {
+  private configure(rebuild = true) {
     if (!this.plot) return;
+    const placed = (pin: keyof Pins, value: number) => {
+      this.setPin(pin, value);
+      if (this.mode === "inspect" || this.mode === "threshold") {
+        this.mode = "zoom";
+        this.configure(false);
+      }
+    };
     this.plot.configureInteraction({
       mode: this.mode,
-      axis: this.axis,
+      axis: "both",
+      inferZoomAxes: true,
+      directGestures: true,
+      cursorAxis: this.cursorAxis,
       activePin: this.activePin,
-      onPin: (pin, value) => this.setPin(pin, value),
+      onPin: placed,
+      onHorizontalPin: (pin, value) => placed(pin === "a" ? "yA" : "yB", value),
       onHover: (x) => {
-        this.hover.textContent =
-          x === null
-            ? ""
-            : this.data
-                .map(
-                  (series) =>
-                    `${series.run.name}: ${this.number(series.fn.at(x))}`,
-                )
-                .join(" · ");
+        this.hover.replaceChildren();
+        if (x === null) return;
+        for (const series of this.data) {
+          const row = element("div", "card-hover-row");
+          const name = element("span", "", series.run.name);
+          name.title = series.run.name;
+          row.append(name, element("span", "", this.number(series.fn.at(x))));
+          this.hover.append(row);
+        }
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
       },
     });
-    for (const [mode, control] of this.modes)
-      control.setAttribute("aria-pressed", String(mode === this.mode));
+    for (const [axis, control] of this.cursorButtons)
+      control.setAttribute(
+        "aria-pressed",
+        String(this.mode === "inspect" && axis === this.cursorAxis),
+      );
     if (this.backButton) this.backButton.disabled = !this.plot.canGoBack();
+    for (const control of this.inspection.querySelectorAll<HTMLButtonElement>(
+      "[data-pin]",
+    ))
+      control.setAttribute(
+        "aria-pressed",
+        String(
+          this.mode === "inspect" && control.dataset.pin === this.activePin,
+        ),
+      );
+    if (!rebuild) return;
     this.inspection.replaceChildren();
     this.inputs.clear();
-    this.inspection.hidden =
-      this.mode !== "inspect" && this.mode !== "threshold";
+    this.inspection.hidden = !this.inspectOpen && this.mode !== "threshold";
     if (this.inspection.hidden) return;
     const fields = element("div", "card-pin-fields");
     const names: (keyof Pins)[] =
-      this.mode === "inspect" ? ["a", "b"] : ["threshold"];
+      this.mode === "threshold"
+        ? ["threshold"]
+        : this.cursorAxis === "x"
+          ? ["a", "b"]
+          : ["yA", "yB"];
     for (const name of names) {
       const label = element("label", "card-pin-label");
+      const letter = name === "a" || name === "yA" ? "A" : "B";
       if (name !== "threshold") {
         const choice = button(
-          name.toUpperCase(),
-          `Select cursor ${name.toUpperCase()}`,
+          letter,
+          `Place ${this.cursorAxis === "x" ? "vertical" : "horizontal"} cursor ${letter}`,
           () => {
-            this.activePin = name;
+            this.activePin = letter === "A" ? "a" : "b";
+            this.mode = "inspect";
             this.configure();
           },
         );
-        choice.setAttribute("aria-pressed", String(name === this.activePin));
+        choice.dataset.pin = letter.toLowerCase();
+        choice.setAttribute(
+          "aria-pressed",
+          String(
+            letter.toLowerCase() === this.activePin && this.mode === "inspect",
+          ),
+        );
         label.append(choice);
       } else label.append(element("span", "", "Value"));
       const input = element("input", "card-coordinate");
@@ -309,22 +453,26 @@ export class ChartCard {
         "aria-label",
         name === "threshold"
           ? "Threshold value"
-          : `Cursor ${name.toUpperCase()} coordinate`,
+          : `Cursor ${letter} ${this.cursorAxis === "x" ? "coordinate" : "level"}`,
       );
-      input.value = this.pins[name] === null ? "" : String(this.pins[name]);
+      input.value = this.pins[name] == null ? "" : String(this.pins[name]);
       input.onchange = () => {
         if (input.value === "") this.setPin(name, null);
         else if (Number.isFinite(input.valueAsNumber))
           this.setPin(name, input.valueAsNumber);
+        this.mode = "zoom";
+        this.configure(false);
       };
       this.inputs.set(name, input);
       label.append(input);
       fields.append(label);
     }
     fields.append(
-      button("Clear", "Clear cursors", () => {
-        this.pins = { a: null, b: null, threshold: null };
+      button("×", "Clear cursors", () => {
+        this.pins = { a: null, b: null, threshold: null, yA: null, yB: null };
         this.plot?.setPins(this.pins);
+        this.mode = "zoom";
+        this.inspectOpen = false;
         this.configure();
       }),
     );
@@ -334,16 +482,26 @@ export class ChartCard {
 
   private renderLegend() {
     this.legend.replaceChildren();
-    const config = this.spec.config;
+    const config = this.displayConfig();
     const advanced = config.advanced.legend as { show?: boolean } | undefined;
-    if (!(advanced?.show ?? config.legend)) return;
+    this.legendDetails.hidden = !(advanced?.show ?? config.legend);
+    if (this.legendDetails.hidden) return;
     this.data.forEach((series, index) => {
       const style = styleFor(config, series.run.id, index);
       const item = element("span", "card-legend-item");
       item.setAttribute("role", "listitem");
       const swatch = element("span", "card-legend-swatch");
       swatch.style.backgroundColor = style.color;
-      item.append(swatch, document.createTextNode(series.run.name));
+      const source = this.sources[index];
+      const name = element(
+        "span",
+        "card-legend-name",
+        source?.run.name ?? series.run.name,
+      );
+      const key = element("span", "card-legend-key", source?.key ?? "");
+      name.title = name.textContent ?? "";
+      key.title = key.textContent ?? "";
+      item.append(swatch, name, key);
       if (!style.visible) {
         item.classList.add("card-series-hidden");
         item.title = "Hidden in chart settings";
@@ -366,7 +524,11 @@ export class ChartCard {
   }
   private renderResults() {
     this.results.replaceChildren();
-    if (this.mode === "inspect") {
+    if (
+      this.inspectOpen &&
+      this.cursorAxis === "x" &&
+      this.mode !== "threshold"
+    ) {
       const table = element("table", "card-value-table");
       const head = element("tr");
       for (const name of ["Series", "A", "B", "Δ B − A"])
@@ -382,30 +544,51 @@ export class ChartCard {
         table.append(row);
       }
       this.results.append(table);
-    } else if (this.mode === "threshold" && this.pins.threshold !== null) {
-      for (const series of this.data) {
-        const crossings = series.fn.crossings(this.pins.threshold);
-        const details = element("details", "card-crossings");
-        details.append(
+    } else if (this.inspectOpen || this.mode === "threshold") {
+      const levels: [string, number | null | undefined][] =
+        this.mode === "threshold"
+          ? [["Threshold", this.pins.threshold]]
+          : [
+              ["A", this.pins.yA],
+              ["B", this.pins.yB],
+            ];
+      if (this.mode !== "threshold") {
+        const a = this.pins.yA,
+          b = this.pins.yB;
+        this.results.append(
           element(
-            "summary",
-            "",
-            `${series.run.name} · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
+            "div",
+            "card-delta-y",
+            `A ${this.number(a ?? null)} · B ${this.number(b ?? null)} · Δ Y ${this.number(a == null || b == null ? null : b - a)}`,
           ),
         );
-        const list = element("div");
-        list.textContent =
-          [
-            ...crossings.points.map((x) =>
-              formatValue(x, this.spec.config.xFormat),
+      }
+      for (const [label, level] of levels) {
+        if (level == null) continue;
+        for (const series of this.data) {
+          const crossings = series.fn.crossings(level);
+          const details = element("details", "card-crossings");
+          details.append(
+            element(
+              "summary",
+              "",
+              `${label} · ${series.run.name} · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
             ),
-            ...crossings.plateaus.map(
-              ([a, b]) =>
-                `${formatValue(a, this.spec.config.xFormat)} – ${formatValue(b, this.spec.config.xFormat)}`,
-            ),
-          ].join(", ") || "No crossings";
-        details.append(list);
-        this.results.append(details);
+          );
+          const list = element("div");
+          list.textContent =
+            [
+              ...crossings.points.map((x) =>
+                formatValue(x, this.spec.config.xFormat),
+              ),
+              ...crossings.plateaus.map(
+                ([a, b]) =>
+                  `${formatValue(a, this.spec.config.xFormat)} – ${formatValue(b, this.spec.config.xFormat)}`,
+              ),
+            ].join(", ") || "No crossings";
+          details.append(list);
+          this.results.append(details);
+        }
       }
     }
   }
@@ -441,11 +624,11 @@ export class ChartCard {
     this.hover.textContent = "";
     this.clipping.replaceChildren();
     this.renderResults();
-    const sources = resolveSources(
+    const sources = (this.sources = resolveSources(
       this.spec,
       this.context.selectedRunIds,
       this.context.catalog,
-    );
+    ));
     const expected =
       this.spec.source.mode === "explicit"
         ? new Set(
@@ -485,17 +668,18 @@ export class ChartCard {
       )
         return;
       this.data = analyze(data, this.spec.config);
+      const display = this.displayConfig();
       const config =
         this.spec.outliers === "robust"
-          ? robustConfig(this.data, this.spec.config)
-          : this.spec.config;
+          ? robustConfig(this.data, display)
+          : display;
       this.plot?.render(this.data, config, this.pins);
       this.renderLegend();
-      if (config !== this.spec.config) {
+      if (config !== display) {
         this.clipping.append(
           element("span", "", "Central 98% · display clipped"),
           button("Fit all", "Show all values in this view", () => {
-            this.plot?.render(this.data, this.spec.config, this.pins);
+            this.plot?.render(this.data, this.displayConfig(), this.pins);
             this.clipping.replaceChildren();
           }),
           button("Edit", "Edit chart range", () =>
@@ -533,6 +717,25 @@ export class ChartCard {
   }
   setSpec(spec: ChartSpec): void {
     if (this.destroyed) return;
+    const contentKey = ({
+      layout: _layout,
+      size: _size,
+      title: _title,
+      config,
+      ...rest
+    }: ChartSpec) =>
+      JSON.stringify({
+        ...rest,
+        config: { ...config, width: null, height: 0 },
+      });
+    if (contentKey(spec) === contentKey(this.spec)) {
+      this.cancelResize();
+      this.spec = spec;
+      this.title.textContent = spec.title;
+      this.root.classList.toggle("card-wide", spec.size === "wide");
+      this.applyDimensions();
+      return;
+    }
     if (spec.config.axis !== this.spec.config.axis)
       this.pins = { a: null, b: null, threshold: null };
     this.cancel();
@@ -566,6 +769,7 @@ export class ChartCard {
   }
   destroy(): void {
     if (this.destroyed) return;
+    this.cancelResize();
     this.destroyed = true;
     this.cancel();
     this.observer?.disconnect();

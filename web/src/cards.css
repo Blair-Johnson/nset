@@ -383,3 +383,179 @@
 .card-image-panel:fullscreen::backdrop {
   background: var(--bg);
 }
+
+/* Geometry is owned by the card, not by a recreated plot or image viewer. */
+.chart-card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 240px;
+}
+.card-header {
+  flex: none;
+  padding: 5px 9px;
+}
+.card-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  gap: 4px;
+}
+.card-chart-toolbar {
+  flex: none;
+  margin-bottom: 0;
+}
+.card-chart-toolbar button {
+  min-width: 28px;
+}
+.card-plot {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 100px;
+}
+.card-clipping,
+.card-status,
+.card-notice {
+  flex: none;
+}
+.card-inspection {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 48%;
+  overflow: auto;
+  padding-top: 4px;
+}
+.card-results {
+  max-height: 150px;
+}
+.card-value-table {
+  table-layout: fixed;
+}
+.card-value-table th,
+.card-value-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-crossings summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-legend-details {
+  flex: none;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.card-legend-details > summary {
+  cursor: pointer;
+  width: fit-content;
+  padding: 1px 5px;
+}
+.card-legend {
+  display: block;
+  max-height: 95px;
+  padding: 3px 5px;
+}
+.card-legend-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 0;
+}
+.card-legend-name,
+.card-legend-key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-hover {
+  position: absolute;
+  z-index: 5;
+  top: 43px;
+  right: 15px;
+  width: min(290px, calc(100% - 45px));
+  height: auto;
+  max-height: 112px;
+  overflow: auto;
+  white-space: normal;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-raised, #252a30);
+  pointer-events: none;
+}
+.card-hover:empty {
+  display: none;
+}
+.card-hover-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.card-hover-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-card .card-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.card-maximized {
+  width: auto;
+  height: auto !important;
+  overflow: hidden;
+}
+.card-maximized .card-plot {
+  min-height: 100px;
+}
+.card-maximized .card-resize-handle {
+  display: none;
+}
+.card-content.card-image-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.card-image-toolbar,
+.card-image-timeline {
+  flex: none;
+}
+.card-content.card-image-panel .image-canvas {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 70px;
+}
+.chart-card select,
+.card-image-panel select {
+  padding-right: 26px;
+}
+@media (max-width: 600px) {
+  .card-header {
+    padding: 4px 6px;
+  }
+  .card-content {
+    padding: 5px;
+  }
+  .card-pin-fields {
+    gap: 4px;
+  }
+}
