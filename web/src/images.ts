@@ -3,6 +3,7 @@ import { Api, type Run, type ImageFrame } from "./api";
 import { boundedIndex, element, isAbort, message, Latest } from "./utils";
 import type { ResolvedSeries } from "./workspace-types";
 import "./cards.css";
+import "./image-viewer.css";
 interface Cached {
   url: string;
   bytes: number;
@@ -36,7 +37,7 @@ export class ImagePanel {
   private keySelect = element("select");
   private slider = element("input");
   private info = element("div", "frame-info");
-  private status = element("div", "muted");
+  private status = element("div", "image-frame-status");
   private play = element("button", "", "Play");
   private speed = element("select");
   private cameraInfo = element("div", "muted camera-info");
@@ -160,7 +161,7 @@ export class ImagePanel {
       void this.show(Number(this.slider.value));
     };
     timeline.append(this.slider, this.info);
-    this.host.append(toolbar, canvas, timeline, this.status, this.cameraInfo);
+    this.host.append(toolbar, canvas, timeline, this.cameraInfo);
     this.status.setAttribute("role", "status");
     this.cameraInfo.hidden = this.compact;
     this.viewer = OpenSeadragon({
@@ -176,6 +177,7 @@ export class ImagePanel {
       crossOriginPolicy: false,
       gestureSettingsMouse: { clickToZoom: false, scrollToZoom: false },
     });
+    canvas.append(this.status);
     this.viewer.addHandler("canvas-scroll", (event) => {
       // OpenSeadragon must not consume ordinary dashboard scrolling.
       (event as unknown as { preventDefault: boolean }).preventDefault = false;
@@ -450,58 +452,47 @@ export class ImagePanel {
     this.frameAbort?.abort();
     const controller = new AbortController();
     this.frameAbort = controller;
-    this.status.textContent = `Loading frame ${index + 1}/${this.frames.length}…`;
+    // Keep the last decoded image and metadata visible while preparing.
+    this.status.textContent = "";
     try {
       const entry = await this.blob(frame, controller.signal);
       if (!this.requests.current(generation)) return;
-      await new Promise<void>((resolve, reject) => {
-        this.viewer.addTiledImage({
-          tileSource: { type: "image", url: entry.url, buildPyramid: false },
-          success: (event) => {
-            const itemOpened = (
-              event as unknown as { item: OpenSeadragon.TiledImage }
-            ).item;
-            if (!this.requests.current(generation)) {
-              this.viewer.world.removeItem(itemOpened);
-              resolve();
-              return;
-            }
-            const bounds = this.viewer.viewport.getBounds(true);
-            const first = !this.displayed;
-            for (let i = this.viewer.world.getItemCount() - 1; i >= 0; i--) {
-              const item = this.viewer.world.getItemAt(i);
-              if (item !== itemOpened) this.viewer.world.removeItem(item);
-            }
-            if (first) {
-              if (this.active) {
-                this.viewer.viewport.resize(
-                  new OpenSeadragon.Point(
-                    this.viewer.container.clientWidth,
-                    this.viewer.container.clientHeight,
-                  ),
-                  true,
-                );
-                this.viewer.viewport.goHome(true);
-                this.needsHome = false;
-              } else this.needsHome = true;
-            } else this.viewer.viewport.fitBounds(bounds, true);
-            this.displayed = frame.id;
-            this.info.textContent = `${this.runs.find((r) => r.id === frame.run_id)?.name ?? "Run"} / ${frame.key}  ·  step ${frame.step}  ·  ${new Date(frame.timestamp).toISOString()}  ·  ${index + 1} of ${this.frames.length}`;
-            if (this.compact) {
-              this.info.textContent = `Step ${frame.step} · ${index + 1} / ${this.frames.length}`;
-              this.info.title = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} · ${frame.key} · ${new Date(frame.timestamp).toISOString()}`;
-            }
-            this.status.textContent = this.compact
-              ? ""
-              : `${frame.content_type} · ${(frame.byte_length / 1024).toFixed(1)} KiB`;
-            this.info.dataset.step = String(frame.step);
-            this.evict(frame.id);
-            resolve();
-          },
-          error: () =>
-            reject(new Error("Image decoder could not open this frame.")),
-        });
-      });
+      const itemOpened = await this.prepare(entry.url, controller.signal);
+      if (!this.requests.current(generation)) {
+        this.viewer.world.removeItem(itemOpened);
+        return;
+      }
+      const bounds = this.viewer.viewport.getBounds(true);
+      const first = !this.displayed;
+      // Both changes land in one draw; never expose an empty world or an
+      // undecoded replacement, including frames with transparent pixels.
+      itemOpened.setOpacity(1);
+      for (let i = this.viewer.world.getItemCount() - 1; i >= 0; i--) {
+        const item = this.viewer.world.getItemAt(i);
+        if (item !== itemOpened) this.viewer.world.removeItem(item);
+      }
+      if (first) {
+        if (this.active) {
+          this.viewer.viewport.resize(
+            new OpenSeadragon.Point(
+              this.viewer.container.clientWidth,
+              this.viewer.container.clientHeight,
+            ),
+            true,
+          );
+          this.viewer.viewport.goHome(true);
+          this.needsHome = false;
+        } else this.needsHome = true;
+      } else this.viewer.viewport.fitBounds(bounds, true);
+      this.displayed = frame.id;
+      this.viewer.forceRedraw();
+      this.info.textContent = `${this.runs.find((r) => r.id === frame.run_id)?.name ?? "Run"} / ${frame.key}  ·  step ${frame.step}  ·  ${new Date(frame.timestamp).toISOString()}  ·  ${index + 1} of ${this.frames.length}`;
+      if (this.compact) {
+        this.info.textContent = `Step ${frame.step} · ${index + 1} / ${this.frames.length}`;
+        this.info.title = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} · ${frame.key} · ${new Date(frame.timestamp).toISOString()}`;
+      }
+      this.info.dataset.step = String(frame.step);
+      this.evict(frame.id);
       if (!this.requests.current(generation)) return;
       this.prefetchAbort?.abort();
       const prefetch = new AbortController();
@@ -513,13 +504,83 @@ export class ImagePanel {
           .catch(() => {});
     } catch (error) {
       if (this.requests.current(generation) && !isAbort(error)) {
-        this.viewer.close();
-        this.displayed = undefined;
-        this.info.textContent = "Frame unavailable";
-        this.status.textContent = message(error);
+        const failed = this.cache.get(frame.id);
+        if (failed && frame.id !== this.displayed) {
+          URL.revokeObjectURL(failed.url);
+          this.cache.delete(frame.id);
+        }
+        if (!this.displayed) this.info.textContent = "Frame unavailable";
+        this.status.textContent = `Frame unavailable: ${message(error)}`;
         this.stop();
       }
     }
+  }
+  /** Invisible staging; cancellation settles even during decode. */
+  private prepare(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<OpenSeadragon.TiledImage> {
+    return new Promise((resolve, reject) => {
+      let item: OpenSeadragon.TiledImage | undefined;
+      let settled = false;
+      const cleanup = () => {
+        signal.removeEventListener("abort", abort);
+        item?.removeHandler("fully-loaded-change", ready);
+        this.viewer.removeHandler("tile-load-failed", failed);
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (item) this.viewer.world.removeItem(item);
+        reject(error);
+      };
+      const abort = () => fail(new DOMException("Aborted", "AbortError"));
+      const ready = () => {
+        if (settled || !item?.getFullyLoaded()) return;
+        if (signal.aborted) return abort();
+        settled = true;
+        cleanup();
+        resolve(item);
+      };
+      const failed = (event: OpenSeadragon.ViewerEvent) => {
+        if (
+          (event as unknown as { tiledImage: OpenSeadragon.TiledImage })
+            .tiledImage === item
+        )
+          fail(new Error("Image decoder could not load this frame."));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) return abort();
+      const decoded = new Image();
+      decoded.src = url;
+      void decoded.decode().then(
+        () => {
+          if (settled) return;
+          this.viewer.addHandler("tile-load-failed", failed);
+          this.viewer.addTiledImage({
+            tileSource: { type: "image", url, buildPyramid: false },
+            opacity: 0,
+            preload: true,
+            success: (event) => {
+              const opened = (
+                event as unknown as { item: OpenSeadragon.TiledImage }
+              ).item;
+              if (settled) {
+                if (!this.destroyed) this.viewer.world.removeItem(opened);
+                return;
+              }
+              item = opened;
+              item.addHandler("fully-loaded-change", ready);
+              ready();
+            },
+            error: () =>
+              fail(new Error("Image decoder could not open this frame.")),
+          });
+        },
+        () => fail(new Error("Image decoder could not decode this frame.")),
+      );
+    });
   }
   private async step(delta: number) {
     await this.show(this.index + delta);
