@@ -22,7 +22,13 @@ def main():
         for index in range(60):
             run = server.client.start_run(
                 experiment, f"Run {index:02d} training",
-                params={"seed": index, "training.optimizer.lr": 0.001, "enabled": True},
+                params={
+                    "seed": index,
+                    "training.optimizer.lr": 0.001,
+                    "training": {"optimizer": {"lr": 0.002}},
+                    "enabled": index % 2 == 0,
+                    "optional": None,
+                },
             )
             run.log_batch([
                 {"key": "train/loss", "step": step, "value": 3 - step + index / 100}

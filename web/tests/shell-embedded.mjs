@@ -23,6 +23,29 @@ try {
     await page.locator(".run-table tbody tr").first().boundingBox()
   ).height;
   expect(rowHeight).toBeLessThanOrEqual(34);
+  await page.getByText("Columns", { exact: true }).click();
+  const columnSearch = page.getByRole("searchbox", {
+    name: "Search columns",
+    exact: true,
+  });
+  await columnSearch.fill("lr");
+  for (const path of [
+    '$["training.optimizer.lr"]',
+    '$["training"]["optimizer"]["lr"]',
+  ]) {
+    await page.getByRole("checkbox", { name: path, exact: true }).check();
+  }
+  await page.screenshot({
+    path: `${output}/parameter-columns.png`,
+    fullPage: true,
+  });
+  await columnSearch.press("Escape");
+  await expect(
+    page.locator(".run-table tbody tr").first().locator(".parameter-cell"),
+  ).toHaveText(["0.001", "0.002"]);
+  await expect(
+    page.getByRole("button", { name: "train/loss · latest", exact: true }),
+  ).toBeVisible();
   await page.screenshot({
     path: `${output}/table-desktop.png`,
     fullPage: true,
