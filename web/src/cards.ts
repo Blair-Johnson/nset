@@ -228,6 +228,7 @@ export class ChartCard {
     );
     const plotHost = element("div", "card-plot");
     plotHost.dataset.role = "plot";
+    plotHost.style.minHeight = `${this.spec.config.height}px`;
     this.inspection = element("div", "card-inspection");
     this.results = element("div", "card-results");
     this.hover = element("div", "card-hover");

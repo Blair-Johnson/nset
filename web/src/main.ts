@@ -21,6 +21,7 @@ import type {
   CardContext,
 } from "./workspace-types";
 import { ChartCard } from "./cards";
+import { addMissingCharts } from "./dashboard-layout";
 import { openChartEditor } from "./chart-editor";
 import {
   experimentTable,
@@ -58,6 +59,7 @@ const cards = new Map<
 const sectionNodes = new Map<string, HTMLElement>();
 const scrollPositions = new Map<string, number>();
 let previousRoute = "";
+let suspendedDashboard: DocumentFragment | undefined;
 const button = (label: string, fn: () => void, className = "") => {
   const b = element("button", className, label);
   b.type = "button";
@@ -69,10 +71,21 @@ function error(text = "") {
   $("global-error").hidden = !text;
 }
 function persist() {
+  saveLibrary(library);
+}
+function commitLibrary(mutate: () => void): boolean {
+  const before = structuredClone(library);
   try {
-    saveLibrary(library);
+    mutate();
+    persist();
+    error();
+    return true;
   } catch (e) {
+    library = before;
+    disposeCards();
     error(`Could not save this view in your browser: ${message(e)}`);
+    renderPage();
+    return false;
   }
 }
 function disposeCards() {
@@ -80,6 +93,13 @@ function disposeCards() {
   cards.clear();
   sectionNodes.clear();
   currentWorkspaceId = "";
+  suspendedDashboard = undefined;
+}
+function suspendDashboard() {
+  if (!currentWorkspaceId || suspendedDashboard) return;
+  suspendedDashboard = document.createDocumentFragment();
+  for (const card of cards.values()) card.view.setActive(false);
+  suspendedDashboard.append(...$("page").childNodes);
 }
 function currentRoute() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
@@ -128,12 +148,25 @@ function remember(workspace: Workspace) {
   if (stack.length > 15) stack.shift();
   undo.set(workspace.id, stack);
 }
-function change(workspace: Workspace, mutate: () => void) {
-  remember(workspace);
-  mutate();
-  workspace.updatedAt = Date.now();
-  persist();
-  renderCharts(workspace);
+function change(workspace: Workspace, mutate: () => void, strict = false, render = true): boolean {
+  const before = structuredClone(workspace);
+  try {
+    mutate();
+    workspace.updatedAt = Date.now();
+    validateWorkspace(workspace);
+    persist();
+  } catch (e) {
+    Object.assign(workspace, before);
+    renderCharts(workspace);
+    const failure = new Error(`Could not save this view in your browser: ${message(e)}`);
+    if (strict) throw failure;
+    error(failure.message);
+    return false;
+  }
+  remember(before);
+  error();
+  if (render) renderCharts(workspace);
+  return true;
 }
 function locate(workspace: Workspace, id: string) {
   for (const section of workspace.sections) {
@@ -143,10 +176,10 @@ function locate(workspace: Workspace, id: string) {
   return null;
 }
 function updateSelection(workspace: Workspace, ids: string[]) {
-  workspace.selectedRunIds = [...new Set(ids)];
-  workspace.updatedAt = Date.now();
-  persist();
-  if (currentRoute().view === "charts") renderCharts(workspace);
+  const saved = change(workspace, () => {
+    workspace.selectedRunIds = [...new Set(ids)];
+  });
+  if (!saved && currentRoute().view === "runs") renderPage();
 }
 function pageHeader(experimentId: string, view: string): HTMLElement {
   const head = element("div", "page-heading");
@@ -186,7 +219,7 @@ function renderPage() {
   const routeChanged = key !== previousRoute;
   previousRoute = key;
   if (!route.experimentId) {
-    disposeCards();
+    suspendDashboard();
     $("page").replaceChildren(
       pageHeader("", ""),
       experimentTable(catalog, (id) => navigate(id), experimentState),
@@ -205,7 +238,8 @@ function renderPage() {
     }
     const workspace = workspaceFor(experiment.id);
     if (route.view === "runs") {
-      disposeCards();
+      if (currentWorkspaceId && currentWorkspaceId !== workspace.id) disposeCards();
+      else suspendDashboard();
       let state = runStates.get(experiment.id);
       if (!state) {
         state = tableState();
@@ -228,6 +262,10 @@ function renderPage() {
         ),
       );
     } else {
+      if (currentWorkspaceId === workspace.id && suspendedDashboard) {
+        $("page").replaceChildren(suspendedDashboard);
+        suspendedDashboard = undefined;
+      }
       if (currentWorkspaceId !== workspace.id) {
         disposeCards();
         $("page").replaceChildren(pageHeader(experiment.id, "charts"));
@@ -276,7 +314,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
           }
           section.cards.push(next);
         }
-      });
+      }, true);
     },
   });
 }
@@ -322,13 +360,15 @@ async function ask(
       e.preventDefault();
       if (!input.value.trim()) return;
       result = input.value.trim();
-      dialog.close();
+      finish();
     };
-    dialog.onclose = () => {
+    const finish = () => {
+      dialog.close();
       dialog.remove();
       previous?.focus();
       resolve(result);
     };
+    dialog.onclose = finish;
     dialog.showModal();
     input.focus();
     input.select();
@@ -372,6 +412,8 @@ async function confirmRemoval(
 
 function workspaceToolbar(workspace: Workspace) {
   const host = $("workspace-toolbar");
+  const focused = host.contains(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : null;
+  const oldScroll = host.querySelector(".run-picker-options")?.scrollTop ?? 0;
   const openMenus = [
     ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
   ].map((d) => d.dataset.menu);
@@ -391,8 +433,7 @@ function workspaceToolbar(workspace: Workspace) {
   views.value = workspace.id;
   views.onchange = () => {
     scrollPositions.set(workspace.id, window.scrollY);
-    library.activeByExperiment[workspace.experimentId] = views.value;
-    persist();
+    if (!commitLibrary(() => { library.activeByExperiment[workspace.experimentId] = views.value; })) return;
     renderPage();
     requestAnimationFrame(() =>
       window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
@@ -523,10 +564,10 @@ function workspaceToolbar(workspace: Workspace) {
         copy.id = crypto.randomUUID();
         copy.name = name;
         copy.updatedAt = Date.now();
-        library.views.push(copy);
-        library.activeByExperiment[copy.experimentId] = copy.id;
-        persist();
-        renderPage();
+        if (commitLibrary(() => {
+          library.views.push(copy);
+          library.activeByExperiment[copy.experimentId] = copy.id;
+        })) renderPage();
       })(),
   );
   action(
@@ -584,9 +625,10 @@ function workspaceToolbar(workspace: Workspace) {
           "This view belongs to an experiment that is not on this server.",
         );
       imported.id = crypto.randomUUID();
-      library.views.push(imported);
-      library.activeByExperiment[imported.experimentId] = imported.id;
-      persist();
+      if (!commitLibrary(() => {
+        library.views.push(imported);
+        library.activeByExperiment[imported.experimentId] = imported.id;
+      })) return;
       if (currentRoute().experimentId === imported.experimentId) {
         renderPage();
       } else navigate(imported.experimentId, "charts");
@@ -598,29 +640,7 @@ function workspaceToolbar(workspace: Workspace) {
   };
   action("Import view…", () => file.click());
   action("Add missing metric charts", () =>
-    change(workspace, () => {
-      const generated = defaultSections(catalog, workspace.selectedRunIds);
-      const existing = new Set(
-        workspace.sections.flatMap((s) =>
-          s.cards.map(
-            (c) =>
-              `${c.kind}:${c.source.mode === "selected" ? c.source.keys.join("|") : c.id}`,
-          ),
-        ),
-      );
-      for (const s of generated) {
-        const missing = s.cards.filter(
-          (c) =>
-            !existing.has(
-              `${c.kind}:${c.source.mode === "selected" ? c.source.keys.join("|") : c.id}`,
-            ),
-        );
-        if (!missing.length) continue;
-        const target = workspace.sections.find((x) => x.title === s.title);
-        if (target) target.cards.push(...missing);
-        else workspace.sections.push({ ...s, cards: missing });
-      }
-    }),
+    change(workspace, () => addMissingCharts(workspace, catalog)),
   );
   action(
     "Remove view",
@@ -633,18 +653,19 @@ function workspaceToolbar(workspace: Workspace) {
           ))
         )
           return;
-        library.views = library.views.filter((v) => v.id !== workspace.id);
-        delete library.activeByExperiment[workspace.experimentId];
-        persist();
-        renderPage();
+        if (commitLibrary(() => {
+          library.views = library.views.filter((v) => v.id !== workspace.id);
+          delete library.activeByExperiment[workspace.experimentId];
+          workspaceFor(workspace.experimentId);
+        })) renderPage();
       })(),
   );
   more.append(menu, file);
   const undoButton = button("Undo", () => {
-    const previous = undo.get(workspace.id)?.pop();
-    if (previous) {
-      Object.assign(workspace, previous);
-      persist();
+    const stack = undo.get(workspace.id);
+    const previous = stack?.at(-1);
+    if (previous && change(workspace, () => Object.assign(workspace, previous), false, false)) {
+      stack!.splice(-2);
       renderCharts(workspace);
     }
   });
@@ -653,6 +674,8 @@ function workspaceToolbar(workspace: Workspace) {
   host.append(views, chooseRuns, search, undoButton, add, more);
   for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
     if (openMenus.includes(d.dataset.menu)) d.open = true;
+  choices.scrollTop = oldScroll;
+  if (focused) [...host.querySelectorAll<HTMLElement>("[aria-label]")].find(node => node.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
 }
 
 function renderCharts(workspace: Workspace) {
@@ -661,7 +684,7 @@ function renderCharts(workspace: Workspace) {
   workspaceToolbar(workspace);
   const dashboard = $("dashboard");
   const keep = new Set<string>();
-  const contextKey = `${catalogGeneration}:${workspace.selectedRunIds.join(",")}`;
+
   for (const section of workspace.sections) {
     let node = sectionNodes.get(section.id);
     if (!node) {
@@ -678,10 +701,8 @@ function renderCharts(workspace: Workspace) {
     const toggle = button(
       `${section.collapsed ? "▸" : "▾"} ${section.title}`,
       () => {
-        section.collapsed = !section.collapsed;
-        workspace.updatedAt = Date.now();
-        persist();
-        renderCharts(workspace);
+        change(workspace, () => { section.collapsed = !section.collapsed; });
+        sectionNodes.get(section.id)?.querySelector<HTMLButtonElement>(".section-toggle")?.focus({ preventScroll: true });
       },
       "section-toggle",
     );
@@ -766,6 +787,7 @@ function renderCharts(workspace: Workspace) {
         });
     };
     for (const spec of section.cards) {
+      const contextKey = `${catalogGeneration}:${spec.source.mode === "selected" ? workspace.selectedRunIds.join(",") : "explicit"}`;
       keep.add(spec.id);
       let entry = cards.get(spec.id);
       const serialized = JSON.stringify(spec);
@@ -971,6 +993,9 @@ async function connect(refresh = false) {
     }
   }
 }
+$("login-dialog").addEventListener("cancel", (event) => {
+  if (!connected) event.preventDefault();
+});
 $("login-form").onsubmit = (e) => {
   e.preventDefault();
   token = $<HTMLInputElement>("token").value.trim();
@@ -1004,9 +1029,9 @@ window.addEventListener("hashchange", () => {
     error(message(e));
   }
 });
-document.addEventListener("click", (event) => {
+document.addEventListener("pointerdown", (event) => {
   for (const menu of document.querySelectorAll<HTMLDetailsElement>(
-    "details.menu[open]",
+    "details.menu[open], details.card-menu[open]",
   ))
     if (!menu.contains(event.target as Node)) menu.open = false;
 });
