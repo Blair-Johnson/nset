@@ -25,6 +25,7 @@ export interface SeriesRef {
 export type ChartSource =
   | { mode: "selected"; keys: string[] }
   | { mode: "explicit"; series: SeriesRef[] };
+export interface CardLayout { width: number; height: number }
 export interface ChartSpec {
   id: string;
   title: string;
@@ -33,6 +34,7 @@ export interface ChartSpec {
   config: ViewConfig;
   outliers: "all" | "robust";
   size: "normal" | "wide";
+  layout?: CardLayout;
 }
 export interface Section {
   id: string;
@@ -79,12 +81,17 @@ export interface CardActions {
   onDuplicate(id: string): void;
   onMove(id: string, delta: -1 | 1): void;
   onResize(id: string, size: "normal" | "wide"): void;
+  onDimensions?: (id: string, layout: CardLayout) => boolean | void;
 }
 export type InteractionMode = "pan" | "zoom" | "inspect" | "threshold";
 export type NavigationAxis = "x" | "y" | "both";
 export interface PlotInteraction {
   mode: InteractionMode;
   axis: NavigationAxis;
+  inferZoomAxes?: boolean;
+  directGestures?: boolean;
+  cursorAxis?: "x" | "y";
+  onHorizontalPin?: (pin: "a" | "b", value: number) => void;
   activePin: "a" | "b";
   onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
   onHover?: (x: number | null) => void;
