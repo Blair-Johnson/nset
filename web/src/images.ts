@@ -186,9 +186,34 @@ export class ImagePanel {
       "wheel",
       (event) => {
         if (!event.altKey || !this.active) return;
+        if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+        const viewport = this.viewer.viewport;
+        const rect = this.viewer.container.getBoundingClientRect();
+        const size = viewport.getContainerSize();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const position = new OpenSeadragon.Point(
+          ((event.clientX - rect.left) * size.x) / rect.width,
+          ((event.clientY - rect.top) * size.y) / rect.height,
+        );
+        // Match OSD's native scroll handler: flip screen x before its
+        // rotation-aware conversion, using the current animated camera.
+        if (viewport.getFlip()) position.x = size.x - position.x;
+        const reference = viewport.pointFromPixel(position, true);
+        // Retain pixel-wheel sensitivity; normalize line/page devices and
+        // bound finite extreme deltas before exponentiation can overflow.
+        const unit =
+          event.deltaMode === WheelEvent.DOM_DELTA_LINE
+            ? 16
+            : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+              ? size.y
+              : 1;
+        const exponent = Math.max(
+          -4,
+          Math.min(4, -event.deltaY * unit * 0.002),
+        );
         event.preventDefault();
-        this.viewer.viewport.zoomBy(Math.exp(-event.deltaY * 0.002));
-        this.viewer.viewport.applyConstraints();
+        viewport.zoomBy(Math.exp(exponent), reference);
+        viewport.applyConstraints();
       },
       { passive: false, signal: this.lifetime.signal },
     );
