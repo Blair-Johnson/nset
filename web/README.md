@@ -10,9 +10,11 @@ The initial **Overview** view mixes line charts and image panels in one grid. Se
 
 Open the card’s **three-dot menu (⋯) → Edit chart**. The dialog shows a live preview next to three groups of controls:
 
-- **Data:** name the chart, choose a line chart or image panel, and select its sources. **Follow selected runs** draws the chosen metric or image keys from the current run selection. For a fixed comparison, select **Choose any run and metric** (or **Choose any run and image**) and search across experiments, runs and keys; changing the dashboard’s run selection will not change those sources.
-- **Axes:** for line charts, choose step or time, linear/logarithmic/asinh scales, automatic or manual bounds, labels and number formats. **Y auto range → Central 98%** limits the display, not the data or numerical results. Manual Y bounds take precedence.
-- **Appearance:** choose smoothing strength, linear or smooth interpolation, line/point/area/step styles, grid, legend and size. Expand individual-curve settings for colors and visibility. Image panels show the controls relevant to images instead of numeric axes.
+**Data** names the chart, chooses a line chart or image panel, and selects its sources. **Follow selected runs** draws the chosen metric or image keys from the current run selection. For a fixed comparison, select **Choose any run and metric** (or **Choose any run and image**) and search across experiments, runs and keys; changing the dashboard’s run selection will not change those sources.
+
+**Axes** chooses step or time, linear/logarithmic/asinh scales, automatic or manual bounds, labels and number formats. **Y auto range → Central 98%** limits the display, not the data or numerical results. Manual Y bounds take precedence.
+
+**Appearance** controls smoothing strength, linear or smooth interpolation, line/point/area/step styles, grid, legend and size. Expand individual-curve settings for colors and visibility. Image panels show the controls relevant to images instead of numeric axes.
 
 Use **Save changes** to update only this card, or **Cancel** / Escape to discard the draft. Invalid settings show errors without closing the editor. **Add chart → Line chart / Image panel** opens the same editor; finish with **Add chart**. No hand-written configuration is needed.
 
