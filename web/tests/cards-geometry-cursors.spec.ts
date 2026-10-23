@@ -264,7 +264,9 @@ test("collapsed aligned legend and bounded hover use shared display colors witho
     const c = (window as any).geometry.card;
     c.plot.interaction.onHover(2);
   });
-  await expect(page.locator(".card-hover-row")).toHaveCount(4);
+  await expect(page.locator(".card-hover-row")).toHaveCount(3);
+  await expect(page.locator(".card-hover-more")).toHaveText("1 more in legend");
+  await expect(page.locator(".card-legend-value")).toHaveCount(4);
   const dimensions = await page.locator(".card-hover").evaluate((node) => ({
     width: node.clientWidth,
     height: node.clientHeight,

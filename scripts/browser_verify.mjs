@@ -250,6 +250,40 @@ try {
     plotPixels.blue > 50 && plotPixels.violet > 50,
     "both actual curve colors are rendered",
   );
+  const fixture = JSON.parse(process.env.NSET_BROWSER_FIXTURE);
+  const imageCanvas = await image.locator(".image-canvas").elementHandle();
+  for (const [axis, x, expected] of [
+    ["relative", 5000, 2],
+    ["timestamp", fixture.startA + 5000, 2],
+    ["step", 5, 2],
+  ]) {
+    await page
+      .getByLabel("Dashboard X axis", { exact: true })
+      .selectOption(axis);
+    await loss.locator("canvas").waitFor();
+    await loss
+      .getByRole("button", { name: "Add vertical cursor", exact: true })
+      .click();
+    await coordinate(loss, "Cursor A coordinate", x);
+    assert.equal(await value(loss, "Curve A", 0), expected);
+  }
+  await page.getByLabel("Dashboard smoothing", { exact: true }).fill("50");
+  await loss.locator("canvas").waitFor();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
+  await coordinate(loss, "Cursor A coordinate", 5);
+  assert.equal(await value(loss, "Curve A", 0), 1.1);
+  await page.getByLabel("Dashboard smoothing", { exact: true }).fill("0");
+  await loss.locator("canvas").waitFor();
+  assert.equal(
+    await image
+      .locator(".image-canvas")
+      .evaluate((el, old) => el === old, imageCanvas),
+    true,
+    "global scalar settings preserve the mounted image viewer",
+  );
+  await screenshot("ux-06-global-controls");
   await page.locator("details[data-menu=add] summary").click();
   await page.getByRole("button", { name: "Line plot", exact: true }).click();
   editor = page.getByRole("dialog", { name: "Add chart", exact: true });
@@ -391,6 +425,7 @@ try {
         "direct cursors and all crossings",
         "pan/zoom/fit/keyboard invariance",
         "per-chart log/PCHIP/EMA editing",
+        "global step/wall/relative axes and smoothing preserve image viewer",
         "cancel and neighbor preservation",
         "cross-experiment custom sources",
         "named views reload import export",

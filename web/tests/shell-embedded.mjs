@@ -71,6 +71,11 @@ try {
   await card
     .getByRole("button", { name: "Maximize chart", exact: true })
     .click();
+  await expect
+    .poll(async () => (await card.locator(".u-over").boundingBox()).height)
+    .toBeGreaterThan(750);
+  const maximizedPlot = await card.locator(".u-over").boundingBox();
+  expect(maximizedPlot.width).toBeGreaterThan(1200);
   await page.screenshot({ path: `${output}/maximized.png`, fullPage: true });
   await card
     .getByRole("button", { name: "Restore chart", exact: true })
@@ -100,6 +105,8 @@ try {
         runs: 60,
         table_row_height: rowHeight,
         first_content_y: contentY,
+        maximized_plot_width: maximizedPlot.width,
+        maximized_plot_height: maximizedPlot.height,
         page_errors: errors.length,
         persisted_width: layout.width,
         persisted_height: layout.height,
