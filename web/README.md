@@ -48,6 +48,8 @@ Drag an existing cursor line to move it, or expand Edit positions to enter exact
 
 Each comparison uses complete histories. Duplicate coordinates use the latest inserted observation; values between observations are estimates, and out-of-range answers show an em dash rather than extrapolation. Smoothing uses the full ordered history, so moving the viewport does not change answers. Smooth interpolation is shape-preserving. Stepped and other display-only line styles do not change numerical cursor answers. Central 98% displays a clipping notice and Fit all; choose All values in the editor to disable that policy permanently.
 
+Default numeric Y ticks may use a shorter equivalent exponential spelling to avoid colliding with the axis title; cursor readouts are unchanged. Default linear Wall time ticks use two lines for the full UTC date and time. Explicit axis formatting, sizing and padding remain unchanged; nonlinear Wall time scales retain their existing formatting. Use numeric formatting when inspecting sub-millisecond ranges.
+
 ## Inspect images
 
 Each image panel displays one run/key source at a time; choose a source when the panel has several. Different panels are independent. Drag to pan, use **+/−** or **Alt + wheel** to zoom, and use the timeline, previous/next buttons or playback to move between frames. The caption identifies the actual logged step. Frame changes preserve the camera, so you can inspect the same region across a sequence. The current decoded image and its caption remain until the replacement is ready, rather than flashing a Loading frame.
