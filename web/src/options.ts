@@ -108,7 +108,7 @@ export function resolveScale(
 export const formatter =
   (name: Formatter): uPlot.Axis.Values =>
   (_u, values) =>
-    values.map((v) => formatValue(v, name));
+    values.map((v) => (v == null ? "" : formatValue(v, name)));
 
 /** Elapsed backend milliseconds, never a calendar date. Preserve sub-ms values,
  * carry rounded milliseconds across unit boundaries, and do not wrap at 24h.
@@ -143,7 +143,10 @@ function xFormatter(
   axis: ViewConfig["axis"],
   name: Formatter,
 ): uPlot.Axis.Values {
-  return (_u, values) => values.map((value) => formatXValue(value, axis, name));
+  return (_u, values) =>
+    values.map((value) =>
+      value == null ? "" : formatXValue(value, axis, name),
+    );
 }
 
 /** Coordinate readouts and ticks share axis semantics, including legacy ISO on elapsed axes. */
