@@ -341,11 +341,10 @@ test("horizontal A/B inspection includes every crossing and plateau plus delta Y
 
 test("coincident edge pin labels are opaque-backed, clamped and collision-free", async ({
   page,
-}) => {
+}, info) => {
   await fixture(page);
   await page.evaluate(() => {
     const c = (window as any).geometry.card,
-      u = c.plot.chart,
       v = c.plot.viewport();
     c.plot.setPins({
       a: v.x[1],
@@ -355,47 +354,259 @@ test("coincident edge pin labels are opaque-backed, clamped and collision-free",
       threshold: v.y[1],
     });
   });
-  await expect
-    .poll(() =>
-      page.evaluate(() => (window as any).geometry.card.plot.pinLabels.length),
-    )
-    .toBe(5);
+  await checkEdgeLabels(page);
+  await info.attach("coincident-top-right", {
+    body: await page.screenshot({
+      path: info.outputPath("coincident-top-right.png"),
+    }),
+    contentType: "image/png",
+  });
+});
+
+async function checkEdgeLabels(page: Page) {
+  await page.mouse.move(1490, 1090);
   const result = await page.evaluate(() => {
-    const c = (window as any).geometry.card,
-      u = c.plot.chart;
+    const plot = (window as any).geometry.card.plot;
     return {
-      labels: c.plot.pinLabels,
-      bounds: u.bbox,
-      pixels: c.plot.pinLabels.map((label: any) =>
-        Array.from(u.ctx.getImageData(label.x + 1, label.y + 1, 1, 1).data),
-      ),
+      labels: plot.pinLabels,
+      bounds: plot.chart.bbox,
+      ratio: devicePixelRatio,
+      canvasWidth: plot.chart.ctx.canvas.width,
     };
   });
-  expect(
-    result.pixels.every(
-      (pixel: any) =>
-        JSON.stringify(pixel) === JSON.stringify([32, 36, 41, 255]),
-    ),
-  ).toBe(true);
-  expect(result.labels).toHaveLength(5);
+  expect(result.labels, JSON.stringify(result)).toHaveLength(5);
+  expect(result.labels.map((label: any) => [label.axis, label.text])).toEqual([
+    ["y", "A"],
+    ["y", "B"],
+    ["y", "T"],
+    ["x", "A"],
+    ["x", "B"],
+  ]);
+  const inset = 2 * result.ratio;
   for (const [index, label] of result.labels.entries()) {
-    expect(label.x).toBeGreaterThanOrEqual(result.bounds.left);
-    expect(label.y).toBeGreaterThanOrEqual(result.bounds.top);
+    expect(label.x).toBeGreaterThanOrEqual(result.bounds.left + inset);
+    expect(label.y).toBeGreaterThanOrEqual(result.bounds.top + inset);
     expect(label.x + label.width).toBeLessThanOrEqual(
-      result.bounds.left + result.bounds.width + 0.01,
+      result.bounds.left + result.bounds.width - inset + 0.01,
     );
     expect(label.y + label.height).toBeLessThanOrEqual(
-      result.bounds.top + result.bounds.height + 0.01,
+      result.bounds.top + result.bounds.height - inset + 0.01,
     );
+    if (label.axis === "x") expect(label.y).toBe(result.bounds.top + inset);
+    else
+      expect(label.x + label.width).toBeCloseTo(
+        result.bounds.left + result.bounds.width - inset,
+        5,
+      );
     for (const other of result.labels.slice(index + 1))
       expect(
-        label.x < other.x + other.width &&
-          label.x + label.width > other.x &&
-          label.y < other.y + other.height &&
-          label.y + label.height > other.y,
+        label.x < other.x + other.width + result.ratio &&
+          label.x + label.width + result.ratio > other.x &&
+          label.y < other.y + other.height + result.ratio &&
+          label.y + label.height + result.ratio > other.y,
       ).toBe(false);
   }
+  // Decode the actual browser screenshot, not merely the backing canvas. This
+  // catches DOM occlusion, clipping and transparent backgrounds as well as text.
+  const png = await page.locator(".u-wrap canvas").screenshot();
+  const pixels = await page.evaluate(
+    async ({ dataURL, labels, canvasWidth, ratio }) => {
+      const image = new Image();
+      image.src = dataURL;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(image, 0, 0);
+      const scale = image.width / canvasWidth;
+      return labels.map((label: any) => {
+        const x = Math.round(label.x * scale),
+          y = Math.round(label.y * scale);
+        const width = Math.floor(label.width * scale),
+          height = Math.floor(label.height * scale);
+        // Sample the same CSS-pixel interior at either device scale.
+        const near = Math.round(2 * ratio * scale),
+          far = Math.round(3 * ratio * scale);
+        const corners = [
+          [near, near],
+          [width - far, near],
+          [near, height - far],
+          [width - far, height - far],
+        ].map(([dx, dy]) =>
+          Array.from(ctx.getImageData(x + dx, y + dy, 1, 1).data),
+        );
+        const data = ctx.getImageData(x + 3, y + 3, width - 6, height - 6).data;
+        const color = label.color
+          .match(/\w\w/g)
+          .map((hex: string) => parseInt(hex, 16));
+        let ink = 0;
+        for (let i = 0; i < data.length; i += 4)
+          if (
+            color.every(
+              (channel: number, j: number) =>
+                Math.abs(data[i + j] - channel) < 35,
+            )
+          )
+            ink++;
+        return { corners, ink, label };
+      });
+    },
+    {
+      dataURL: "data:image/png;base64," + png.toString("base64"),
+      labels: result.labels,
+      canvasWidth: result.canvasWidth,
+      ratio: result.ratio,
+    },
+  );
+  for (const pixel of pixels) {
+    for (const corner of pixel.corners)
+      expect(corner, JSON.stringify(pixel)).toEqual([32, 36, 41, 255]);
+    expect(pixel.ink).toBeGreaterThan(3);
+  }
+}
+
+test("edge packing is deterministic, nearest, immutable and never shrinks text", async ({
+  page,
+}) => {
+  await fixture(page);
+  const result = await page.evaluate(async () => {
+    const { placePinLabels } = await import("/src/plot.ts");
+    const label = (text: string, axis: "x" | "y", x: number, y: number) => ({
+      text,
+      axis,
+      x,
+      y,
+      width: 18,
+      height: 20,
+      color: "#7dd3fc",
+    });
+    const labels = [
+      label("A", "y", 0, 0),
+      label("A", "x", 999, 0),
+      label("B", "x", 999, 0),
+      label("B", "y", 0, 0),
+      label("T", "y", 0, 0),
+    ];
+    const before = JSON.stringify(labels);
+    const bounds = { x: 2, y: 2, width: 196, height: 96 };
+    const packed = placePinLabels(labels, bounds);
+    return {
+      packed,
+      repeat: placePinLabels(labels, bounds),
+      unchanged: JSON.stringify(labels) === before,
+      tiny: placePinLabels(labels, { x: 2, y: 2, width: 17, height: 19 }),
+      short: placePinLabels(labels, { x: 2, y: 2, width: 196, height: 20 }),
+    };
+  });
+  expect(result.unchanged).toBe(true);
+  expect(result.repeat).toEqual(result.packed);
+  expect(result.packed.map(({ axis, x, y }: any) => [axis, x, y])).toEqual([
+    ["y", 180, 2],
+    ["y", 180, 25],
+    ["y", 180, 48],
+    ["x", 159, 2],
+    ["x", 138, 2],
+  ]);
+  expect(result.tiny).toEqual([]);
+  expect(result.short).toHaveLength(3);
+  expect(
+    result.short.every(
+      (label: any) => label.width === 18 && label.height === 20,
+    ),
+  ).toBe(true);
 });
+
+for (const ratio of [1, 2])
+  test.describe(`edge badges at DPR ${ratio}`, () => {
+    test.use({ deviceScaleFactor: ratio });
+    for (const reversedLog of [false, true])
+      test(`${reversedLog ? "reversed log" : "linear"} labels stay top/right at every corner and card size`, async ({
+        page,
+      }, info) => {
+        test.setTimeout(90000);
+        await fixture(page);
+        if (reversedLog) {
+          await page.evaluate(() => {
+            const c = (window as any).geometry.card;
+            c.setSpec({
+              ...c.spec,
+              config: {
+                ...c.spec.config,
+                xScale: "log",
+                yScale: "log",
+                xMin: 1,
+                xMax: 100,
+                yMin: 1,
+                yMax: 100,
+                advanced: { scales: { x: { dir: -1 }, y: { dir: -1 } } },
+              },
+            });
+          });
+          await expect
+            .poll(() =>
+              page.evaluate(
+                () => (window as any).geometry.card.plot.config.xScale,
+              ),
+            )
+            .toBe("log");
+        }
+        for (const size of ["normal", "resized", "minimum", "maximized"]) {
+          if (size === "resized") await resize(page, 120, 80);
+          if (size === "minimum") {
+            await page.evaluate(() => {
+              const c = (window as any).geometry.card;
+              c.setSpec({ ...c.spec, layout: { width: 300, height: 240 } });
+            });
+          }
+          if (size === "maximized")
+            await page
+              .getByRole("button", { name: "Maximize chart", exact: true })
+              .click();
+          // ResizeObserver updates the canvas on the next frame.
+          await page.evaluate(
+            () =>
+              new Promise<void>((resolve) =>
+                requestAnimationFrame(() =>
+                  requestAnimationFrame(() => resolve()),
+                ),
+              ),
+          );
+          for (const xEnd of [0, 1])
+            for (const yEnd of [0, 1]) {
+              const before = await page.evaluate(
+                ({ xEnd, yEnd }) => {
+                  const c = (window as any).geometry.card,
+                    p = c.plot,
+                    v = p.viewport();
+                  const pins = {
+                    a: v.x[xEnd],
+                    b: v.x[xEnd],
+                    yA: v.y[yEnd],
+                    yB: v.y[yEnd],
+                    threshold: v.y[yEnd],
+                  };
+                  p.setPins(pins);
+                  return { pins, viewport: v };
+                },
+                { xEnd, yEnd },
+              );
+              await checkEdgeLabels(page);
+              const after = await page.evaluate(() => {
+                const p = (window as any).geometry.card.plot;
+                return { pins: p.pins, viewport: p.viewport() };
+              });
+              expect(after).toEqual(before);
+            }
+          await info.attach(`${size}-coincident-edge-labels`, {
+            body: await page.screenshot({
+              path: info.outputPath(`${size}-coincident-edge-labels.png`),
+            }),
+            contentType: "image/png",
+          });
+        }
+      });
+  });
 
 test("axis display defaults use the logged key or honest mixed title, explicit labels win", async ({
   page,
