@@ -72,5 +72,11 @@ class Run:
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        self.finish("failed" if exc_type else "finished")
+        try:
+            self.finish("failed" if exc_type else "finished")
+        except Exception as update_error:
+            if exc is None:
+                raise
+            if hasattr(exc, "add_note"):
+                exc.add_note(f"Could not update tracker run status: {update_error}")
         return False
