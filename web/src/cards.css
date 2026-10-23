@@ -331,3 +331,40 @@
     text-align: center;
   }
 }
+
+/* The card legend names series without the legacy plot's diagnostic labels. */
+.card-plot .u-legend {
+  display: none;
+}
+.card-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 3px 5px;
+  font-size: 11px;
+  color: #526279;
+  max-height: 75px;
+  overflow: auto;
+}
+.card-legend:empty {
+  display: none;
+}
+.card-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.card-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+.card-series-hidden {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.card-series-note {
+  color: #64748b;
+  font-style: italic;
+}

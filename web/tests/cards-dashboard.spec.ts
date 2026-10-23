@@ -168,6 +168,15 @@ test("mixed cards and two image viewers stay independent, authenticated and nati
 }, testInfo) => {
   await fixture(page);
   expect(await page.locator("[id]").count()).toBe(0);
+  await expect(
+    card(page, 0)
+      .getByRole("list", { name: "Chart series" })
+      .getByRole("listitem"),
+  ).toHaveCount(2);
+  expect(await card(page, 0).innerText()).not.toMatch(
+    /raw-derived|raw observations|canonical|authoritative/i,
+  );
+
   await card(page, 2)
     .getByRole("button", { name: "Next →", exact: true })
     .click();

@@ -90,6 +90,19 @@ test("compact image panels keep exact sources, authenticated bytes, cameras and 
     camera!,
   );
   await expect(b.locator(".frame-info")).toHaveText("Step 0 · 1 / 3");
+  await page.evaluate(async () => {
+    const panel = (window as any).imageFixture.panels[0];
+    panel.setActive(false);
+    panel.setActive(true);
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+  });
+  await expect(a.locator(".frame-info")).toHaveText("Step 1 · 2 / 3");
+  await expect(a.locator(".image-canvas")).toHaveAttribute(
+    "data-zoom",
+    camera!,
+  );
+
   expect(
     await page.evaluate(() => {
       const s = (window as any).imageFixture;

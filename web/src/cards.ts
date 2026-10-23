@@ -1,6 +1,6 @@
 import { analyze, PlotPanel, type Analyzed, type Pins } from "./plot";
 import { ImagePanel } from "./images";
-import { formatValue, type ViewConfig } from "./config";
+import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { element, isAbort, message } from "./utils";
 import type {
@@ -66,6 +66,7 @@ export class ChartCard {
   private inspection = element("div", "card-inspection");
   private results = element("div", "card-results");
   private hover = element("div", "card-hover");
+  private legend = element("div", "card-legend");
   private clipping = element("div", "card-clipping");
   private plot?: PlotPanel;
   private images?: ImagePanel;
@@ -230,11 +231,15 @@ export class ChartCard {
     this.inspection = element("div", "card-inspection");
     this.results = element("div", "card-results");
     this.hover = element("div", "card-hover");
+    this.legend = element("div", "card-legend");
+    this.legend.setAttribute("role", "list");
+    this.legend.setAttribute("aria-label", "Chart series");
     this.clipping = element("div", "card-clipping");
     this.content.append(
       toolbar,
       this.clipping,
       plotHost,
+      this.legend,
       this.hover,
       this.inspection,
     );
@@ -326,6 +331,28 @@ export class ChartCard {
     this.renderResults();
   }
 
+  private renderLegend() {
+    this.legend.replaceChildren();
+    const config = this.spec.config;
+    const advanced = config.advanced.legend as { show?: boolean } | undefined;
+    if (!(advanced?.show ?? config.legend)) return;
+    this.data.forEach((series, index) => {
+      const style = styleFor(config, series.run.id, index);
+      const item = element("span", "card-legend-item");
+      item.setAttribute("role", "listitem");
+      const swatch = element("span", "card-legend-swatch");
+      swatch.style.backgroundColor = style.color;
+      item.append(swatch, document.createTextNode(series.run.name));
+      if (!style.visible) {
+        item.classList.add("card-series-hidden");
+        item.title = "Hidden in chart settings";
+      }
+      this.legend.append(item);
+    });
+    if (config.smoothing)
+      this.legend.append(element("span", "card-series-note", "Smoothed"));
+  }
+
   private setPin(pin: keyof Pins, value: number | null) {
     this.pins = { ...this.pins, [pin]: value };
     const input = this.inputs.get(pin);
@@ -408,6 +435,7 @@ export class ChartCard {
     this.abort = controller;
     this.loaded = true;
     this.data = [];
+    this.legend.replaceChildren();
     this.plot?.clear();
     this.hover.textContent = "";
     this.clipping.replaceChildren();
@@ -461,6 +489,7 @@ export class ChartCard {
           ? robustConfig(this.data, this.spec.config)
           : this.spec.config;
       this.plot?.render(this.data, config, this.pins);
+      this.renderLegend();
       if (config !== this.spec.config) {
         this.clipping.append(
           element("span", "", "Central 98% · display clipped"),
@@ -482,6 +511,7 @@ export class ChartCard {
         return;
       controller.abort();
       this.data = [];
+      this.legend.replaceChildren();
       this.plot?.clear();
       this.renderResults();
       this.status.textContent = `Could not load chart: ${message(error)}`;
@@ -523,6 +553,7 @@ export class ChartCard {
     this.cancel();
     this.loaded = false;
     this.data = [];
+    this.legend.replaceChildren();
     this.plot?.clear();
     this.images?.clear();
     this.status.textContent = "";

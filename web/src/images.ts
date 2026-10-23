@@ -13,6 +13,8 @@ export class ImagePanel {
   private lifetime = new AbortController();
   private destroyed = false;
   private resume = false;
+  private resumeFrame = false;
+  private metadataPending = false;
   private compact: boolean;
   private runs: Run[] = [];
   private frames: ImageFrame[] = [];
@@ -242,13 +244,16 @@ export class ImagePanel {
     if (this.destroyed || this.active === active) return;
     this.active = active;
     if (!active) {
+      this.resume = this.metadataPending;
+      this.resumeFrame =
+        !this.resume && !!this.requested && this.requested !== this.displayed;
+      this.metadataPending = false;
       this.stop();
       this.metadata.next();
       this.requests.next();
       this.metadataAbort?.abort();
       this.frameAbort?.abort();
       this.prefetchAbort?.abort();
-      this.resume = true;
     } else
       requestAnimationFrame(() => {
         if (this.destroyed || !this.active) return;
@@ -256,6 +261,10 @@ export class ImagePanel {
           this.resume = false;
           void this.load();
           return;
+        }
+        if (this.resumeFrame) {
+          this.resumeFrame = false;
+          void this.show(this.index);
         }
         if (this.active && this.needsHome && this.displayed) {
           this.viewer.viewport.resize(
@@ -326,6 +335,7 @@ export class ImagePanel {
   private async load() {
     if (this.destroyed) return;
     this.resume = false;
+    this.resumeFrame = false;
     const previousKey = this.keySelect.value;
     const generation = this.metadata.next();
     this.metadataAbort?.abort();
@@ -338,6 +348,7 @@ export class ImagePanel {
       return;
     }
     this.status.textContent = "Loading image metadata…";
+    this.metadataPending = true;
     try {
       const response = await this.api.json<{ images: ImageFrame[] }>(
         `/runs/${encodeURIComponent(run)}/images`,
@@ -365,6 +376,8 @@ export class ImagePanel {
     } catch (error) {
       if (this.metadata.current(generation) && !isAbort(error))
         this.status.textContent = message(error);
+    } finally {
+      if (this.metadata.current(generation)) this.metadataPending = false;
     }
   }
   private filter() {
@@ -539,6 +552,9 @@ export class ImagePanel {
     this.timer = setTimeout(() => void advance(), Number(this.speed.value));
   }
   clear() {
+    this.resume = false;
+    this.resumeFrame = false;
+    this.metadataPending = false;
     this.metadata.next();
     this.metadataAbort?.abort();
     this.reset();
