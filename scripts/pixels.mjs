@@ -1,6 +1,7 @@
 // Inspect actual screenshot pixels using Chromium's PNG decoder, without image dependencies.
 export async function pixelStats(page, selector) {
-  const png = await page.locator(selector).screenshot();
+  const target = typeof selector === "string" ? page.locator(selector) : selector;
+  const png = await target.screenshot();
   return page.evaluate(
     async (dataURL) => {
       const image = new Image();
@@ -29,11 +30,11 @@ export async function pixelStats(page, selector) {
         const [r, g, b] = data.subarray(pixel * 4, pixel * 4 + 3);
         const kind = near(r, g, b, [118, 213, 255])
           ? "cyan"
-          : near(r, g, b, [181, 161, 255])
+          : near(r, g, b, [181, 161, 255]) || near(r, g, b, [147, 51, 234])
             ? "violet"
             : r > 210 && g > 130 && g < 230 && b < 110
               ? "gold"
-              : r < 80 && g > 40 && b > 90 && b < 225
+              : near(r, g, b, [37, 99, 235]) || (r < 80 && g > 40 && b > 90 && b < 225)
                 ? "blue"
                 : null;
         if (!kind) continue;

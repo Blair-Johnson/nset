@@ -289,6 +289,10 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
   activeEditor = openChartEditor({
     card: structuredClone(card),
     isNew: add,
+    onClose: () => {
+      const trigger = add ? document.querySelector<HTMLElement>("details[data-menu=add] > summary") : cards.get(card.id)?.host.querySelector<HTMLElement>(".card-menu > summary");
+      trigger?.focus({ preventScroll: true });
+    },
     catalog,
     selectedRunIds: workspace.selectedRunIds,
     api,
