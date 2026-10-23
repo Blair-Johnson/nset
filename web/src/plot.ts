@@ -8,14 +8,20 @@ import {
   type XY,
 } from "./math";
 import {
-  deepMerge,
+  validateConfig,
   formatValue,
   styleFor,
   type ViewConfig,
-  type Formatter,
-  type PathName,
 } from "./config";
 import { extent, unionSorted } from "./utils";
+import {
+  resolveOptions,
+  cosmeticPath,
+  fillColor,
+  rawMarkerOptions,
+  pairedVisibility,
+} from "./options";
+import { matchedPath } from "./matched-path";
 import type { Run } from "./api";
 export interface PlotRun {
   run: Run;
@@ -48,30 +54,9 @@ export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
     };
   });
 }
-export function curveGrid(points: XY[], kind: "linear" | "pchip"): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const x = points[i][0];
-    out.push(x);
-    if (kind === "pchip" && i + 1 < points.length) {
-      const end = points[i + 1][0];
-      for (let j = 1; j < 16; j++) {
-        const t = j / 16;
-        const at = x * (1 - t) + end * t;
-        if (Number.isFinite(at) && at > x && at < end) out.push(at);
-      }
-    }
-  }
-  return out;
-}
-function path(name: PathName): uPlot.Series.PathBuilder {
-  if (name === "stepped-before") return uPlot.paths.stepped!({ align: -1 });
-  if (name === "stepped-after") return uPlot.paths.stepped!({ align: 1 });
-  if (name === "spline") return uPlot.paths.spline!();
-  return uPlot.paths.linear!();
-}
 export class PlotPanel {
   private chart?: uPlot;
+  private generation = 0;
   private resize: ResizeObserver;
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
@@ -91,6 +76,7 @@ export class PlotPanel {
     this.resize.observe(host);
   }
   clear() {
+    this.generation++;
     this.chart?.destroy();
     this.chart = undefined;
     this.host.replaceChildren();
@@ -107,13 +93,19 @@ export class PlotPanel {
     if (this.config) this.render(this.analyzed, this.config, this.pins);
   }
   render(data: Analyzed[], config: ViewConfig, pins: Pins) {
-    this.clear();
-    this.config = config;
-    this.analyzed = data;
-    this.pins = pins;
-    if (!data.some((d) => d.points.length)) return;
-    const grids = data.map((d) => curveGrid(d.points, config.interpolation));
-    const xs = unionSorted(grids).filter(
+    config = validateConfig(config);
+    if (!data.some((d) => d.points.length)) {
+      this.clear();
+      this.config = config;
+      this.analyzed = data;
+      this.pins = pins;
+      this.onWarnings([]);
+      return;
+    }
+    const generation = this.generation + 1;
+    // Only observation coordinates enter aligned data. Display subdivisions belong
+    // to each run's path builder, never to its numeric engine or another run's grid.
+    const xs = unionSorted(data.map((d) => d.points.map((p) => p[0]))).filter(
       (x) => config.xScale !== "log" || x > 0,
     );
     const aligned: uPlot.AlignedData = [xs];
@@ -121,9 +113,32 @@ export class PlotPanel {
       { label: config.axis === "step" ? "Step" : "Timestamp (ms)" },
     ];
     const warnings: string[] = [];
+    const limited = new Map<string, string>();
+    let warningQueued = false;
+    const publishWarnings = () =>
+      this.onWarnings([
+        ...warnings,
+        ...Array.from(
+          limited.values(),
+          (name) =>
+            `${name}: matched display reached its adaptive approximation limit (target 0.35 CSS px). Numerical inspector values are unchanged.`,
+        ),
+      ]);
+    const reportLimit = (id: string, name: string, hit: boolean) => {
+      if (hit) limited.set(id, name);
+      else limited.delete(id);
+      if (!warningQueued) {
+        warningQueued = true;
+        queueMicrotask(() => {
+          warningQueued = false;
+          if (this.generation === generation) publishWarnings();
+        });
+      }
+    };
+    const rawEnabled: boolean[] = [];
     if ((config.advanced.legend as { live?: boolean } | undefined)?.live)
       warnings.push(
-        "Live hover legend reports the nearest drawing-grid point, not an exact interpolated cursor value. The pinned inspector remains authoritative.",
+        "Live hover legend reports the nearest aligned observation-grid point, not an exact interpolated cursor value. The pinned inspector remains authoritative.",
       );
     const valid = (x: number, y: number | null) =>
       y !== null &&
@@ -134,6 +149,9 @@ export class PlotPanel {
         : null;
     data.forEach((d, i) => {
       const s = styleFor(config, d.run.id, i);
+      rawEnabled.push(
+        s.markers?.show !== undefined ? s.markers.show !== false : s.points,
+      );
       const excluded = d.points.filter(
         ([x, y]) =>
           (config.xScale === "log" && x <= 0) ||
@@ -143,7 +161,7 @@ export class PlotPanel {
         warnings.push(
           `${d.run.name}: ${excluded} transformed samples are excluded from log display only. Analysis still includes every sample.`,
         );
-      const rawExcluded = s.points
+      const rawExcluded = rawEnabled[i]
         ? d.observations.filter(
             ([x, y]) =>
               (config.xScale === "log" && x <= 0) ||
@@ -156,8 +174,18 @@ export class PlotPanel {
         );
       if (s.path !== "matched")
         warnings.push(
-          `${d.run.name}: ${s.path} is a cosmetic display path; readouts use ${config.interpolation}. Choose “matched” for agreement.`,
+          `${d.run.name}: ${s.path} is a cosmetic display path; readouts use ${config.interpolation}. Choose “matched” for adaptive numerical-curve approximation.`,
         );
+      const adaptive =
+        s.path === "matched" &&
+        (config.interpolation === "pchip" ||
+          config.xScale !== "linear" ||
+          config.yScale !== "linear");
+      const alignment =
+        s.pxAlign ??
+        (adaptive
+          ? ((config.advanced.pxAlign as boolean | number | undefined) ?? false)
+          : undefined);
       aligned.push(xs.map((x) => valid(x, d.fn.at(x))));
       series.push({
         label: `${d.run.name} · ${config.smoothing ? "EMA" : "raw-derived"} ${config.interpolation}`,
@@ -165,31 +193,35 @@ export class PlotPanel {
         stroke: s.color,
         width: s.width,
         dash: s.dash,
-        fill: s.fill
-          ? `${s.color}${Math.round(s.fill * 255)
-              .toString(16)
-              .padStart(2, "0")}`
-          : undefined,
-        paths: path(s.path),
+        cap: s.cap ?? "butt",
+        alpha: s.alpha ?? 1,
+        pxAlign: alignment,
+        auto: s.auto ?? true,
+        fill: fillColor(s),
+        fillTo:
+          s.fillTo ?? ((u) => (config.yScale === "log" ? u.scales.y.min! : 0)),
+        paths: adaptive
+          ? matchedPath(d.points, (x) => d.fn.at(x), {
+              fillTo: s.fillTo,
+              onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
+            })
+          : cosmeticPath(s),
         spanGaps: false,
-        points: { show: false },
+        points: { ...rawMarkerOptions(s), show: d.points.length === 1 },
         value: (_u, v) => (v == null ? "—" : formatValue(v, config.yFormat)),
       });
       const raw = new Map(d.observations);
       aligned.push(xs.map((x) => valid(x, raw.get(x) ?? null)));
       series.push({
         label: `${d.run.name} · raw observations`,
-        show: s.visible && s.points,
+        show: s.visible && rawEnabled[i],
+        auto: s.auto ?? true,
+        alpha: s.alpha ?? 1,
+        pxAlign: s.pxAlign,
         stroke: s.color,
         width: 0,
         paths: () => null,
-        points: {
-          show: true,
-          size: s.pointSize,
-          width: 1,
-          stroke: s.color,
-          fill: "#121a28",
-        },
+        points: rawMarkerOptions(s),
         value: (_u, v) => (v == null ? "—" : formatValue(v, config.yFormat)),
       });
     });
@@ -197,117 +229,128 @@ export class PlotPanel {
       warnings.push(
         "No positive x values are drawable on the logarithmic axis. Choose linear or asinh.",
       );
+      this.clear();
+      this.config = config;
+      this.analyzed = data;
+      this.pins = pins;
       this.onWarnings(warnings);
       return;
     }
-    this.onWarnings(warnings);
-    const scale = (
-      kind: ViewConfig["xScale"],
-      min: number | null,
-      max: number | null,
-    ): uPlot.Scale => ({
-      time: false,
-      distr: kind === "log" ? 3 : kind === "asinh" ? 4 : 1,
-      asinh: 1,
-      ...(min !== null || max !== null
-        ? {
-            range: (_u, lo, hi) => {
-              let low = min ?? lo,
-                high = max ?? hi;
-              if (low >= high) {
-                if (max === null)
-                  high =
-                    kind === "log"
-                      ? low * 10
-                      : low + Math.max(1, Math.abs(low) * 0.1);
-                else
-                  low =
-                    kind === "log"
-                      ? high / 10
-                      : high - Math.max(1, Math.abs(high) * 0.1);
-              }
-              return [low, high] as [number, number];
-            },
-          }
-        : {}),
-    });
-    const formatter =
-      (name: Formatter): uPlot.Axis.Values =>
-      (_u, values) =>
-        values.map((v) => formatValue(v, name));
-    const opts: uPlot.Options = {
-      width: config.width ?? Math.max(320, this.host.clientWidth),
-      height: config.height,
-      padding: [20, 22, 8, 8],
-      scales: {
-        x: scale(config.xScale, config.xMin, config.xMax),
-        y: scale(config.yScale, config.yMin, config.yMax),
-      },
-      series,
-      axes: [
-        {
-          label:
-            config.xLabel ||
-            (config.axis === "step"
-              ? "Step"
-              : "Timestamp · UTC epoch milliseconds"),
-          stroke: "#8f9db4",
-          font: "11px ui-monospace, monospace",
-          values: formatter(config.xFormat),
-          size: 64,
-          labelSize: 20,
-          grid: { show: config.grid, stroke: "#263347", width: 1 },
-          ticks: { show: config.ticks, stroke: "#455269" },
-        },
-        {
-          label: config.yLabel || "Metric value",
-          stroke: "#8f9db4",
-          font: "11px ui-monospace, monospace",
-          values: formatter(config.yFormat),
-          size: 76,
-          labelSize: 22,
-          grid: { show: config.grid, stroke: "#263347", width: 1 },
-          ticks: { show: config.ticks, stroke: "#455269" },
+    let visibilityChanges = 0;
+    const opts = resolveOptions(config, this.host.clientWidth, series, {
+      draw: [
+        (u) => this.drawPins(u, this.chart === u ? this.pins : pins, config),
+      ],
+      setSeries: [
+        (_u, _idx, patch) => {
+          if (patch.show !== undefined) visibilityChanges++;
         },
       ],
-      legend: { show: config.legend, live: false },
-      cursor: {
-        show: config.cursor,
-        drag: { x: config.zoom, y: false, dist: 8 },
-        points: { show: false },
-      },
-      hooks: {
-        draw: [(u) => this.drawPins(u)],
-        ready: [
-          (u) => {
-            let down: { x: number; y: number } | undefined;
-            u.over.addEventListener("pointerdown", (e) => {
-              down = { x: e.clientX, y: e.clientY };
+      ready: [
+        (u) => {
+          u.root
+            .querySelectorAll<HTMLElement>(".u-legend tbody .u-series")
+            .forEach((row, i) => {
+              row.dataset.seriesIndex = String(i + (u.legend.live ? 0 : 1));
             });
-            u.over.addEventListener("pointerup", (e) => {
-              if (
-                down &&
-                Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5
-              ) {
-                const rect = u.over.getBoundingClientRect();
-                const x = u.posToVal(e.clientX - rect.left, "x");
-                if (Number.isFinite(x)) this.onPick(x);
-              }
-              down = undefined;
-            });
-          },
-        ],
+          let down: { x: number; y: number; distance: number } | undefined;
+          const moved = (e: PointerEvent) => {
+            if (down)
+              down.distance = Math.max(
+                down.distance,
+                Math.hypot(e.clientX - down.x, e.clientY - down.y),
+              );
+          };
+          u.over.addEventListener("pointerdown", (e) => {
+            if (e.button === 0 && e.isPrimary)
+              down = { x: e.clientX, y: e.clientY, distance: 0 };
+          });
+          u.over.addEventListener("pointermove", moved);
+          u.over.addEventListener("pointercancel", () => {
+            down = undefined;
+          });
+          u.over.addEventListener("pointerleave", () => {
+            down = undefined;
+          });
+          u.over.addEventListener("pointerup", (e) => {
+            moved(e);
+            const drag = opts.cursor?.drag;
+            const threshold =
+              opts.cursor?.show && (drag?.x || drag?.y)
+                ? Math.min(5, drag.dist ?? 0)
+                : 5;
+            if (down && (down.distance === 0 || down.distance < threshold)) {
+              const rect = u.over.getBoundingClientRect();
+              const x = u.posToVal(e.clientX - rect.left, "x");
+              if (Number.isFinite(x)) this.onPick(x);
+            }
+            down = undefined;
+          });
+        },
+      ],
+    });
+    opts.cursor!.bind = {
+      click: (u, target, native) => (event) => {
+        const selected = Number(
+          target.closest<HTMLElement>(".u-series")?.dataset.seriesIndex,
+        );
+        const before = u.series.map((s) => s.show !== false),
+          changes = visibilityChanges;
+        native(event); // Native cursor lock must remain authoritative.
+        if (selected > 0 && visibilityChanges !== changes) {
+          const isolated =
+            Boolean(event.ctrlKey || event.metaKey) !==
+            Boolean(u.legend.isolate);
+          const next = pairedVisibility(before, selected, isolated, rawEnabled);
+          u.batch(() =>
+            next.forEach((show, i) => {
+              if (i > 0 && show !== u.series[i].show) u.setSeries(i, { show });
+            }),
+          );
+        }
+        return null;
       },
     };
-    // User patches cannot target data, hooks, scales or series. Resolve named callbacks explicitly.
-    const resolved = deepMerge(opts, config.advanced);
-    resolved.axes?.forEach((axis) => {
-      if (typeof axis.values === "string")
-        axis.values = formatter(axis.values as Formatter);
-    });
-    this.chart = new uPlot(resolved, aligned, this.host);
+    // Check range callbacks before construction. Stage/flush native init so a
+    // rejected view leaves the existing chart and its configuration untouched.
+    for (const axis of ["x", "y"] as const) {
+      const values =
+        axis === "x"
+          ? xs
+          : (aligned.slice(1) as (number | null)[][]).flatMap((v) =>
+              v.filter((x): x is number => x != null),
+            );
+      const limits = extent(values) ?? [null, null];
+      (opts.scales![axis].range as uPlot.Range.Function)(
+        {} as uPlot,
+        limits[0] as number,
+        limits[1] as number,
+        axis,
+      );
+    }
+    const staging = document.createElement("div");
+    let candidate: uPlot | undefined;
+    try {
+      candidate = new uPlot(opts, aligned, staging);
+      candidate.batch(() => {});
+    } catch (error) {
+      candidate?.destroy();
+      throw error;
+    }
+    this.chart?.destroy();
+    this.host.replaceChildren(...staging.childNodes);
+    this.chart = candidate;
+    this.config = config;
+    this.analyzed = data;
+    this.pins = pins;
+    this.generation = generation;
+    publishWarnings();
   }
-  private drawPins(u: uPlot) {
+  private drawPins(
+    u: uPlot,
+    pins: Pins = this.pins,
+    config: ViewConfig | undefined = this.config,
+  ) {
     const ctx = u.ctx;
     const { left, top, width, height } = u.bbox;
     ctx.save();
@@ -316,11 +359,14 @@ export class PlotPanel {
     ctx.clip();
     const ratio = window.devicePixelRatio || 1;
     ctx.lineWidth = 1.5 * ratio;
-    ctx.font = `${11 * ratio}px ui-monospace, monospace`;
-    const vertical = (value: number | null, label: string, color: string) => {
-      if (value === null) return;
+    ctx.font = `${12 * ratio}px ui-monospace`;
+    for (const [label, value, color] of [
+      ["A", pins.a, "#78d7ff"],
+      ["B", pins.b, "#c4a8ff"],
+    ] as const) {
+      if (value === null) continue;
       const x = u.valToPos(value, "x", true);
-      if (!Number.isFinite(x)) return;
+      if (x < left || x > left + width) continue;
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
       ctx.setLineDash([5 * ratio, 4 * ratio]);
@@ -328,13 +374,14 @@ export class PlotPanel {
       ctx.moveTo(x, top);
       ctx.lineTo(x, top + height);
       ctx.stroke();
-      ctx.fillText(label, x + 5 * ratio, top + 15 * ratio);
-    };
-    vertical(this.pins.a, "A", "#76d5ff");
-    vertical(this.pins.b, "B", "#b5a1ff");
-    if (this.pins.threshold !== null) {
-      const y = u.valToPos(this.pins.threshold, "y", true);
-      if (Number.isFinite(y)) {
+      ctx.fillText(label, x + 5 * ratio, top + 16 * ratio);
+    }
+    if (
+      pins.threshold !== null &&
+      (config?.yScale !== "log" || pins.threshold > 0)
+    ) {
+      const y = u.valToPos(pins.threshold, "y", true);
+      if (y >= top && y <= top + height) {
         ctx.strokeStyle = "#ffc77a";
         ctx.fillStyle = "#ffc77a";
         ctx.setLineDash([3 * ratio, 4 * ratio]);

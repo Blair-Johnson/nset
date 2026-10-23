@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   assertSafe,
+  JSON_LIMITS,
+  parseSafeJson,
+  isSafeColor,
+  effectiveRange,
+  explicitRangeBounds,
+  CONFIG_HELP,
   deepMerge,
   defaults,
   formatValue,
@@ -46,7 +52,6 @@ for (const key of ["__proto__", "constructor", "prototype"])
 for (const root of [
   "data",
   "hooks",
-  "scales",
   "series",
   "plugins",
   "mode",
@@ -54,7 +59,6 @@ for (const root of [
   "height",
   "bands",
   "tzDate",
-  "select",
 ])
   test(`protects uPlot ${root}`, () =>
     assert.throws(
@@ -81,11 +85,11 @@ for (const value of [
   { axes: [{ values: "(x)=>x" }] },
   { axes: [{ filter: "return null" }] },
   { cursor: { bind: {} } },
-  { legend: { markers: {} } },
+  { legend: { markers: { dash: [2, 3] } } },
   { padding: [2] },
   { axes: [{ grid: { width: -1 } }] },
   { axes: [{ scale: "other" }] },
-  { axes: [{ grid: { stroke: "red" } }] },
+  { axes: [{ grid: { stroke: "url(https://example.com)" } }] },
 ])
   test(`rejects invalid or callback-valued patch ${JSON.stringify(value)}`, () =>
     assert.throws(() => validateAdvanced(value)));
@@ -214,4 +218,401 @@ test("inherited property names are not accepted as view settings", () => {
     () => validateConfig(JSON.parse('{"hasOwnProperty":false}')),
     /unknown setting/,
   );
+});
+
+test("literal presentation families cover the audited uPlot surface", () => {
+  const advanced = {
+    scales: {
+      x: { dir: -1, log: 2, asinh: 0.1, auto: false, range: [1, 100] },
+      y: {
+        dir: 1,
+        range: {
+          min: { pad: 0.1, soft: 1, mode: 2, hard: 0.1 },
+          max: { pad: 0.2, soft: 100, mode: 3, hard: 200 },
+        },
+      },
+    },
+    axes: [
+      {
+        side: 0,
+        align: 1,
+        alignTo: 2,
+        lineGap: 1.2,
+        space: 20,
+        incrs: [1, 5, 10],
+        splits: [1, 2, 3],
+        values: ["one", 2, null],
+        grid: { cap: "round" },
+      },
+      { side: 1, ticks: { cap: "square" }, border: { cap: "butt" } },
+    ],
+    cursor: {
+      lock: true,
+      points: {
+        show: true,
+        one: true,
+        size: 8,
+        width: 2,
+        stroke: "red",
+        fill: "#abcd",
+      },
+      focus: { prox: 20, bias: -1 },
+      hover: { prox: null, bias: 1, skip: [null, 0] },
+      drag: { x: true, y: true, setScale: false, uni: null, dist: 10 },
+    },
+    legend: {
+      show: true,
+      live: false,
+      isolate: true,
+      markers: {
+        show: true,
+        width: 2,
+        stroke: "rgb(1 2 3 / 50%)",
+        fill: "transparent",
+        dash: "dashed",
+      },
+    },
+    padding: [null, 10, null, 0],
+    focus: { alpha: 0.25 },
+    pxAlign: 0.5,
+    drawOrder: ["series", "axes"],
+    select: { show: false, over: false },
+  };
+  assert.deepEqual(parseAdvanced(JSON.stringify(advanced)), advanced);
+  assert.doesNotThrow(() => validateConfig({ advanced }));
+});
+
+test("dash, increments, splits, range, padding and marker arrays replace rather than retain stale tails", () => {
+  const base = {
+    style: { dash: [1, 2, 3, 4], markers: { dash: [4, 5] } },
+    axes: [
+      { incrs: [1, 2, 3], splits: [1, 2], values: ["a", "b"] },
+      { label: "y" },
+    ],
+    padding: [1, 2, 3, 4],
+  };
+  const result = deepMerge(base, {
+    style: { dash: [], markers: { dash: [1] } },
+    axes: [{ incrs: [5], splits: [], values: [] }],
+    padding: [null, 4, 5, 6],
+  });
+  assert.deepEqual(result.style.dash, []);
+  assert.deepEqual(result.style.markers.dash, [1]);
+  assert.deepEqual(result.axes, [
+    { incrs: [5], splits: [], values: [] },
+    { label: "y" },
+  ]);
+  assert.deepEqual(result.padding, [null, 4, 5, 6]);
+  assert.deepEqual(base.style.dash, [1, 2, 3, 4]);
+});
+
+test("advanced ranges supersede built-in bounds, including partial bounds", () => {
+  const c = validateConfig({
+    xScale: "log",
+    xMin: -4,
+    xMax: -8,
+    advanced: { scales: { x: { range: [1, null] } } },
+  });
+  assert.deepEqual(effectiveRange(c, "x"), [1, null]);
+  assert.deepEqual(
+    explicitRangeBounds({ min: { hard: 2 }, max: { soft: 9 } }),
+    [2, null],
+  );
+  assert.doesNotThrow(() =>
+    validateConfig({
+      yMin: 0,
+      yMax: 10,
+      advanced: { scales: { y: { auto: false } } },
+    }),
+  );
+  assert.doesNotThrow(() =>
+    validateConfig({
+      advanced: {
+        scales: {
+          y: { auto: false, range: { min: { hard: -2 }, max: { hard: 3 } } },
+        },
+      },
+    }),
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        yMin: 0,
+        yMax: 10,
+        advanced: { scales: { y: { auto: false, range: [null, 20] } } },
+      }),
+    /auto:false/,
+  );
+  assert.throws(
+    () => validateConfig({ advanced: { scales: { x: { auto: false } } } }),
+    /auto:false/,
+  );
+  assert.throws(
+    () =>
+      validateConfig({ xMin: 0, advanced: { scales: { x: { auto: false } } } }),
+    /auto:false/,
+  );
+});
+
+for (const advanced of [
+  { scales: { z: { dir: 1 } } },
+  { scales: { x: { distr: 3 } } },
+  { scales: { x: { ori: 1 } } },
+  { scales: { x: { time: true } } },
+  { scales: { x: { from: "y" } } },
+  { scales: { x: { clamp: 1 } } },
+  { scales: { x: { log: 3 } } },
+  { scales: { x: { dir: 0 } } },
+  { scales: { x: { asinh: 0 } } },
+  { scales: { x: { range: [4, 4] } } },
+  { scales: { x: { range: [4, 2] } } },
+  { scales: { x: { range: [1] } } },
+  { scales: { x: { range: { min: { pad: -1 }, max: {} } } } },
+  { scales: { x: { range: { min: { mode: 4 }, max: {} } } } },
+  { scales: { x: { range: { min: { hard: 4 }, max: { hard: 2 } } } } },
+  { scales: { x: { range: { min: { soft: 4 }, max: { hard: 2 } } } } },
+  { scales: { x: { range: { min: {} } } } },
+  { scales: { x: { range: { min: { soft: 4 }, max: { soft: 2 } } } } },
+  { axes: [{ side: 1 }] },
+  { axes: [{}, { side: 2 }] },
+  { axes: [{ align: 0 }] },
+  { axes: [{ alignTo: 0 }] },
+  { axes: [{ lineGap: -1 }] },
+  { axes: [{ space: 0 }] },
+  { axes: [{ incrs: [] }] },
+  { axes: [{ incrs: [0, 1] }] },
+  { axes: [{ incrs: [1, 1] }] },
+  { axes: [{ splits: [2, 1] }] },
+  { axes: [{ values: ["a"] }] },
+  { axes: [{ splits: [1, 2], values: ["a"] }] },
+  { axes: [{ splits: [1], values: [{}] }] },
+  { axes: [{ side: 0, rotate: 10 }] },
+  { axes: [{}, { rotate: 10 }] },
+  { axes: [{ grid: { cap: "flat" } }] },
+  { cursor: { points: { bbox: [] } } },
+  { cursor: { points: { show: "auto" } } },
+  { cursor: { hover: { skip: [{}] } } },
+  { cursor: { focus: { dist: 5 } } },
+  { cursor: { hover: { bias: 2 } } },
+  { cursor: { drag: { uni: -1 } } },
+  { cursor: { sync: { key: "shared" } } },
+  { legend: { markers: { fill: "url(image)" } } },
+  { legend: { markers: { dash: "1px dashed red" } } },
+  { legend: { mount: "callback" } },
+  { focus: { alpha: 2 } },
+  { pxAlign: -1 },
+  { drawOrder: ["axes", "axes"] },
+  { drawOrder: ["series"] },
+  { select: { left: 20 } },
+])
+  test(`rejects invalid audited literal ${JSON.stringify(advanced)}`, () =>
+    assert.throws(() => validateAdvanced(advanced)));
+
+for (const advanced of [
+  { scales: { x: { range: [0, 10] } } },
+  { scales: { x: { range: [null, -1] } } },
+  { scales: { x: { range: { min: { soft: 0 }, max: {} } } } },
+  { scales: { x: { range: { min: {}, max: { hard: -1 } } } } },
+  { axes: [{ splits: [-1, 1] }] },
+])
+  test(`log cross-field validation ${JSON.stringify(advanced)}`, () =>
+    assert.throws(
+      () => validateConfig({ xScale: "log", advanced }),
+      /positive/,
+    ));
+
+test("extended series styles round-trip and nested overrides inherit correctly", () => {
+  const style = {
+    cap: "round",
+    alpha: 0.4,
+    pxAlign: false,
+    fillColor: "hsl(20 40% 50% / .5)",
+    fillTo: -3,
+    auto: false,
+    markers: {
+      show: "auto",
+      size: 7,
+      space: 12,
+      width: 2,
+      stroke: "red",
+      fill: "#0000",
+      dash: [2, 4],
+      cap: "square",
+    },
+    pathOptions: { alignGaps: -1, align: 1, ascDesc: true, extend: true },
+  };
+  const c = validateConfig({
+    style,
+    runs: {
+      one: { markers: { size: 10, dash: [] }, pathOptions: { align: -1 } },
+    },
+  });
+  assert.deepEqual(validateConfig(JSON.parse(JSON.stringify(c))), c);
+  const merged = styleFor(c, "one", 0);
+  assert.equal(merged.markers?.size, 10);
+  assert.equal(merged.markers?.show, "auto");
+  assert.deepEqual(merged.markers?.dash, []);
+  assert.equal(merged.pathOptions?.align, -1);
+  assert.equal(merged.pathOptions?.extend, true);
+  assert.equal(c.style.markers?.size, 7);
+});
+for (const style of [
+  { alpha: -1 },
+  { cap: "flat" },
+  { pxAlign: 11 },
+  { auto: 1 },
+  { fillTo: "0" },
+  { fillColor: "var(--x)" },
+  { markers: { show: "always" } },
+  { markers: { filter: [] } },
+  { markers: { size: -1 } },
+  { markers: { dash: [-1] } },
+  { markers: { cap: "flat" } },
+  { pathOptions: { align: 0 } },
+  { pathOptions: { alignGaps: 2 } },
+  { pathOptions: { extend: 1 } },
+  { pathOptions: { spanGaps: true } },
+])
+  test(`invalid extended run style ${JSON.stringify(style)}`, () =>
+    assert.throws(() => validateConfig({ runs: { one: style } })));
+
+test("safe CSS fallback supports literal colors but rejects dynamic or external CSS", () => {
+  for (const color of [
+    "red",
+    "rebeccapurple",
+    "transparent",
+    "#abc",
+    "#abcd",
+    "#12345678",
+    "rgb(1, 2, 3)",
+    "rgba(1, 2, 3, .5)",
+    "rgb(1 2 3 / 50%)",
+    "hsl(180deg 20% 50%)",
+  ])
+    assert.equal(isSafeColor(color), true, color);
+  for (const color of [
+    "",
+    "notacolor",
+    "currentColor",
+    "inherit",
+    "url(https://example.com/x)",
+    "var(--color)",
+    "red; background: blue",
+    "rgb(1 2)",
+    "rgb(1,2,3,4,5)",
+    "hsl(0 10 20)",
+    "rgb(from red r g b)",
+    "rgb(calc(1) 2 3)",
+    "rgb(1 2 3 /)",
+    "rgb(1/*x*/ 2 3)",
+  ])
+    assert.equal(isSafeColor(color), false, color);
+});
+
+test("browser CSS.supports is authoritative after the literal safety filter", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "CSS");
+  const calls: string[] = [];
+  Object.defineProperty(globalThis, "CSS", {
+    configurable: true,
+    value: {
+      supports: (property: string, value: string) => {
+        assert.equal(property, "color");
+        calls.push(value);
+        return value === "oklch(60% .2 30)";
+      },
+    },
+  });
+  try {
+    assert.equal(isSafeColor("oklch(60% .2 30)"), true);
+    assert.equal(isSafeColor("red"), false);
+    assert.equal(isSafeColor("url(image)"), false);
+    assert.equal(isSafeColor("var(--a)"), false);
+    assert.deepEqual(calls, ["oklch(60% .2 30)", "red"]);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "CSS", descriptor);
+    else Reflect.deleteProperty(globalThis, "CSS");
+  }
+});
+
+test("JSON budgets cover input bytes, values, strings, arrays, depth and object keys", () => {
+  assert.throws(
+    () => parseAdvanced(" ".repeat(JSON_LIMITS.bytes + 1) + "{}"),
+    /bytes/,
+  );
+  assert.throws(
+    () => parseSafeJson(JSON.stringify("😀".repeat(JSON_LIMITS.bytes / 4))),
+    /bytes/,
+  );
+  assert.throws(() => assertSafe("a".repeat(JSON_LIMITS.string + 1)), /string/);
+  assert.throws(
+    () => assertSafe({ ["a".repeat(JSON_LIMITS.string + 1)]: 0 }),
+    /string/,
+  );
+  assert.throws(
+    () => assertSafe(Array(JSON_LIMITS.array + 1).fill(0)),
+    /array/,
+  );
+  assert.throws(
+    () => assertSafe(Array.from({ length: 10 }, () => Array(2500).fill(0))),
+    /count/,
+  );
+  assert.throws(
+    () => assertSafe(Array.from({ length: 40 }, () => "a".repeat(8000))),
+    /bytes/,
+  );
+  let nested: unknown = null;
+  for (let i = 0; i < 34; i++) nested = { nested };
+  assert.throws(() => assertSafe(nested), /nesting/);
+  assert.doesNotThrow(() =>
+    assertSafe({
+      a: "x".repeat(JSON_LIMITS.string),
+      b: Array(JSON_LIMITS.array).fill(0),
+    }),
+  );
+});
+
+test("non-JSON shapes and accessors never execute", () => {
+  let invoked = false;
+  const input = Object.defineProperty({}, "x", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return 1;
+    },
+  });
+  assert.throws(() => assertSafe(input), /accessors/);
+  assert.equal(invoked, false);
+  assert.throws(() => assertSafe(new Array(2)), /dense/);
+  assert.throws(() => assertSafe({ [Symbol("x")]: 1 }), /symbol/);
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  assert.throws(() => assertSafe(cycle), /nesting/);
+});
+
+test("documentation states adaptive rendering and updated safe merge contract", () => {
+  assert.match(CONFIG_HELP, /0.35 CSS-pixel/);
+  assert.match(CONFIG_HELP, /arrays replace/);
+  assert.doesNotMatch(CONFIG_HELP, /16 subdivisions|arrays merge by index/);
+});
+
+test("array subclasses cannot execute inherited serialization hooks", () => {
+  let invoked = false;
+  class ExoticArray extends Array {
+    toJSON() {
+      invoked = true;
+      return [];
+    }
+  }
+  assert.throws(() => assertSafe(new ExoticArray()), /plain JSON/);
+  assert.equal(invoked, false);
+});
+
+test("run style lookup never treats inherited object names as overrides", () => {
+  assert.equal(styleFor(defaults(), "toString", 0).width, 2);
+});
+
+test("byte budget counts JSON escaping, punctuation and multibyte values", () => {
+  const value = Array.from({ length: 40 }, () => "\u0000".repeat(1200));
+  assert.throws(() => assertSafe(value), /bytes/);
+  assert.equal(isSafeColor("hsl(20% 30% 40%)"), false);
 });
