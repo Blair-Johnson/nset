@@ -1,0 +1,26 @@
+[package]
+name = "nset"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+rust-embed = { version = "8", features = ["debug-embed"] }
+mime_guess = "2"
+percent-encoding = "2"
+sha2 = "0.10"
+subtle = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
