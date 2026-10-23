@@ -1,6 +1,7 @@
 import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
 import { withRunColors } from "./series-colors";
+import { metricAxisLabel } from "./card-label";
 import {
   applyDashboardControls,
   strengthToSmoothing,
@@ -112,20 +113,7 @@ export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
       : card.config.axis === "timestamp"
         ? "Time"
         : "Step";
-  const keys = [
-    ...new Set(
-      card.source.mode === "selected"
-        ? card.source.keys
-        : card.source.series
-            .filter((source) => source.kind === "metric")
-            .map((source) => source.key),
-    ),
-  ];
-  return keys.length === 1
-    ? keys[0]
-    : keys.length > 1
-      ? "Metric value (mixed metrics)"
-      : "Metric value";
+  return metricAxisLabel(card.source);
 }
 
 export function setEditorToggle(

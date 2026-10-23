@@ -45,7 +45,7 @@ export interface Pins {
 }
 export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
   return data.map(({ run, raw }) => {
-    const observations = canonicalize(raw, config.axis);
+    const observations = canonicalize(raw, config.axis, run.created_at);
     const points = config.smoothing
       ? ema(observations, config.alpha)
       : observations;

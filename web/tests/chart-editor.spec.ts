@@ -865,13 +865,10 @@ test("axis titles follow metric selection until explicitly edited, without savin
   await dialog(page)
     .getByRole("checkbox", { name: /eval\/accuracy —/ })
     .check();
-  await expect(title).toHaveAttribute(
-    "placeholder",
-    "Metric value (mixed metrics)",
-  );
+  await expect(title).toHaveAttribute("placeholder", "Metric values");
   await expect
     .poll(async () => (await state(page)).plots.at(-1)?.config.yLabel)
-    .toBe("Metric value (mixed metrics)");
+    .toBe("Metric values");
   await title.fill("Validation score (%)");
   await dialog(page)
     .getByRole("checkbox", { name: /train\/loss —/ })

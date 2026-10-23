@@ -554,3 +554,31 @@ test("cursor creation returns to zoom and existing horizontal/vertical pins drag
   );
   expect(after.pins).toEqual(pins);
 });
+
+test("an armed cursor can be placed by dragging all the way to release", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
+  const positions = await page.evaluate(async () => {
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+    const u = (window as any).geometry.card.plot.chart,
+      r = u.over.getBoundingClientRect();
+    return {
+      x: r.left + u.valToPos(3, "x"),
+      from: r.top + u.valToPos(0.6, "y"),
+      to: r.top + u.valToPos(1.3, "y"),
+    };
+  });
+  await page.mouse.move(positions.x, positions.from);
+  await page.mouse.down();
+  await page.mouse.move(positions.x, positions.to, { steps: 12 });
+  await page.mouse.up();
+  expect((await snapshot(page)).pins.yA).toBeCloseTo(1.3, 1);
+  await expect(
+    page.getByRole("button", { name: "Add horizontal cursor", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+});

@@ -222,9 +222,9 @@ test("automatic axis titles use actual metric keys, honest mixed labels, and nev
   };
   assert.equal(editorAxisTitle(card, "y"), "eval/loss");
   card.source.series.push({ runId: "r1", key: "accuracy", kind: "metric" });
-  assert.equal(editorAxisTitle(card, "y"), "Metric value (mixed metrics)");
+  assert.equal(editorAxisTitle(card, "y"), "Metric values");
   card.source = { mode: "selected", keys: [] };
-  assert.equal(editorAxisTitle(card, "y"), "Metric value");
+  assert.equal(editorAxisTitle(card, "y"), "Metric values");
 });
 
 test("saved axis titles and literal empty labels remain authoritative", () => {

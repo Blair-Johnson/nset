@@ -370,7 +370,14 @@ export class ChartCard {
       this.setPin(pin, value);
       if (this.mode === "inspect" || this.mode === "threshold") {
         this.mode = "zoom";
-        this.configure(false);
+        // Navigation owns the active pointer capture and disarms after release.
+        // Reconfiguring it from this live callback would cancel placement drags.
+        for (const control of this.cursorButtons.values())
+          control.setAttribute("aria-pressed", "false");
+        for (const control of this.inspection.querySelectorAll(
+          "button[aria-pressed]",
+        ))
+          control.setAttribute("aria-pressed", "false");
       }
     };
     this.plot.configureInteraction({
