@@ -229,7 +229,7 @@ export class PlotPanel {
           : undefined);
       aligned.push(xs.map((x) => valid(x, d.fn.at(x))));
       series.push({
-        label: `${d.run.name} · ${config.smoothing ? "EMA" : "raw-derived"} ${config.interpolation}`,
+        label: `${d.run.name}${config.smoothing ? " · smoothed" : ""}`,
         show: s.visible,
         stroke: s.color,
         width: s.width,
@@ -254,7 +254,7 @@ export class PlotPanel {
       const raw = new Map(d.observations);
       aligned.push(xs.map((x) => valid(x, raw.get(x) ?? null)));
       series.push({
-        label: `${d.run.name} · raw observations`,
+        label: `${d.run.name} · observations`,
         show: s.visible && rawEnabled[i],
         auto: s.auto ?? true,
         alpha: s.alpha ?? 1,
