@@ -1,0 +1,370 @@
+.chart-card {
+  position: relative;
+  min-width: 0;
+  background: #fff;
+  color: #172033;
+  border: 1px solid #dfe5ed;
+  border-radius: 9px;
+  box-shadow: 0 1px 2px #17203308;
+  font:
+    13px/1.45 system-ui,
+    sans-serif;
+  overflow: visible;
+}
+.chart-card [hidden],
+.card-image-panel [hidden] {
+  display: none !important;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #edf0f4;
+}
+.card-title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-card button,
+.card-image-panel button,
+.chart-card select,
+.card-image-panel select,
+.card-coordinate {
+  font: inherit;
+  color: #35445b;
+  background: #fff;
+  border: 1px solid #dce3eb;
+  border-radius: 5px;
+  min-height: 28px;
+  padding: 3px 8px;
+  cursor: pointer;
+  box-shadow: none;
+}
+.chart-card button:hover,
+.card-image-panel button:hover {
+  background: #f2f6fc;
+  border-color: #afc1d9;
+}
+.chart-card button[aria-pressed="true"],
+.card-image-panel button[aria-pressed="true"] {
+  background: #eaf2ff;
+  color: #175bc0;
+  border-color: #b8cff1;
+}
+.chart-card button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.chart-card :focus-visible,
+.card-image-panel :focus-visible {
+  outline: 2px solid #4789dd;
+  outline-offset: 2px;
+}
+.card-menu {
+  position: relative;
+}
+.card-menu-toggle {
+  font-size: 20px;
+  line-height: 26px;
+  width: 28px;
+  text-align: center;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.card-menu-toggle::-webkit-details-marker {
+  display: none;
+}
+.card-menu-items,
+.card-image-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  min-width: 145px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #fff;
+  border: 1px solid #dfe5ed;
+  border-radius: 6px;
+  box-shadow: 0 8px 25px #17203320;
+  z-index: 20;
+}
+.card-menu-items button {
+  text-align: left;
+  border: 0;
+}
+.card-content {
+  padding: 8px;
+  min-width: 0;
+}
+.card-chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.card-chart-toolbar button {
+  padding: 3px 6px;
+}
+.card-axis {
+  margin-left: auto;
+  max-width: 75px;
+}
+.card-plot {
+  min-width: 0;
+  overflow: hidden;
+}
+.card-plot .uplot {
+  font-family: inherit;
+  color: #475569;
+}
+.card-plot .u-legend {
+  font-size: 11px;
+  max-height: 90px;
+  overflow: auto;
+}
+.card-status,
+.card-notice {
+  padding: 5px 12px;
+  color: #64748b;
+  font-size: 12px;
+}
+.card-status:empty,
+.card-notice:empty {
+  display: none;
+}
+.card-notice {
+  color: #8c5816;
+  background: #fff9ed;
+}
+.card-hover {
+  height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: #64748b;
+  padding: 0 5px;
+}
+.card-clipping {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8c5816;
+  font-size: 11px;
+}
+.card-clipping:empty {
+  display: none;
+}
+.card-clipping button {
+  font-size: 11px;
+  min-height: 23px;
+  padding: 1px 5px;
+}
+.card-inspection {
+  border-top: 1px solid #edf0f4;
+  padding: 8px 3px 2px;
+}
+.card-pin-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.card-pin-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+}
+.card-coordinate {
+  width: 100px;
+  cursor: text;
+}
+.card-results {
+  overflow: auto;
+  max-height: 190px;
+  margin-top: 7px;
+}
+.card-value-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.card-value-table th,
+.card-value-table td {
+  padding: 3px 6px;
+  border: 0;
+  border-bottom: 1px solid #edf0f4;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.card-value-table th:first-child {
+  text-align: left;
+  font-weight: 500;
+}
+.card-crossings {
+  margin: 3px 0;
+}
+.card-crossings summary {
+  cursor: pointer;
+}
+.card-crossings div {
+  padding: 5px 8px;
+  overflow-wrap: anywhere;
+  color: #64748b;
+}
+.card-maximized {
+  position: fixed;
+  inset: 18px;
+  z-index: 1000;
+  overflow: auto;
+  box-shadow:
+    0 0 0 30px #17203355,
+    0 20px 70px #17203333;
+}
+.card-maximized .card-plot {
+  min-height: 280px;
+}
+.card-image-panel {
+  min-width: 0;
+  color: #172033;
+}
+.card-image-toolbar {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+}
+.card-image-toolbar select {
+  min-width: 0;
+  max-width: 180px;
+}
+.card-image-more {
+  position: relative;
+  margin-left: auto;
+}
+.card-image-more > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 7px;
+  border: 1px solid #dce3eb;
+  border-radius: 5px;
+}
+.card-image-panel .image-canvas {
+  height: 340px;
+  width: 100%;
+  min-width: 0;
+  background: #f1f4f8;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.card-image-compact .image-canvas {
+  height: 280px;
+}
+.card-image-timeline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
+.card-image-timeline input[type="range"] {
+  flex: 1;
+  min-width: 80px;
+  width: auto;
+  accent-color: #2563eb;
+}
+.card-image-timeline .frame-info {
+  font-size: 11px;
+  color: #64748b;
+  margin: 0;
+  white-space: nowrap;
+}
+.card-image-panel .camera-info,
+.card-image-panel > .muted {
+  font-size: 11px;
+  color: #64748b;
+  padding-top: 3px;
+}
+.card-image-panel > .muted:empty {
+  display: none;
+}
+.card-maximized .card-image-panel .image-canvas,
+.card-image-panel:fullscreen .image-canvas {
+  height: calc(100vh - 180px);
+  min-height: 240px;
+}
+.card-image-panel:fullscreen {
+  background: #fff;
+  padding: 12px;
+  overflow: auto;
+}
+@media (max-width: 600px) {
+  .card-maximized {
+    inset: 5px;
+  }
+  .card-chart-toolbar {
+    gap: 2px;
+  }
+  .card-chart-toolbar button {
+    font-size: 12px;
+    padding: 3px 5px;
+  }
+  .card-coordinate {
+    width: 80px;
+  }
+  .card-image-timeline .frame-info {
+    flex-basis: 100%;
+    text-align: center;
+  }
+}
+
+/* The card legend names series without the legacy plot's diagnostic labels. */
+.card-plot .u-legend {
+  display: none;
+}
+.card-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 3px 5px;
+  font-size: 11px;
+  color: #526279;
+  max-height: 75px;
+  overflow: auto;
+}
+.card-legend:empty {
+  display: none;
+}
+.card-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.card-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+.card-series-hidden {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.card-series-note {
+  color: #64748b;
+  font-style: italic;
+}
