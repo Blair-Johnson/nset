@@ -418,8 +418,8 @@ export class PlotPanel {
     ctx.lineWidth = 1.5 * ratio;
     ctx.font = `${12 * ratio}px ui-monospace`;
     for (const [label, value, color] of [
-      ["A", pins.a, "#0369a1"],
-      ["B", pins.b, "#7c3aed"],
+      ["A", pins.a, "#7dd3fc"],
+      ["B", pins.b, "#d8b4fe"],
     ] as const) {
       if (
         value === null ||
@@ -444,8 +444,8 @@ export class PlotPanel {
     ) {
       const y = u.valToPos(pins.threshold, "y", true);
       if (y >= top && y <= top + height) {
-        ctx.strokeStyle = "#b45309";
-        ctx.fillStyle = "#b45309";
+        ctx.strokeStyle = "#fbbf24";
+        ctx.fillStyle = "#fbbf24";
         ctx.setLineDash([3 * ratio, 4 * ratio]);
         ctx.beginPath();
         ctx.moveTo(left, y);

@@ -136,7 +136,7 @@ export function resolveOptions(
           (config.axis === "step"
             ? "Step"
             : "Timestamp · UTC epoch milliseconds"),
-        stroke: "#475569",
+        stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
         values: formatter(
           config.axis === "timestamp" && config.xFormat === "number"
@@ -146,18 +146,18 @@ export function resolveOptions(
         space: config.axis === "timestamp" ? 170 : 50,
         size: 64,
         labelSize: 20,
-        grid: { show: config.grid, stroke: "#e2e8f0", width: 1 },
-        ticks: { show: config.ticks, stroke: "#94a3b8" },
+        grid: { show: config.grid, stroke: "#363b40", width: 1 },
+        ticks: { show: config.ticks, stroke: "#737b84" },
       },
       {
         label: config.yLabel || "Metric value",
-        stroke: "#475569",
+        stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
         values: formatter(config.yFormat),
         size: 76,
         labelSize: 22,
-        grid: { show: config.grid, stroke: "#e2e8f0", width: 1 },
-        ticks: { show: config.ticks, stroke: "#94a3b8" },
+        grid: { show: config.grid, stroke: "#363b40", width: 1 },
+        ticks: { show: config.ticks, stroke: "#737b84" },
       },
     ],
     legend: { show: config.legend, live: false },
@@ -229,7 +229,7 @@ export function rawMarkerOptions(style: RunStyle): uPlot.Series.Points {
     size: style.pointSize,
     width: 1,
     stroke: style.color,
-    fill: "#121a28",
+    fill: "#1e2022",
     ...markers,
   };
 }

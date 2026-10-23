@@ -1,8 +1,8 @@
 .chart-editor {
-  --ce-border: #dce2eb;
-  --ce-text: #202b3c;
-  --ce-muted: #596779;
-  --ce-accent: #245dcc;
+  --ce-border: var(--border);
+  --ce-text: var(--text);
+  --ce-muted: var(--muted);
+  --ce-accent: var(--accent);
   width: min(1120px, calc(100vw - 40px));
   max-width: none;
   max-height: min(850px, calc(100dvh - 40px));
@@ -10,18 +10,18 @@
   border: 1px solid var(--ce-border);
   border-radius: 14px;
   color: var(--ce-text);
-  background: #fff;
-  box-shadow: 0 24px 90px #182d4e38;
+  background: var(--surface);
+  box-shadow: 0 24px 90px var(--shadow);
   font:
     14px/1.5 system-ui,
     -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
-  color-scheme: light;
+  color-scheme: dark;
 }
 .chart-editor::backdrop {
-  background: #13243b66;
+  background: var(--backdrop);
 }
 .chart-editor *,
 .chart-editor *::before,
@@ -81,7 +81,7 @@
   display: flex;
   gap: 5px;
   padding: 12px 16px;
-  background: #fff;
+  background: var(--surface);
   border-bottom: 1px solid var(--ce-border);
 }
 .chart-editor .ce-tabs button {
@@ -92,8 +92,8 @@
   color: var(--ce-muted);
 }
 .chart-editor .ce-tabs button[aria-selected="true"] {
-  color: #194db1;
-  background: #edf3ff;
+  color: var(--accent);
+  background: var(--selected);
   font-weight: 650;
 }
 .chart-editor .ce-panel {
@@ -114,9 +114,9 @@
   min-width: 0;
   min-height: 36px;
   padding: 7px 9px;
-  border: 1px solid #bdc8d7;
+  border: 1px solid var(--control-border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   color: var(--ce-text);
   font: inherit;
 }
@@ -164,12 +164,12 @@
   display: none;
 }
 .chart-editor .ce-error {
-  color: #b1262e;
+  color: var(--danger);
   font-size: 12px;
   margin-top: 5px;
 }
 .chart-editor [aria-invalid="true"] {
-  border-color: #c7363d !important;
+  border-color: var(--danger) !important;
 }
 .chart-editor .ce-selection-summary {
   color: var(--ce-muted);
@@ -188,16 +188,16 @@
   gap: 10px;
   padding: 10px;
   cursor: pointer;
-  border-bottom: 1px solid #edf0f5;
+  border-bottom: 1px solid var(--border);
 }
 .chart-editor .ce-source:last-child {
   border-bottom: 0;
 }
 .chart-editor .ce-source:hover {
-  background: #f5f8fd;
+  background: var(--surface-hover);
 }
 .chart-editor .ce-source:has(input:checked) {
-  background: #f0f5ff;
+  background: var(--selected);
 }
 .chart-editor .ce-source input {
   margin-top: 3px;
@@ -215,7 +215,7 @@
   overflow-wrap: anywhere;
 }
 .chart-editor .ce-unavailable small {
-  color: #975a0d;
+  color: var(--warning);
 }
 .chart-editor .ce-empty {
   color: var(--ce-muted);
@@ -262,7 +262,7 @@
 .chart-editor .ce-more > summary {
   padding: 12px 0;
   cursor: pointer;
-  color: #3b4d67;
+  color: var(--text);
   font-weight: 550;
   font-size: 13px;
 }
@@ -281,14 +281,14 @@
   overflow-wrap: anywhere;
 }
 .chart-editor .ce-series-button[aria-pressed="true"] {
-  background: #edf3ff;
-  border-color: #97b7ef;
+  background: var(--selected);
+  border-color: var(--accent);
 }
 .chart-editor .ce-preview {
   min-width: 0;
   overflow: auto;
   padding: 30px 24px;
-  background: #f8fafd;
+  background: var(--bg);
 }
 .chart-editor .ce-eyebrow {
   color: var(--ce-muted);
@@ -307,7 +307,7 @@
   min-height: 240px;
   margin-top: 18px;
   padding: 4px;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--ce-border);
   border-radius: 9px;
   overflow: auto;
@@ -315,12 +315,17 @@
 .chart-editor .ce-preview-plot:empty {
   display: grid;
   place-items: center;
-  background: repeating-linear-gradient(0deg, #fff, #fff 39px, #edf1f6 40px);
+  background: repeating-linear-gradient(
+    0deg,
+    var(--surface),
+    var(--surface) 39px,
+    var(--border) 40px
+  );
 }
 .chart-editor .ce-preview-plot:empty::after {
   content: "Your chart preview";
-  color: #6b7b90;
-  background: #ffffffed;
+  color: var(--muted);
+  background: var(--surface);
   padding: 12px;
 }
 .chart-editor .ce-preview .uplot {
@@ -333,7 +338,7 @@
   width: 100%;
   height: 340px;
   min-height: 240px;
-  background: #e9eef5;
+  background: var(--canvas);
 }
 .chart-editor .ce-preview .toolbar {
   display: flex;
@@ -357,34 +362,34 @@
   min-height: 74px;
   padding: 14px 24px;
   border-top: 1px solid var(--ce-border);
-  background: #fff;
+  background: var(--surface);
 }
 .chart-editor .ce-save-error {
   margin-right: auto;
   max-width: 65%;
 }
 .chart-editor button {
-  border: 1px solid #c8d2e0;
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 8px 13px;
-  color: #33445b;
-  background: #fff;
+  color: var(--text);
+  background: var(--surface);
   font: inherit;
   font-weight: 550;
   cursor: pointer;
 }
 .chart-editor button:hover:not(:disabled) {
-  background: #eff4fc;
-  border-color: #9db2cf;
+  background: var(--surface-hover);
+  border-color: var(--muted);
 }
 .chart-editor button.ce-primary {
-  color: #fff;
+  color: var(--accent-ink);
   background: var(--ce-accent);
   border-color: var(--ce-accent);
   min-width: 118px;
 }
 .chart-editor button.ce-primary:hover:not(:disabled) {
-  background: #194eaf;
+  background: var(--accent-hover);
 }
 .chart-editor .ce-close {
   border-color: transparent;
@@ -397,7 +402,7 @@
   cursor: default;
 }
 .chart-editor :focus-visible {
-  outline: 3px solid #568ae9;
+  outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
 @media (max-width: 760px) {
