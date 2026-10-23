@@ -848,3 +848,103 @@ test("selection border is absent at rest and clears after release cancel and pan
   await page.mouse.up({ button: "right" });
   await expect(selection).toHaveCSS("visibility", "hidden");
 });
+
+for (const axis of ["x", "y"] as const)
+  test(`armed ${axis} pair confirms only clicks; zoom, pan, existing-pin drag and cancellations do not advance`, async ({
+    page,
+  }) => {
+    await directFixture(page);
+    await page.evaluate((axis) => {
+      const s = (window as any).__nav;
+      s.pins = { a: null, b: null, threshold: null, yA: null, yB: null };
+      s.panel.setPins(s.pins);
+      s.completed = [];
+      s.configure({
+        mode: "inspect",
+        cursorAxis: axis,
+        activePin: "a",
+        onPlacementComplete: (pin: string) => {
+          // Callback is post-release, so consumers may safely reconfigure here.
+          s.completed.push(pin);
+          s.configure({
+            mode: s.completed.length === 1 ? "inspect" : "zoom",
+            activePin: "b",
+          });
+        },
+      });
+    }, axis);
+    const completed = () =>
+      page.evaluate(() => (window as any).__nav.completed);
+    const first = axis === "x" ? "a" : "yA",
+      second = axis === "x" ? "b" : "yB";
+    const box = (await page.locator(".u-over").boundingBox())!;
+    const point = (x: number, y: number) => ({
+      x: box.x + box.width * x,
+      y: box.y + box.height * y,
+    });
+    for (const phase of [0, 1]) {
+      const before = await state(page);
+      await drag(page, [0.45, 0.45], [0.75, 0.75]);
+      expect((await state(page)).view).not.toEqual(before.view);
+      expect((await state(page)).pins).toEqual(before.pins);
+      expect(await completed()).toHaveLength(phase);
+      await page.keyboard.press("Backspace");
+      for (const mechanism of ["right", "space"]) {
+        const p = point(0.45, 0.45),
+          q = point(0.65, 0.65);
+        await page.mouse.move(p.x, p.y);
+        if (mechanism === "space") await page.keyboard.down("Space");
+        const button = mechanism === "right" ? "right" : "left";
+        await page.mouse.down({ button });
+        await page.mouse.move(q.x, q.y, { steps: 4 });
+        await page.mouse.up({ button });
+        if (mechanism === "space") await page.keyboard.up("Space");
+        expect((await state(page)).view).not.toEqual(before.view);
+        expect((await state(page)).pins).toEqual(before.pins);
+        expect(await completed()).toHaveLength(phase);
+        await page.keyboard.press("Backspace");
+      }
+      for (const cancel of ["Escape", "pointercancel", "lostpointercapture"]) {
+        for (const moving of [false, true]) {
+          const p = point(0.45, 0.45),
+            q = point(0.7, 0.7);
+          await page.mouse.move(p.x, p.y);
+          await page.mouse.down();
+          if (moving) await page.mouse.move(q.x, q.y, { steps: 3 });
+          expect((await state(page)).pins).toEqual(before.pins);
+          if (cancel === "Escape") await page.keyboard.press("Escape");
+          else
+            await page
+              .locator(".u-over")
+              .dispatchEvent(cancel, { pointerId: 1, isPrimary: true });
+          await page.mouse.up();
+          expect((await state(page)).pins).toEqual(before.pins);
+          expect((await state(page)).view).toEqual(before.view);
+          expect(await completed()).toHaveLength(phase);
+        }
+      }
+      const p = phase === 0 ? point(0.25, 0.25) : point(0.8, 0.8);
+      await page.mouse.move(p.x, p.y);
+      await page.mouse.down();
+      await page.mouse.move(p.x + 1, p.y + 1);
+      expect((await state(page)).pins).toEqual(before.pins);
+      await page.mouse.up();
+      expect(await completed()).toEqual(
+        phase === 0 ? [first] : [first, second],
+      );
+      if (phase === 0) {
+        const initialA = (await state(page)).pins[first];
+        await drag(page, [0.25, 0.25], [0.33, 0.33]);
+        expect((await state(page)).pins[first]).not.toBe(initialA);
+        expect((await state(page)).pins[second]).toBeNull();
+        expect((await state(page)).view).toEqual(before.view);
+        expect(await completed()).toEqual([first]);
+      }
+    }
+    const pins = (await state(page)).pins;
+    await page.mouse.click(point(0.5, 0.5).x, point(0.5, 0.5).y);
+    expect((await state(page)).pins).toEqual(pins);
+    await drag(page, [0.5, 0.5], [0.7, 0.7]);
+    expect((await state(page)).pins).toEqual(pins);
+    expect(await completed()).toEqual([first, second]);
+  });
