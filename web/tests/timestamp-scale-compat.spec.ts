@@ -40,6 +40,9 @@ for (const scale of ["log", "asinh"] as const) {
       ];
       const plot = new uPlot(options, data, document.querySelector("main"));
       (window as any).compatPlot = plot;
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
       return {
         policy,
         data: plot.data,
