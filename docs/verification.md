@@ -1,5 +1,13 @@
 # Verification record
 
+## Current redesigned release
+
+Full integrated acceptance passed in rx r59 against source `7d6b8de` in 80.74 seconds. It includes 237 frontend/numerical/state tests, 64 Chromium scenarios (including dark-theme contrast and concrete plot presets), production TypeScript/Vite and Rust release builds, Rust formatting/tests/strict Clippy, 11 real HTTP/client tests, the embedded-server dashboard/image/pixel journey and both 100,000-point throughput probes. No tests were skipped. Subsequent delivery commits only update documentation.
+
+The final dense chart loaded/rendered in 300.40 ms, and contextual PCHIP editor/preview/apply took 814.51 ms. HTTP ingestion measured 33,565 observations/second with complete retrieval in 0.221 seconds. These are local single-run observations, not capacity guarantees. The tested executable SHA-256 was `36f04ea50c81ba7913a8697cae6d3c45acd6599dd57f91d9eeb2020f1a6652e0`.
+
+Current screenshots are retained in `../not-shitty-experiment-tracker-worktrees/.rx-worktrees/r59/artifacts/screenshots/` and that run's `web/test-results/`. They cover experiment/run tables, mixed dashboards, contextual editors, cursor readouts, custom comparisons, image timelines/maximization, dense series and narrow dark layouts. Use `rx show r59` and `rx tail r59` for the exact snapshot and command evidence. The chronological record below includes failed attempts and limitations rather than hiding them.
+
 ## Original baseline (before UX redesign)
 
 The following r23 results describe the original workbench, not the current dashboard redesign. New redesign evidence is recorded separately below.
