@@ -168,6 +168,7 @@ test("mixed cards and two image viewers stay independent, authenticated and nati
 }, testInfo) => {
   await fixture(page);
   expect(await page.locator("[id]").count()).toBe(0);
+  await card(page, 0).getByText("Show legend", { exact: true }).click();
   await expect(
     card(page, 0)
       .getByRole("list", { name: "Chart series" })
@@ -228,6 +229,36 @@ test("mixed cards and two image viewers stay independent, authenticated and nati
     path: testInfo.outputPath("mixed-cards.png"),
     fullPage: false,
   });
+  const imageIdentity = await page.evaluate(() => {
+    const s = (window as any).cardsFixture,
+      c = s.cards[2],
+      image = c.images,
+      count = s.requests.length;
+    c.setSpec({ ...c.spec, layout: { width: 680, height: 550 } });
+    return image === c.images && s.requests.length === count;
+  });
+  expect(imageIdentity).toBe(true);
+  await expect(
+    card(page, 2).getByRole("button", { name: "Resize chart", exact: true }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const v = (window as any).cardsFixture.cards[2].images.viewer;
+        return v.viewport.getContainerSize().y === v.container.clientHeight;
+      }),
+    )
+    .toBe(true);
+  const cameraBeforeMaximize = await card(page, 2)
+    .locator("[data-role=image-viewer]")
+    .getAttribute("data-zoom");
+  const imageBefore = await card(page, 2)
+    .locator(".image-canvas")
+    .boundingBox();
+  await page.evaluate(() => {
+    const s = (window as any).cardsFixture;
+    s.imagePanel = s.cards[2].images;
+  });
   await card(page, 2)
     .getByRole("button", { name: "Maximize chart", exact: true })
     .click();
@@ -235,8 +266,29 @@ test("mixed cards and two image viewers stay independent, authenticated and nati
     card(page, 2).getByRole("slider", { name: "Image frame timeline" }),
   ).toBeVisible();
   await expect(card(page, 2).locator(".image-canvas")).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        (await card(page, 2).locator(".image-canvas").boundingBox())!.height,
+    )
+    .toBeGreaterThan(900);
   await page.keyboard.press("Escape");
   await expect(card(page, 2).locator(".card-maximized")).toHaveCount(0);
+  await expect
+    .poll(
+      async () =>
+        (await card(page, 2).locator(".image-canvas").boundingBox())!.height,
+    )
+    .toBe(imageBefore!.height);
+  expect(
+    await page.evaluate(() => {
+      const s = (window as any).cardsFixture;
+      return s.imagePanel === s.cards[2].images;
+    }),
+  ).toBe(true);
+  await expect(
+    card(page, 2).locator("[data-role=image-viewer]"),
+  ).toHaveAttribute("data-zoom", cameraBeforeMaximize!);
 });
 
 test("scalar cursor modes are local, A/B values use both metrics from one run and threshold lists all crossings", async ({
@@ -245,9 +297,11 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
   await fixture(page);
   const first = card(page, 0);
   await expect(first.locator(".card-inspection")).toBeHidden();
-  await first.getByRole("button", { name: "Inspect", exact: true }).click();
+  await first
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await expect(
-    first.getByRole("button", { name: "Inspect", exact: true }),
+    first.getByRole("button", { name: "Add vertical cursor", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(card(page, 1).locator(".card-inspection")).toBeHidden();
   await first
@@ -270,11 +324,11 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
       return new Set(data.map((s: any) => s.run.id)).size;
     }),
   ).toBe(2);
-  await first.getByRole("button", { name: "Threshold", exact: true }).click();
   await first
-    .getByRole("spinbutton", { name: "Threshold value" })
-    .fill("50000");
-  await first.getByRole("spinbutton", { name: "Threshold value" }).press("Tab");
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
+  await first.getByRole("spinbutton", { name: "Cursor A level" }).fill("50000");
+  await first.getByRole("spinbutton", { name: "Cursor A level" }).press("Tab");
   await expect(
     first.locator(".card-crossings").first().locator("summary"),
   ).toContainText("2 crossings");
@@ -282,7 +336,9 @@ test("scalar cursor modes are local, A/B values use both metrics from one run an
   await expect(
     first.locator(".card-crossings").first().locator("div"),
   ).not.toHaveText("No crossings");
-  await first.getByRole("button", { name: "Pan", exact: true }).click();
+  await first
+    .getByRole("button", { name: "Clear cursors", exact: true })
+    .click();
   await expect(first.locator(".card-inspection")).toBeHidden();
 });
 
@@ -294,14 +350,14 @@ test("card actions and configuration do not mutate neighboring cards", async ({
   await first.getByLabel("Chart actions", { exact: true }).click();
   await first.getByRole("button", { name: "Edit chart", exact: true }).click();
   await first.getByLabel("Chart actions", { exact: true }).click();
-  await first.getByRole("button", { name: "Wide", exact: true }).click();
-  await first.getByLabel("Chart actions", { exact: true }).click();
+  await expect(
+    first.getByRole("button", { name: "Wide", exact: true }),
+  ).toHaveCount(0);
   await first.getByRole("button", { name: "Move down", exact: true }).click();
   expect(
     await page.evaluate(() => (window as any).cardsFixture.events),
   ).toEqual([
     ["edit", "card-0"],
-    ["resize", "card-0", "wide"],
     ["move", "card-0", 1],
   ]);
   await page.evaluate(() => {

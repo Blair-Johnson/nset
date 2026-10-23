@@ -40,6 +40,8 @@ export interface Pins {
   a: number | null;
   b: number | null;
   threshold: number | null;
+  yA?: number | null;
+  yB?: number | null;
 }
 export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
   return data.map(({ run, raw }) => {
@@ -64,23 +66,62 @@ export class PlotPanel {
   private resize: ResizeObserver;
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
+  private pinLabels: PinLabel[] = [];
   private pins: Pins = { a: null, b: null, threshold: null };
   constructor(
     private host: HTMLElement,
     private onPick: (x: number) => void,
     private onWarnings: (warnings: string[]) => void,
+    private fillHost = false,
   ) {
-    this.resize = new ResizeObserver(() => {
-      if (this.chart && this.config && this.host.clientWidth > 0) {
-        this.navigation?.cancelGesture();
-        this.chart.setSize({
-          width: this.config.width ?? Math.max(320, this.host.clientWidth),
-          height: this.config.height,
-        });
-      }
-    });
+    this.resize = new ResizeObserver(() => this.syncSize());
     this.resize.observe(host);
   }
+  private syncSize() {
+    if (!this.chart || !this.config || this.host.clientWidth <= 0) return;
+    const width = this.fillHost
+      ? this.host.clientWidth
+      : (this.config.width ?? Math.max(320, this.host.clientWidth));
+    const height = this.fillHost
+      ? Math.max(100, this.host.clientHeight)
+      : this.config.height;
+    if (this.chart.width === width && this.chart.height === height) return;
+    this.navigation?.cancelGesture();
+    this.chart.setSize({ width, height });
+  }
+
+  /** Only replace display colors; retain uPlot, data arrays, scales and navigation history. */
+  refreshColors(config: ViewConfig): void {
+    if (!this.chart || !this.config) return;
+    this.analyzed.forEach((data, index) => {
+      const style = styleFor(config, data.run.id, index);
+      const markers = rawMarkerOptions(style);
+      for (const seriesIndex of [index * 2 + 1, index * 2 + 2]) {
+        const series = this.chart!.series[seriesIndex];
+        series.stroke = () => style.color;
+        if (seriesIndex % 2 === 1)
+          series.fill = () => fillColor(style) ?? "transparent";
+        if (series.points) {
+          series.points.stroke =
+            typeof markers.stroke === "function"
+              ? markers.stroke
+              : () => markers.stroke as string;
+          series.points.fill =
+            typeof markers.fill === "function"
+              ? markers.fill
+              : () => markers.fill as string;
+        }
+      }
+    });
+    this.config = {
+      ...this.config,
+      runs: config.runs,
+      palette: config.palette,
+      style: config.style,
+    };
+    this.chart.redraw(true);
+  }
+
   clear() {
     this.generation++;
     this.navigation?.destroy();
@@ -337,6 +378,10 @@ export class PlotPanel {
         },
       ],
     });
+    if (this.fillHost) {
+      opts.width = Math.max(1, this.host.clientWidth);
+      opts.height = Math.max(100, this.host.clientHeight);
+    }
     opts.cursor!.bind = {
       mousedown: (_u, _target, native) => (event) => {
         if (!this.interaction) native(event);
@@ -420,46 +465,126 @@ export class PlotPanel {
     const ratio = window.devicePixelRatio || 1;
     ctx.lineWidth = 1.5 * ratio;
     ctx.font = `${12 * ratio}px ui-monospace`;
-    for (const [label, value, color] of [
-      ["A", pins.a, "#7dd3fc"],
-      ["B", pins.b, "#d8b4fe"],
+    const labels: PinLabel[] = [];
+    for (const [label, value, color, axis] of [
+      ["A x", pins.a, "#7dd3fc", "x"],
+      ["B x", pins.b, "#d8b4fe", "x"],
+      ["A y", pins.yA, "#7dd3fc", "y"],
+      ["B y", pins.yB, "#d8b4fe", "y"],
+      ["threshold", pins.threshold, "#fbbf24", "y"],
     ] as const) {
       if (
-        value === null ||
+        value == null ||
         !Number.isFinite(value) ||
-        (config?.xScale === "log" && value <= 0)
+        ((axis === "x" ? config?.xScale : config?.yScale) === "log" &&
+          value <= 0)
       )
         continue;
-      const x = u.valToPos(value, "x", true);
-      if (x < left || x > left + width) continue;
+      const position = u.valToPos(value, axis, true);
+      if (
+        position < (axis === "x" ? left : top) ||
+        position > (axis === "x" ? left + width : top + height)
+      )
+        continue;
       ctx.strokeStyle = color;
-      ctx.fillStyle = color;
       ctx.setLineDash([5 * ratio, 4 * ratio]);
       ctx.beginPath();
-      ctx.moveTo(x, top);
-      ctx.lineTo(x, top + height);
+      ctx.moveTo(axis === "x" ? position : left, axis === "x" ? top : position);
+      ctx.lineTo(
+        axis === "x" ? position : left + width,
+        axis === "x" ? top + height : position,
+      );
       ctx.stroke();
-      ctx.fillText(label, x + 5 * ratio, top + 16 * ratio);
+      labels.push({
+        text: label,
+        color,
+        x: axis === "x" ? position + 7 * ratio : left + 7 * ratio,
+        y: axis === "x" ? top + 5 * ratio : position - 23 * ratio,
+        width: ctx.measureText(label).width + 10 * ratio,
+        height: 20 * ratio,
+      });
     }
-    if (
-      pins.threshold !== null &&
-      (config?.yScale !== "log" || pins.threshold > 0)
-    ) {
-      const y = u.valToPos(pins.threshold, "y", true);
-      if (y >= top && y <= top + height) {
-        ctx.strokeStyle = "#fbbf24";
-        ctx.fillStyle = "#fbbf24";
-        ctx.setLineDash([3 * ratio, 4 * ratio]);
-        ctx.beginPath();
-        ctx.moveTo(left, y);
-        ctx.lineTo(left + width, y);
-        ctx.stroke();
-        ctx.fillText("threshold", left + 8 * ratio, y - 6 * ratio);
-      }
+    this.pinLabels = placePinLabels(
+      labels,
+      { x: left, y: top, width, height },
+      3 * ratio,
+    );
+    ctx.setLineDash([]);
+    for (const label of this.pinLabels) {
+      ctx.fillStyle = "#202429";
+      ctx.fillRect(label.x, label.y, label.width, label.height);
+      ctx.fillStyle = label.color;
+      ctx.fillText(label.text, label.x + 5 * ratio, label.y + 14 * ratio);
     }
     ctx.restore();
   }
 }
+export interface PinLabel {
+  text: string;
+  color: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Deterministic label packing in canvas pixels; never move the data-coordinate lines. */
+export function placePinLabels(
+  labels: PinLabel[],
+  bounds: { x: number; y: number; width: number; height: number },
+  gap = 3,
+): PinLabel[] {
+  const placed: PinLabel[] = [];
+  for (const original of labels) {
+    const label = {
+      ...original,
+      width: Math.min(original.width, bounds.width),
+      height: Math.min(original.height, bounds.height),
+    };
+    const clamp = (x: number, y: number) => ({
+      ...label,
+      x: Math.max(bounds.x, Math.min(bounds.x + bounds.width - label.width, x)),
+      y: Math.max(
+        bounds.y,
+        Math.min(bounds.y + bounds.height - label.height, y),
+      ),
+    });
+    const overlaps = (candidate: PinLabel) =>
+      placed.some(
+        (other) =>
+          candidate.x < other.x + other.width + gap &&
+          candidate.x + candidate.width + gap > other.x &&
+          candidate.y < other.y + other.height + gap &&
+          candidate.y + candidate.height + gap > other.y,
+      );
+    let candidate = clamp(label.x, label.y);
+    if (overlaps(candidate)) {
+      const options: PinLabel[] = [];
+      for (
+        let y = bounds.y;
+        y <= bounds.y + bounds.height - label.height;
+        y += label.height + gap
+      )
+        for (const x of [
+          label.x,
+          bounds.x,
+          bounds.x + bounds.width - label.width,
+        ])
+          options.push(clamp(x, y));
+      options.sort(
+        (a, b) =>
+          Math.hypot(a.x - label.x, a.y - label.y) -
+          Math.hypot(b.x - label.x, b.y - label.y),
+      );
+      const free = options.find((option) => !overlaps(option));
+      if (!free) continue; // No collision is preferable to unreadable overlapping labels in a tiny plot.
+      candidate = free;
+    }
+    placed.push(candidate);
+  }
+  return placed;
+}
+
 export function initialPins(data: Analyzed[]): Pins {
   const range = extent(data.flatMap((d) => d.points.map((p) => p[0])));
   return { a: range?.[0] ?? null, b: range?.[1] ?? null, threshold: null };
