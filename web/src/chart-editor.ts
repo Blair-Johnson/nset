@@ -1652,13 +1652,6 @@ export function openChartEditor(options: ChartEditorOptions): {
       change();
     };
     const shape = shapeFor(effective);
-    // Only choices that look different on real (dense) histories. Older
-    // saved paths (straight/spline/step-before) stay selectable as saved.
-    const legacy: Record<string, string> = {
-      linear: "Straight line (saved)",
-      spline: "Spline (saved)",
-      "stepped-before": "Step before (saved)",
-    };
     select(
       parent,
       `${key}:shape`,
@@ -1666,10 +1659,12 @@ export function openChartEditor(options: ChartEditorOptions): {
       shape,
       [
         ["matched", "Line"],
-        ["stepped-after", "Step"],
+        ["linear", "Straight segments"],
+        ["spline", "Spline (smooth fit)"],
+        ["stepped-after", "Step (hold until next)"],
+        ["stepped-before", "Step (jump at point)"],
         ["area", "Area"],
         ["none", "No line (points only)"],
-        ...(legacy[shape] ? [[shape, legacy[shape]] as [string, string]] : []),
       ],
       (value) => {
         const wasNone = shapeFor(effective) === "none";

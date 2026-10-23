@@ -32,6 +32,8 @@ export function inferZoomAxes(dx: number, dy: number): NavigationAxis | null {
   return x >= y ? "x" : "y";
 }
 export const HISTORY_LIMIT = 64;
+/** Minimum ms between wheel/pinch zoom redraws (~30 per second). */
+export const WHEEL_INTERVAL = 33;
 
 export function transform(value: number, scale: NavigationScale): number {
   return scale.distr === 3
@@ -261,6 +263,7 @@ export class PlotNavigation {
     factor: number,
     axis: NavigationAxis = this.options.axis,
     anchors = { x: 0.5, y: 0.5 },
+    remember = true,
   ) {
     this.cancel();
     const view = this.viewport();
@@ -273,7 +276,7 @@ export class PlotNavigation {
       axis === "x"
         ? view.y
         : navigateRange(view.y, this.u.scales.y, factor, 0, anchors.y);
-    if (x && y) this.apply({ x, y });
+    if (x && y) this.apply({ x, y }, remember);
   }
   pan(dx: number, dy: number) {
     this.cancel();
@@ -540,6 +543,28 @@ export class PlotNavigation {
     // Pin movements are already published in data coordinates; cancellation keeps
     // the last published value so the visible line and external readout agree.
   };
+  // Wheel/pinch events arrive far faster than redraws are worth doing (and
+  // 120 Hz displays double the frame rate). Merge them and apply at most one
+  // zoom per WHEEL_INTERVAL ms; one Back-history entry per burst.
+  private wheelPending?: {
+    factor: number;
+    axis: NavigationAxis;
+    anchors: { x: number; y: number };
+    timer: ReturnType<typeof setTimeout>;
+  };
+  private wheelLast = 0;
+  private wheelBurstUntil = 0;
+  private flushWheel = () => {
+    const next = this.wheelPending;
+    this.wheelPending = undefined;
+    if (!next) return;
+    const now = performance.now();
+    this.wheelLast = now;
+    // A pause longer than this starts a new burst (new Back step).
+    const remember = now > this.wheelBurstUntil;
+    this.wheelBurstUntil = now + 250;
+    this.zoom(next.factor, next.axis, next.anchors, remember);
+  };
   private wheel = (e: WheelEvent) => {
     // Ctrl+wheel (and trackpad pinch, which browsers report as ctrl+wheel) or
     // Alt+wheel zooms the hovered plot; a plain wheel keeps scrolling the page.
@@ -555,11 +580,23 @@ export class PlotNavigation {
         transform(view[axis][0], this.u.scales[axis]));
     const delta =
       e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? h : 1);
-    this.zoom(
-      Math.exp(-Math.max(-500, Math.min(500, delta)) * 0.002),
-      e.shiftKey ? "x" : this.options.axis,
-      { x: anchor("x", x), y: anchor("y", y) },
-    );
+    const factor = Math.exp(-Math.max(-500, Math.min(500, delta)) * 0.002);
+    const axis = e.shiftKey ? "x" : this.options.axis;
+    const anchors = { x: anchor("x", x), y: anchor("y", y) };
+    const pending = this.wheelPending;
+    if (pending) {
+      pending.factor *= factor;
+      pending.axis = axis;
+      pending.anchors = anchors;
+      return;
+    }
+    const wait = Math.max(0, this.wheelLast + WHEEL_INTERVAL - performance.now());
+    this.wheelPending = {
+      factor,
+      axis,
+      anchors,
+      timer: setTimeout(this.flushWheel, wait),
+    };
   };
   private doubleClick = (e: MouseEvent) => {
     e.preventDefault();
@@ -647,6 +684,8 @@ export class PlotNavigation {
   };
   destroy() {
     this.cancel();
+    if (this.wheelPending) clearTimeout(this.wheelPending.timer);
+    this.wheelPending = undefined;
     this.abort.abort();
     this.options.onHover?.(null);
     this.u.over.style.touchAction = this.previousTouchAction;

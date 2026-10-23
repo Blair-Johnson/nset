@@ -406,8 +406,13 @@
   overflow: auto;
 }
 .chart-editor .ce-series-button {
+  display: block;
+  width: 100%;
+  min-width: 0;
   text-align: left;
+  white-space: normal;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .chart-editor .ce-series-button[aria-pressed="true"] {
   background: var(--selected);

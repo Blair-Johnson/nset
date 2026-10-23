@@ -123,6 +123,11 @@ export class ChartCard {
     y: number;
     start: CardLayout;
     next: CardLayout;
+    /** Page scroll at gesture start: auto-scroll extends the drag distance. */
+    scrollY: number;
+    clientX: number;
+    clientY: number;
+    frame?: number;
   };
   private activePin: "a" | "b" = "a";
   private pins: Pins = { a: null, b: null, threshold: null };
@@ -263,6 +268,7 @@ export class ChartCard {
     this.host.classList.remove("card-resizing-slot");
     this.host.style.removeProperty("--resize-slot-width");
     this.host.style.removeProperty("--resize-slot-height");
+    this.host.style.removeProperty("--resize-slot-extra");
   }
 
   private commitDimensions(layout: CardLayout) {
@@ -282,6 +288,7 @@ export class ChartCard {
     const gesture = this.resizeGesture;
     if (!gesture) return;
     this.resizeGesture = undefined;
+    if (gesture.frame) cancelAnimationFrame(gesture.frame);
     if (this.resizeHandle?.hasPointerCapture(gesture.pointer))
       this.resizeHandle.releasePointerCapture(gesture.pointer);
     this.releaseResizeSlot();
@@ -313,23 +320,59 @@ export class ChartCard {
         y: event.clientY,
         start,
         next: start,
+        scrollY: window.scrollY,
+        clientX: event.clientX,
+        clientY: event.clientY,
       };
       handle.setPointerCapture(event.pointerId);
       handle.focus({ preventScroll: true });
     };
+    // Height follows the pointer in page coordinates, so scrolling while
+    // dragging grows the card past the visible area.
+    const track = (g: NonNullable<typeof this.resizeGesture>) => {
+      g.next = bounded(
+        g.start.width + g.clientX - g.x,
+        g.start.height + g.clientY - g.y + window.scrollY - g.scrollY,
+      );
+      this.applyDimensions(g.next);
+      // Reserve page height for the overflowing preview so scrolling can follow.
+      const grow = Math.max(0, g.next.height - g.start.height);
+      this.host.style.setProperty("--resize-slot-extra", `${grow}px`);
+    };
+    // Near the bottom (or top) edge, scroll the page while the pointer rests.
+    const EDGE = 48;
+    const autoScroll = () => {
+      const g = this.resizeGesture;
+      if (!g) return;
+      g.frame = undefined;
+      const fromBottom = window.innerHeight - g.clientY;
+      const speed =
+        fromBottom < EDGE
+          ? Math.ceil(((EDGE - Math.max(0, fromBottom)) / EDGE) * 18)
+          : g.clientY < EDGE
+            ? -Math.ceil(((EDGE - Math.max(0, g.clientY)) / EDGE) * 18)
+            : 0;
+      if (!speed) return;
+      const before = window.scrollY;
+      // The page may need room to scroll into: the card's preview grows first.
+      track(g);
+      window.scrollBy(0, speed);
+      if (window.scrollY !== before) track(g);
+      g.frame = requestAnimationFrame(autoScroll);
+    };
     handle.onpointermove = (event) => {
       const g = this.resizeGesture;
       if (!g || g.pointer !== event.pointerId) return;
-      g.next = bounded(
-        g.start.width + event.clientX - g.x,
-        g.start.height + event.clientY - g.y,
-      );
-      this.applyDimensions(g.next);
+      g.clientX = event.clientX;
+      g.clientY = event.clientY;
+      track(g);
+      if (!g.frame) g.frame = requestAnimationFrame(autoScroll);
     };
     handle.onpointerup = (event) => {
       const g = this.resizeGesture;
       if (!g || g.pointer !== event.pointerId) return;
       this.resizeGesture = undefined;
+      if (g.frame) cancelAnimationFrame(g.frame);
       handle.releasePointerCapture(event.pointerId);
       this.releaseResizeSlot();
       this.commitDimensions(g.next);

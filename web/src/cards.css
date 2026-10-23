@@ -608,6 +608,8 @@
   flex: 0 0 var(--resize-slot-width) !important;
   width: var(--resize-slot-width) !important;
   height: var(--resize-slot-height) !important;
+  /* Room below for a taller preview, so the page can scroll while dragging. */
+  margin-bottom: var(--resize-slot-extra, 0px);
   z-index: 30;
 }
 .card-resizing-slot > .chart-card {
