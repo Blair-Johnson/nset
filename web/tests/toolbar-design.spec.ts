@@ -198,6 +198,8 @@ for (const width of [1440, 390]) {
         exact: true,
       });
       await zoom.focus();
+      await page.keyboard.press("Shift+Tab");
+      await page.keyboard.press("Tab");
       await expect(zoom).toBeFocused();
       const focus = await zoom.evaluate((node) => ({
         outline: getComputedStyle(node).outlineStyle,
