@@ -1114,3 +1114,31 @@ optgroup {
   white-space: nowrap;
   font-size: 12px;
 }
+
+/* Saved-view state: "• Modified  Save" beside the view name. */
+.view-modified {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 2px;
+  font-size: 12px;
+  color: #e7c26b;
+  white-space: nowrap;
+}
+.view-modified[hidden] {
+  display: none;
+}
+.view-modified-dot::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+}
+.view-modified .text-link {
+  font-size: 12px;
+  padding: 2px 4px;
+}

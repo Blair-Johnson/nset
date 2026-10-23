@@ -78,6 +78,51 @@ function error(text = "") {
 function persist() {
   saveLibrary(library);
 }
+/*
+ * Saved-view baselines. Edits always autosave as the view's working state (so
+ * nothing is lost on reload), but each view also remembers its last *saved*
+ * layout (sections, charts, settings). A view whose layout differs is marked
+ * Modified and can be saved, reverted, or saved as a new view — which leaves
+ * the original at its saved layout. Run selection is live state, not layout.
+ */
+const BASELINE_KEY = "nset.view-baselines.v1";
+let baselines: Record<string, string> = (() => {
+  try {
+    const value = JSON.parse(localStorage.getItem(BASELINE_KEY) ?? "{}");
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value
+      : {};
+  } catch {
+    return {};
+  }
+})();
+function saveBaselines() {
+  try {
+    localStorage.setItem(BASELINE_KEY, JSON.stringify(baselines));
+  } catch {
+    /* Baselines are a convenience; the working view is already saved. */
+  }
+}
+const layoutKey = (workspace: Workspace) => JSON.stringify(workspace.sections);
+function baselineFor(workspace: Workspace): string {
+  if (typeof baselines[workspace.id] !== "string") {
+    baselines[workspace.id] = layoutKey(workspace);
+    saveBaselines();
+  }
+  return baselines[workspace.id];
+}
+function isModified(workspace: Workspace) {
+  return baselineFor(workspace) !== layoutKey(workspace);
+}
+function markSaved(workspace: Workspace) {
+  baselines[workspace.id] = layoutKey(workspace);
+  saveBaselines();
+}
+function updateModified(workspace: Workspace) {
+  const marker = document.getElementById("view-modified");
+  if (!marker || marker.dataset.viewId !== workspace.id) return;
+  marker.hidden = !isModified(workspace);
+}
 function commitLibrary(mutate: () => void): boolean {
   const focused = document.activeElement?.getAttribute("aria-label");
   const before = structuredClone(library);
@@ -198,6 +243,7 @@ function change(
   remember(before);
   error();
   if (render) renderCharts(workspace);
+  else updateModified(workspace);
   return true;
 }
 function locate(workspace: Workspace, id: string) {
@@ -608,6 +654,10 @@ function workspaceToolbar(workspace: Workspace) {
         fn();
       }),
     );
+  action("Save changes", () => {
+    markSaved(workspace);
+    workspaceToolbar(workspace);
+  });
   action(
     "Save view as…",
     () =>
@@ -626,19 +676,36 @@ function workspaceToolbar(workspace: Workspace) {
           error("A view with that name already exists.");
           return;
         }
+        // The new view takes the current (possibly modified) layout; the
+        // original goes back to its last saved layout instead of keeping edits.
         const copy = structuredClone(workspace);
         copy.id = crypto.randomUUID();
         copy.name = name;
         copy.updatedAt = Date.now();
+        const saved = baselineFor(workspace);
         if (
           commitLibrary(() => {
             library.views.push(copy);
             library.activeByExperiment[copy.experimentId] = copy.id;
+            workspace.sections = JSON.parse(saved);
           })
-        )
+        ) {
+          markSaved(copy);
+          undo.delete(workspace.id);
           renderPage();
+        }
       })(),
   );
+  action("Revert to saved", () => {
+    const saved = baselineFor(workspace);
+    change(workspace, () => {
+      workspace.sections = JSON.parse(saved);
+    });
+  });
+  const modified = isModified(workspace);
+  for (const b of menu.querySelectorAll<HTMLButtonElement>("button"))
+    if (b.textContent === "Save changes" || b.textContent === "Revert to saved")
+      b.disabled = !modified;
   action(
     "Rename view",
     () =>
@@ -731,8 +798,11 @@ function workspaceToolbar(workspace: Workspace) {
             delete library.activeByExperiment[workspace.experimentId];
             workspaceFor(workspace.experimentId);
           })
-        )
+        ) {
+          delete baselines[workspace.id];
+          saveBaselines();
           renderPage();
+        }
       })(),
   );
   more.append(menu, file);
@@ -764,6 +834,24 @@ function workspaceToolbar(workspace: Workspace) {
     viewControl.append(viewLabel, name);
   }
   viewControl.append(more);
+  // Unsaved-layout marker with a one-click save; revert lives in the ⋯ menu.
+  const marker = element("span", "view-modified");
+  marker.id = "view-modified";
+  marker.dataset.viewId = workspace.id;
+  marker.title =
+    "This view's layout differs from its saved version. Save, revert (⋯), or save as a new view.";
+  const saveNow = button(
+    "Save",
+    () => {
+      markSaved(workspace);
+      workspaceToolbar(workspace);
+    },
+    "text-link",
+  );
+  saveNow.setAttribute("aria-label", "Save view changes");
+  marker.append(element("span", "view-modified-dot", "Modified"), saveNow);
+  marker.hidden = !isModified(workspace);
+  viewControl.append(marker);
   host.append(viewControl);
   const settings = dashboardSettings(workspace);
   if (settings.count) {
