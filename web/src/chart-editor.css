@@ -461,3 +461,10 @@
     max-width: 100%;
   }
 }
+
+.chart-editor .ce-smoothing-endpoints {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 12px;
+}

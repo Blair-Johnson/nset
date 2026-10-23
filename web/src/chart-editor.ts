@@ -2,6 +2,11 @@ import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
 import { withRunColors } from "./series-colors";
 import {
+  applyDashboardControls,
+  strengthToSmoothing,
+  smoothingToStrength,
+} from "./dashboard-controls";
+import {
   deepMerge,
   effectiveRange,
   explicitRangeBounds,
@@ -101,7 +106,12 @@ export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
   if (typeof literal === "string") return literal;
   const saved = card.config[`${axis}Label`];
   if (saved) return saved;
-  if (axis === "x") return card.config.axis === "timestamp" ? "Time" : "Step";
+  if (axis === "x")
+    return card.config.axis === "relative"
+      ? "Elapsed time"
+      : card.config.axis === "timestamp"
+        ? "Time"
+        : "Step";
   const keys = [
     ...new Set(
       card.source.mode === "selected"
@@ -127,9 +137,9 @@ export function setEditorToggle(
   if (key === "legend") removeOverride(config, ["legend", "show"]);
   else for (const i of [0, 1]) removeOverride(config, ["axes", i, key, "show"]);
 }
-/** Smoothing strength is deliberately the inverse of the new-observation weight. */
+/** Compatibility wrapper for the shared dashboard/editor strength mapping. */
 export function smoothingAlpha(strength: number): number {
-  return Math.max(0.01, Math.min(1, 1 - strength / 100));
+  return strengthToSmoothing(strength).alpha;
 }
 
 export interface SourceChoice {
@@ -753,13 +763,17 @@ export function openChartEditor(options: ChartEditorOptions): {
       draft.config.axis,
       [
         ["step", "Step"],
-        ["timestamp", "Time (timestamp)"],
+        ["timestamp", "Wall time"],
+        ["relative", "Relative time (run start)"],
       ],
       (value) => {
-        draft.config.axis = value as ViewConfig["axis"];
-        refreshAxisTitles();
+        draft.config = applyDashboardControls(draft.config, {
+          axis: value as ViewConfig["axis"],
+        });
+        renderAxes();
+        fields.get("axis")?.control.focus({ preventScroll: true });
       },
-      "Time uses the recorded UTC timestamp in milliseconds.",
+      "Relative time starts at each run’s creation time.",
     );
     for (const axis of ["x", "y"] as const) {
       const name = axis.toUpperCase();
@@ -1001,39 +1015,28 @@ export function openChartEditor(options: ChartEditorOptions): {
       );
       return;
     }
-    const strengthBox = el("div");
-    toggle(
-      panel,
-      "smoothing",
-      "Smooth the curve",
-      draft.config.smoothing,
-      (value) => {
-        draft.config.smoothing = value;
-        strengthBox.hidden = !value;
-      },
-      "Off shows the original values. Smoothing never removes observations.",
-    );
+    const strengthBox = el("div", "ce-smoothing");
     panel.append(strengthBox);
-    strengthBox.hidden = !draft.config.smoothing;
     const strength = el("input");
     strength.type = "range";
     strength.min = "0";
-    strength.max = "99";
-    strength.step = "1";
-    strength.value = String(Math.round((1 - draft.config.alpha) * 100));
+    strength.max = "100";
+    strength.step = "any";
+    strength.value = String(smoothingToStrength(draft.config));
     const strengthHint = () =>
-      `Strength ${strength.value}% · α = ${draft.config.alpha.toPrecision(3)}. Higher strength gives each new value less weight.`;
-    field(
-      strengthBox,
-      "strength",
-      "Smoothing strength",
-      strength,
-      strengthHint(),
-    );
+      Number(strength.value) === 0
+        ? "None"
+        : Number(strength.value) === 100
+          ? "More"
+          : `${Math.round(Number(strength.value))}%`;
+    field(strengthBox, "strength", "Smoothing strength", strength);
+    const endpoints = el("div", "ce-smoothing-endpoints");
+    endpoints.append(el("span", "", "None"), el("span", "", "More"));
+    strengthBox.append(endpoints);
+    strength.setAttribute("aria-valuetext", strengthHint());
     strength.oninput = () => {
-      draft.config.alpha = smoothingAlpha(Number(strength.value));
+      Object.assign(draft.config, strengthToSmoothing(Number(strength.value)));
       strength.setAttribute("aria-valuetext", strengthHint());
-      strengthBox.querySelector(".ce-help")!.textContent = strengthHint();
       change();
     };
     select(
