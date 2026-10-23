@@ -347,10 +347,16 @@ try {
     page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
   ).toHaveText("My comparison");
   await expect(card("Cross-experiment comparison")).toHaveCount(1);
+  const beforeImport = await page
+    .getByLabel("Saved view", { exact: true })
+    .inputValue();
   await page.getByLabel("View actions", { exact: true }).click();
   await page
     .getByLabel("Import view file", { exact: true })
     .setInputFiles(path.join(artifacts, "workspace.json"));
+  await expect(page.getByLabel("Saved view", { exact: true })).not.toHaveValue(
+    beforeImport,
+  );
   await expect(card("Cross-experiment comparison")).toHaveCount(1);
   await expect(page.locator("#global-error")).toBeHidden();
   await image.scrollIntoViewIfNeeded();
