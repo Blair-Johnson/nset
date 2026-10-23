@@ -12,6 +12,7 @@ pub struct AppState {
     pub db: db::Database,
     pub token: auth::Token,
     pub image_slots: Arc<Semaphore>,
+    pub write_slots: Arc<Semaphore>,
 }
 impl AppState {
     pub fn open(path: &Path, token: auth::Token) -> errors::Result<Self> {
@@ -19,6 +20,7 @@ impl AppState {
             db: db::Database::open(path)?,
             token,
             image_slots: Arc::new(Semaphore::new(2)),
+            write_slots: Arc::new(Semaphore::new(config::MAX_ACTIVE_WRITES)),
         })
     }
 }

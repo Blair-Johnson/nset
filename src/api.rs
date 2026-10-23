@@ -11,22 +11,32 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, patch, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub fn router(state: AppState) -> Router {
+    // Only supported writes pass through admission. Authentication below wraps
+    // this layer, so unauthorized requests return 401 even when slots are full.
+    let writes = Router::new()
+        .route("/experiments", post(create_experiment))
+        .route("/runs", post(create_run))
+        .route("/runs/{id}", patch(patch_run))
+        .route("/runs/{id}/metrics", post(insert_metrics))
+        .route("/runs/{id}/images", post(insert_image))
+        .route_layer(middleware::from_fn_with_state(state.clone(), admit_write));
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/catalog", get(catalog))
-        .route("/experiments", get(experiments).post(create_experiment))
-        .route("/runs", get(runs).post(create_run))
-        .route("/runs/{id}", get(run).patch(patch_run))
-        .route("/runs/{id}/metrics", get(metrics).post(insert_metrics))
+        .route("/experiments", get(experiments))
+        .route("/runs", get(runs))
+        .route("/runs/{id}", get(run))
+        .route("/runs/{id}/metrics", get(metrics))
         .route("/runs/{id}/metric-keys", get(metric_keys))
-        .route("/runs/{id}/images", get(images).post(insert_image))
+        .route("/runs/{id}/images", get(images))
         .route("/images/{id}/content", get(image_content))
+        .merge(writes)
         .fallback(|| async { ApiError::missing() })
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -39,6 +49,17 @@ pub fn router(state: AppState) -> Router {
         .fallback(assets::serve)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+async fn admit_write(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let Ok(permit) = state.write_slots.try_acquire() else {
+        return ApiError::busy().into_response();
+    };
+    // Acquire before extractors poll the body; retain until the handler returns.
+    // Dropping this future also releases the permit, but does not cancel DB jobs
+    // that were already accepted. A lost response does not imply a failed write.
+    let response = next.run(request).await;
+    drop(permit);
+    response
 }
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;

@@ -1,9 +1,11 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+
+const BUSY_MESSAGE: &str = "server busy; retry later";
 
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub &'static str);
@@ -20,12 +22,18 @@ impl ApiError {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
     pub fn busy() -> Self {
-        Self(StatusCode::SERVICE_UNAVAILABLE, "server busy; retry later")
+        Self(StatusCode::SERVICE_UNAVAILABLE, BUSY_MESSAGE)
     }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":self.1}))).into_response()
+        let mut response = (self.0, Json(json!({"error":self.1}))).into_response();
+        if self.0 == StatusCode::SERVICE_UNAVAILABLE && self.1 == BUSY_MESSAGE {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, "1".parse().unwrap());
+        }
+        response
     }
 }
 impl From<rusqlite::Error> for ApiError {
