@@ -9,6 +9,7 @@ type FixtureOptions = {
   saveError?: boolean;
   many?: boolean;
   imagePreview?: boolean;
+  onClose?: boolean;
 };
 async function fixture(page: Page, options: FixtureOptions = {}) {
   await page.route("**/__editor_fixture", (route) =>
@@ -96,6 +97,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         legend: { show: false, isolate: true },
       };
     const state: any = {
+      closes: [],
       plots: [],
       requests: [],
       card,
@@ -194,6 +196,11 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         },
       );
     }
+    if (options.onClose) {
+      const menu = document.createElement("details");
+      menu.innerHTML = '<summary id="current-menu">Chart actions</summary>';
+      document.body.append(menu);
+    }
     const launch = document.querySelector<HTMLButtonElement>("#launch")!;
     launch.onclick = () => {
       state.handle = openChartEditor({
@@ -202,6 +209,19 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         selectedRunIds: ["r1"],
         store,
         api,
+        onClose: options.onClose
+          ? () => {
+              state.closes.push({
+                dialogPresent: !!document.querySelector("dialog.chart-editor"),
+                focus: document.activeElement?.id,
+              });
+              document.querySelector<HTMLElement>("#current-menu")!.focus({
+                preventScroll: true,
+              });
+              // A host may call close again while handling closure.
+              state.handle.close();
+            }
+          : undefined,
         onSave(next: any) {
           if (state.rejectSave) {
             state.rejectSave = false;
@@ -610,4 +630,89 @@ test("image preview uses ImagePanel, authenticated bytes, and only chosen keys",
   expect((await state(page)).saved).toHaveLength(0);
   await page.keyboard.press("Escape");
   await expect(dialog(page)).toHaveCount(0);
+});
+
+for (const action of [
+  "Cancel",
+  "Escape",
+  "Close editor",
+  "programmatic",
+  "native",
+  "Save changes",
+]) {
+  test(`onClose runs once after removal and fallback focus: ${action}`, async ({
+    page,
+  }) => {
+    await fixture(page, { onClose: true });
+    if (action === "Escape") await page.keyboard.press("Escape");
+    else if (action === "programmatic")
+      await page.evaluate(() => (window as any).__editor.handle.close());
+    else if (action === "native")
+      await dialog(page).evaluate((node: HTMLDialogElement) => node.close());
+    else
+      await dialog(page)
+        .getByRole("button", { name: action, exact: true })
+        .click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect(page.locator("#current-menu")).toBeFocused();
+    await page.evaluate(async () => {
+      (window as any).__editor.handle.close();
+      await new Promise(requestAnimationFrame);
+    });
+    expect(await page.evaluate(() => (window as any).__editor.closes)).toEqual([
+      { dialogPresent: false, focus: "launch" },
+    ]);
+    expect((await state(page)).saved).toHaveLength(
+      action === "Save changes" ? 1 : 0,
+    );
+  });
+}
+
+for (const opener of ["detached", "hidden"]) {
+  test(`host onClose focuses the current menu with a ${opener} opener`, async ({
+    page,
+  }) => {
+    await fixture(page, { onClose: true });
+    await page.evaluate((opener) => {
+      const launch = document.querySelector<HTMLElement>("#launch")!;
+      if (opener === "detached") launch.remove();
+      else launch.hidden = true;
+      const summary = document.querySelector("#current-menu")!;
+      summary.replaceWith(summary.cloneNode(true));
+    }, opener);
+    await dialog(page)
+      .getByRole("button", {
+        name: opener === "detached" ? "Save changes" : "Cancel",
+        exact: true,
+      })
+      .click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect(page.locator("#current-menu")).toBeVisible();
+    await expect(page.locator("#current-menu")).toBeFocused();
+    expect(
+      await page.evaluate(() => (window as any).__editor.closes),
+    ).toHaveLength(1);
+  });
+}
+
+test("failed save leaves the editor open without calling onClose", async ({
+  page,
+}) => {
+  await fixture(page, { onClose: true, saveError: true });
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(
+    dialog(page).getByText(/Could not save: Storage full/),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => (window as any).__editor.closes),
+  ).toHaveLength(0);
+  await dialog(page)
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await expect(page.locator("#current-menu")).toBeFocused();
+  expect(
+    await page.evaluate(() => (window as any).__editor.closes),
+  ).toHaveLength(1);
 });
