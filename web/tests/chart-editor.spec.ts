@@ -10,6 +10,8 @@ type FixtureOptions = {
   many?: boolean;
   imagePreview?: boolean;
   onClose?: boolean;
+  twoOrigins?: boolean;
+  config?: Record<string, unknown>;
 };
 async function fixture(page: Page, options: FixtureOptions = {}) {
   await page.route("**/__editor_fixture", (route) =>
@@ -45,6 +47,10 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         updated_at: 0,
       },
     ];
+    if (options.twoOrigins) {
+      runs[0].created_at = 1700000000000;
+      runs[1].created_at = 1700100000000;
+    }
     const series = (run_id: string, key: string, kind = "metric") => ({
       run_id,
       key,
@@ -97,6 +103,15 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         ],
         legend: { show: false, isolate: true },
       };
+    if (options.twoOrigins)
+      card.source = {
+        mode: "explicit",
+        series: [
+          { runId: "r1", key: "train/loss", kind: "metric" },
+          { runId: "r2", key: "eval/loss", kind: "metric" },
+        ],
+      };
+    Object.assign(card.config, options.config);
     const state: any = {
       closes: [],
       plots: [],
@@ -115,7 +130,10 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         const points = Array.from({ length: 301 }, (_, i) => ({
           seq: i,
           step: i,
-          timestamp: 1000 + i * i,
+          timestamp:
+            (runs.find((run) => run.id === ref.runId)?.created_at ?? 0) +
+            1000 +
+            i * i,
           value: i === 177 ? 900 : 1 + Math.exp(-i / 100),
         }));
         if (!options.delayed) return Promise.resolve(points);
@@ -140,6 +158,10 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
       state.plots.push({
         config: structuredClone(config),
         counts: data.map((series: any) => series.count),
+        xEnds: data.map((series: any) => [
+          series.observations[0][0],
+          series.observations.at(-1)[0],
+        ]),
         max: Math.max(
           ...data.flatMap((series: any) =>
             series.observations.map((point: any) => point[1]),
@@ -273,7 +295,9 @@ test("isolated draft, Cancel/Escape, focus return and live full-history preview"
     .getByLabel("Chart title", { exact: true })
     .fill("Draft only");
   await section(page, "Appearance");
-  await dialog(page).getByLabel("Smooth the curve", { exact: true }).check();
+  await dialog(page)
+    .getByRole("slider", { name: "Smoothing strength" })
+    .fill("50");
   expect((await state(page)).card).toEqual((await state(page)).original);
   await dialog(page)
     .getByRole("button", { name: "Cancel", exact: true })
@@ -442,7 +466,9 @@ test("settings reuse loaded full histories; source changes and close cancel pend
     dialog(page).getByText("1 curve(s) · 301 observations", { exact: true }),
   ).toBeVisible();
   await section(page, "Appearance");
-  await dialog(page).getByLabel("Smooth the curve", { exact: true }).check();
+  await dialog(page)
+    .getByRole("slider", { name: "Smoothing strength" })
+    .fill("50");
   await dialog(page)
     .getByLabel("Between observations", { exact: true })
     .selectOption("pchip");
@@ -487,7 +513,7 @@ test("image sources have no misleading numeric controls and no metric loads", as
     dialog(page).getByLabel("Card width", { exact: true }),
   ).toHaveCount(0);
   await expect(
-    dialog(page).getByLabel("Smooth the curve", { exact: true }),
+    dialog(page).getByRole("slider", { name: "Smoothing strength" }),
   ).toHaveCount(0);
   expect((await state(page)).loads).toHaveLength(0);
 });
@@ -514,6 +540,7 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
     "Y axis title",
     "X scale",
     "Y bounds",
+    "Smoothing strength",
     "Between observations",
     "Line width",
     "Point size",
@@ -985,4 +1012,186 @@ test("source and style choices retain keyboard focus, irrelevant advanced errors
     .click();
   await expect(dialog(page)).toHaveCount(0);
   expect((await state(page)).saved).toHaveLength(1);
+});
+
+test("visible None–More slider matches shared dashboard semantics and saves endpoints", async ({
+  page,
+}) => {
+  await fixture(page);
+  await section(page, "Appearance");
+  const slider = dialog(page).getByRole("slider", {
+    name: "Smoothing strength",
+  });
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute("min", "0");
+  await expect(slider).toHaveAttribute("max", "100");
+  await expect(slider).toHaveValue("0");
+  await expect(slider).toHaveAttribute("aria-valuetext", "None");
+  await expect(
+    dialog(page).getByLabel("Smooth the curve", { exact: true }),
+  ).toHaveCount(0);
+  await expect(dialog(page).locator(".ce-smoothing-endpoints")).toHaveText(
+    "NoneMore",
+  );
+  expect(await dialog(page).innerText()).not.toMatch(
+    /α|EMA|coefficient|canonical|smoothingStrength|strengthToAlpha/i,
+  );
+  for (const strength of [50, 100, 0, 25.5, 100]) {
+    const shared = await page.evaluate(async (strength) => {
+      const { strengthToSmoothing } =
+        await import("/src/dashboard-controls.ts");
+      return strengthToSmoothing(strength);
+    }, strength);
+    await slider.fill(String(strength));
+    await expect
+      .poll(async () => {
+        const config = (await state(page)).plots.at(-1)?.config;
+        return config && { smoothing: config.smoothing, alpha: config.alpha };
+      })
+      .toEqual(shared);
+    await expect(slider).toHaveAttribute(
+      "aria-valuetext",
+      strength === 0
+        ? "None"
+        : strength === 100
+          ? "More"
+          : `${Math.round(strength)}%`,
+    );
+  }
+  expect((await state(page)).card).toEqual((await state(page)).original);
+  expect((await state(page)).loads).toHaveLength(1);
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved[0].config).toMatchObject({
+    smoothing: true,
+    alpha: 0.01,
+  });
+});
+
+for (const [smoothing, alpha] of [
+  [false, 0.1],
+  [true, 1],
+  [true, 0.1],
+  [true, 0.001],
+  [true, 0.19],
+] as const) {
+  test(`saved smoothing ${smoothing}/${alpha} projects without rewriting the stored value`, async ({
+    page,
+  }) => {
+    await fixture(page, { config: { smoothing, alpha } });
+    const expected = await page.evaluate(
+      async (config) => {
+        const { smoothingToStrength } =
+          await import("/src/dashboard-controls.ts");
+        return smoothingToStrength(config);
+      },
+      { smoothing, alpha },
+    );
+    const slider = dialog(page).getByRole("slider", {
+      name: "Smoothing strength",
+    });
+    expect(Number(await slider.inputValue())).toBeCloseTo(expected, 10);
+    await dialog(page)
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    expect((await state(page)).saved[0].config).toMatchObject({
+      smoothing,
+      alpha,
+    });
+  });
+}
+
+test("all three X axes reset incompatible bounds and preview relative to each run start", async ({
+  page,
+}) => {
+  await fixture(page, {
+    twoOrigins: true,
+    config: {
+      xMin: 1,
+      xMax: 100,
+      xScale: "log",
+      xFormat: "scientific",
+      yMin: 0,
+      yMax: 1000,
+      advanced: {
+        scales: { x: { range: [1, 100], auto: false, log: 2, dir: -1 } },
+        axes: [{ splits: [1, 100], values: ["first", "last"], incrs: [1] }],
+      },
+    },
+  });
+  await section(page, "Axes");
+  const axis = dialog(page).getByLabel("X values", { exact: true });
+  expect(await axis.locator("option").allTextContents()).toEqual([
+    "Step",
+    "Wall time",
+    "Relative time (run start)",
+  ]);
+  for (const [value, title, xEnds] of [
+    [
+      "timestamp",
+      "Time",
+      [
+        [1700000001000, 1700000091000],
+        [1700100001000, 1700100091000],
+      ],
+    ],
+    [
+      "relative",
+      "Elapsed time",
+      [
+        [1000, 91000],
+        [1000, 91000],
+      ],
+    ],
+    [
+      "step",
+      "Step",
+      [
+        [0, 300],
+        [0, 300],
+      ],
+    ],
+  ] as const) {
+    await axis.selectOption(value);
+    await expect(axis).toBeFocused();
+    await expect(
+      dialog(page).getByLabel("X axis title", { exact: true }),
+    ).toHaveAttribute("placeholder", title);
+    await expect(
+      dialog(page).getByLabel("X bounds", { exact: true }),
+    ).toHaveValue("auto");
+    await expect(
+      dialog(page).getByLabel("X scale", { exact: true }),
+    ).toHaveValue("linear");
+    await expect
+      .poll(async () => (await state(page)).plots.at(-1)?.config.axis)
+      .toBe(value);
+    const plot = (await state(page)).plots.at(-1);
+    expect(plot.xEnds).toEqual(xEnds);
+    expect(plot.counts).toEqual([301, 301]);
+    expect(plot.config).toMatchObject({
+      xMin: null,
+      xMax: null,
+      xFormat: "number",
+      yMin: 0,
+      yMax: 1000,
+    });
+    expect(plot.config.advanced.scales.x).toEqual({ dir: -1 });
+    expect(plot.config.advanced.axes[0]).not.toHaveProperty("splits");
+    expect(plot.config.advanced.axes[0]).not.toHaveProperty("values");
+    expect(plot.config.advanced.axes[0]).not.toHaveProperty("incrs");
+  }
+  expect((await state(page)).loads).toHaveLength(2);
+  expect((await state(page)).card).toEqual((await state(page)).original);
+  await axis.selectOption("relative");
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved[0].config).toMatchObject({
+    axis: "relative",
+    xLabel: "",
+    xMin: null,
+    xMax: null,
+  });
 });
