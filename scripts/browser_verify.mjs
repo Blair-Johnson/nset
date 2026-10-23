@@ -318,7 +318,7 @@ try {
   assert.equal(await value(custom, "Curve A", 0), 2);
   assert.equal(await value(custom, "Remote baseline", 0), 3);
   await page.getByLabel("View actions", { exact: true }).click();
-  await page.getByRole("button", { name: "Save as…", exact: true }).click();
+  await page.getByRole("button", { name: "Save view as…", exact: true }).click();
   const saveDialog = page.getByRole("dialog", {
     name: "Save view as",
     exact: true,
