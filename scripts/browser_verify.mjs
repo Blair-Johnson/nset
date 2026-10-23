@@ -222,7 +222,7 @@ try {
     "both actual curve colors are rendered",
   );
   await page.locator("details[data-menu=add] summary").click();
-  await page.getByRole("button", { name: "Line chart", exact: true }).click();
+  await page.getByRole("button", { name: "Line plot", exact: true }).click();
   editor = page.getByRole("dialog", { name: "Add chart", exact: true });
   await editor.waitFor();
   await editor

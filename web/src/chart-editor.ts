@@ -1,4 +1,5 @@
 import type { Api, ImageFrame } from "./api";
+import { plotType, setPlotType, type PlotType } from "./plot-types";
 import {
   deepMerge,
   effectiveRange,
@@ -539,18 +540,21 @@ export function openChartEditor(options: ChartEditorOptions): {
     select(
       panel,
       "kind",
-      "Chart type",
-      draft.kind,
+      "Plot type",
+      plotType(draft),
       [
-        ["timeseries", "Curve"],
-        ["image", "Image"],
+        ["line", "Line plot"],
+        ["scatter", "Scatter plot"],
+        ["area", "Area plot"],
+        ["step", "Step plot"],
+        ["image", "Image panel"],
       ],
       (value) => {
         sourceMemory.set(
           `${draft.kind}/${draft.source.mode}`,
           clone(draft.source),
         );
-        draft.kind = value as ChartSpec["kind"];
+        setPlotType(draft, value as PlotType);
         draft.source = clone(
           sourceMemory.get(`${draft.kind}/${draft.source.mode}`) ??
             (draft.source.mode === "selected"
@@ -1234,6 +1238,11 @@ export function openChartEditor(options: ChartEditorOptions): {
     const changed = () => {
       effective = deepMerge(effective, patch);
       commit();
+      if (key === "default") {
+        const type = fields.get("kind")?.control as
+          HTMLSelectElement | undefined;
+        if (type) type.value = plotType(draft);
+      }
       // Presets change several properties; keep their existing controls in sync without
       // rebuilding the focused form or dropping unfinished input in another field.
       const values: Record<string, string> = {

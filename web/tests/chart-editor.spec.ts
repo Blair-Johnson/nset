@@ -135,6 +135,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     const { PlotPanel } = await import("/src/plot.ts");
     const originalRender = PlotPanel.prototype.render;
     PlotPanel.prototype.render = function (data: any, config: any, pins: any) {
+      state.rendered = this;
       state.plots.push({
         config: structuredClone(config),
         counts: data.map((series: any) => series.count),
@@ -718,4 +719,66 @@ test("failed save leaves the editor open without calling onClose", async ({
   expect(
     await page.evaluate(() => (window as any).__editor.closes),
   ).toHaveLength(1);
+});
+
+test("plot type uses concrete names and preserves sources and interpolation across presets", async ({
+  page,
+}) => {
+  await fixture(page);
+  const type = dialog(page).getByLabel("Plot type", { exact: true });
+  expect(await type.locator("option").allTextContents()).toEqual([
+    "Line plot",
+    "Scatter plot",
+    "Area plot",
+    "Step plot",
+    "Image panel",
+  ]);
+  await expect(type).toHaveValue("line");
+  await type.selectOption("scatter");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1).config.style.width)
+    .toBe(0);
+  let preview = (await state(page)).plots.at(-1);
+  expect(preview.config.style.markers.show).toBe(true);
+  expect(preview.counts).toEqual([301]);
+  const drawing = await page.evaluate(() => {
+    const chart = (window as any).__editor.rendered.chart;
+    return {
+      noLine:
+        chart.series[1].paths(chart, 1, 0, chart.data[0].length - 1) === null,
+      markers: chart.data[2].filter((value: number | null) => value !== null)
+        .length,
+    };
+  });
+  expect(drawing).toEqual({ noLine: true, markers: 301 });
+  await section(page, "Appearance");
+  await dialog(page)
+    .getByLabel("Between observations", { exact: true })
+    .selectOption("pchip");
+  await section(page, "Data");
+  await expect(type).toHaveValue("scatter");
+  await type.selectOption("area");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1).config.style.fill)
+    .toBe(0.15);
+  await type.selectOption("step");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1).config.style.path)
+    .toBe("stepped-after");
+  await type.selectOption("scatter");
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  const saved = (await state(page)).saved[0];
+  expect(saved.config.style.width).toBe(0);
+  expect(saved.config.interpolation).toBe("pchip");
+  expect(saved.source).toEqual({ mode: "selected", keys: ["train/loss"] });
+  await page.evaluate(() => {
+    const state = (window as any).__editor;
+    Object.assign(state.card, state.saved[0]);
+  });
+  await page.locator("#launch").click();
+  await expect(
+    dialog(page).getByLabel("Plot type", { exact: true }),
+  ).toHaveValue("scatter");
 });

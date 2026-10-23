@@ -241,12 +241,15 @@ export class PlotPanel {
         fill: fillColor(s),
         fillTo:
           s.fillTo ?? ((u) => (config.yScale === "log" ? u.scales.y.min! : 0)),
-        paths: adaptive
-          ? matchedPath(d.points, (x) => d.fn.at(x), {
-              fillTo: s.fillTo,
-              onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
-            })
-          : cosmeticPath(s),
+        paths:
+          s.width === 0 && s.fill === 0 && rawEnabled[i]
+            ? () => null
+            : adaptive
+              ? matchedPath(d.points, (x) => d.fn.at(x), {
+                  fillTo: s.fillTo,
+                  onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
+                })
+              : cosmeticPath(s),
         spanGaps: false,
         points: { ...rawMarkerOptions(s), show: d.points.length === 1 },
         value: (_u, v) => (v == null ? "—" : formatValue(v, config.yFormat)),

@@ -1,0 +1,42 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { newChart } from "./workspace";
+import { plotType, setPlotType } from "./plot-types";
+for (const type of ["line", "scatter", "area", "step", "image"] as const) {
+  test(`${type} plot preset preserves data and numerical settings`, () => {
+    const card = newChart("timeseries", ["train/loss"]);
+    card.config.interpolation = "pchip";
+    card.config.smoothing = true;
+    const source = structuredClone(card.source);
+    setPlotType(card, type);
+    assert.equal(plotType(card), type);
+    assert.deepEqual(card.source, source);
+    assert.equal(card.config.interpolation, "pchip");
+    assert.equal(card.config.smoothing, true);
+  });
+}
+test("scatter enables observation markers, line restores stroke, individual colors survive", () => {
+  const card = newChart("timeseries", ["train/loss"]);
+  card.config.runs.r = {
+    color: "red",
+    visible: false,
+    path: "spline",
+    width: 5,
+    markers: { show: false, size: 9 },
+    pathOptions: { align: -1 },
+  };
+  setPlotType(card, "scatter");
+  assert.equal(card.config.style.width, 0);
+  assert.equal(card.config.style.points, true);
+  assert.equal(card.config.style.markers?.show, true);
+  assert.deepEqual(card.config.runs.r, {
+    color: "red",
+    visible: false,
+    markers: { size: 9 },
+    pathOptions: {},
+  });
+  setPlotType(card, "line");
+  assert.equal(card.config.style.width, 2);
+  assert.equal(card.config.style.fill, 0);
+  assert.equal(card.config.style.path, "matched");
+});

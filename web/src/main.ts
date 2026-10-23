@@ -21,6 +21,7 @@ import type {
   CardContext,
 } from "./workspace-types";
 import { ChartCard } from "./cards";
+import { setPlotType } from "./plot-types";
 import { addMissingCharts } from "./dashboard-layout";
 import { openChartEditor } from "./chart-editor";
 import {
@@ -547,18 +548,23 @@ function workspaceToolbar(workspace: Workspace) {
   const addSummary = element("summary", "primary", "Add chart");
   add.append(addSummary);
   const addMenu = element("div", "menu-popover");
-  for (const [kind, label] of [
-    ["timeseries", "Line chart"],
+  for (const [type, label] of [
+    ["line", "Line plot"],
+    ["scatter", "Scatter plot"],
+    ["area", "Area plot"],
+    ["step", "Step plot"],
     ["image", "Image panel"],
   ] as const)
     addMenu.append(
       button(label, () => {
         add.open = false;
-        editCard(
-          workspace,
-          newChart(kind, [], kind === "timeseries" ? "New chart" : "Images"),
-          true,
+        const card = newChart(
+          type === "image" ? "image" : "timeseries",
+          [],
+          type === "image" ? "Images" : "New plot",
         );
+        setPlotType(card, type);
+        editCard(workspace, card, true);
       }),
     );
   add.append(addMenu);

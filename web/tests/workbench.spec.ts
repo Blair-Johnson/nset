@@ -206,7 +206,7 @@ test("empty experiment has a clear table and chart creation remains available", 
   await page.getByRole("button", { name: "Charts", exact: true }).click();
   await expect(page.locator(".dashboard-empty")).toContainText("Select runs");
   await page.locator("details[data-menu=add] summary").click();
-  await page.getByRole("button", { name: "Line chart", exact: true }).click();
+  await page.getByRole("button", { name: "Line plot", exact: true }).click();
   await expect(
     page.getByRole("dialog", { name: "Add chart", exact: true }),
   ).toBeVisible();
@@ -393,4 +393,28 @@ test("returning to a long dashboard restores scroll without rebuilding plots", a
   await expect(page.locator(".run-table")).toBeVisible();
   await page.getByRole("button", { name: "Charts", exact: true }).click();
   await expect.poll(() => page.evaluate(() => scrollY)).toBeCloseTo(y, 0);
+});
+
+test("Add chart creates a scatter plot directly", async ({ page }) => {
+  await fixture(page);
+  await charts(page);
+  await page.locator("details[data-menu=add] summary").click();
+  await page.getByRole("button", { name: "Scatter plot", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Add chart", exact: true });
+  await expect(editor.getByLabel("Plot type", { exact: true })).toHaveValue(
+    "scatter",
+  );
+  await editor.getByRole("checkbox", { name: /^train\/loss —/ }).check();
+  await editor
+    .getByLabel("Chart title", { exact: true })
+    .fill("Observed losses");
+  await editor.getByRole("button", { name: "Add chart", exact: true }).click();
+  await card(page, "Observed losses").locator("canvas").waitFor();
+  const saved = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("nset.workspaces.v2")!)
+      .views[0].sections.flatMap((s: any) => s.cards)
+      .find((c: any) => c.title === "Observed losses"),
+  );
+  expect(saved.config.style.width).toBe(0);
+  expect(saved.config.style.markers.show).toBe(true);
 });
