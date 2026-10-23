@@ -143,9 +143,19 @@ function xFormatter(
   axis: ViewConfig["axis"],
   name: Formatter,
 ): uPlot.Axis.Values {
+  return (_u, values) => values.map((value) => formatXValue(value, axis, name));
+}
+
+/** Coordinate readouts and ticks share axis semantics, including legacy ISO on elapsed axes. */
+export function formatXValue(
+  value: number,
+  axis: ViewConfig["axis"],
+  name: Formatter,
+): string {
   if (axis === "relative" && (name === "number" || name === "iso-time"))
-    return (_u, values) => values.map(formatDuration);
-  return formatter(
+    return formatDuration(value);
+  return formatValue(
+    value,
     axis === "timestamp" && name === "number" ? "iso-time" : name,
   );
 }

@@ -25,7 +25,7 @@ async function fixture(page: Page) {
               count: 3,
               last_step: 20,
               last_timestamp: r.created_at + 22000,
-              last_value: 1,
+              last_value: key.endsWith("image") ? null : 1,
             })),
           ),
         },

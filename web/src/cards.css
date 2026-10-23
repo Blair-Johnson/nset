@@ -422,9 +422,9 @@
   flex: none;
 }
 .card-inspection {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 48%;
+  flex: 0 0 130px;
+  min-height: 56px;
+  max-height: 38%;
   overflow: auto;
   padding-top: 4px;
 }
@@ -463,7 +463,7 @@
 }
 .card-legend-item {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 10ch);
   gap: 6px;
   padding: 2px 0;
 }
@@ -558,4 +558,26 @@
   .card-pin-fields {
     gap: 4px;
   }
+}
+
+.card-legend-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-legend-coordinate {
+  font-size: 11px;
+  padding-bottom: 3px;
+  color: var(--text);
+}
+.card-legend:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.card-hover-more {
+  color: var(--muted);
+  font-size: 11px;
+  padding-top: 2px;
 }

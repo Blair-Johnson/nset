@@ -229,7 +229,7 @@ for (const width of [1440, 390])
       page,
       ".card-title, .card-legend, .section-count, .card-chart-toolbar button:not(:disabled)",
     );
-    await readable(page, ".card-axis", true);
+    await readable(page, ".dashboard-control-axis select", true);
     await darkSurfaces(page);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),

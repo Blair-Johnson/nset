@@ -478,7 +478,21 @@ test("sixty-run legends and hover readouts stay bounded without widening the car
   expect(bounds.legend).toBeLessThanOrEqual(105);
   expect(bounds.legendScroll).toBeGreaterThan(500);
   expect(bounds.hover).toBeLessThanOrEqual(125);
-  expect(bounds.hoverScroll).toBeGreaterThan(500);
+  expect(bounds.hoverScroll).toBeLessThanOrEqual(125);
+  await expect(page.locator(".card-hover-row")).toHaveCount(3);
+  await expect(page.locator(".card-hover-more")).toHaveText(
+    "57 more in legend",
+  );
+  await page.evaluate(() =>
+    (window as any).geometry.card.plot.interaction.onHover(null),
+  );
+  await expect(page.locator(".card-legend-coordinate")).toHaveText("At step 2");
+  await expect(page.locator(".card-legend-value").last()).toHaveText("2");
+  await page.locator(".card-legend").focus();
+  await page.keyboard.press("End");
+  await expect
+    .poll(() => page.locator(".card-legend").evaluate((el) => el.scrollTop))
+    .toBeGreaterThan(100);
   expect(bounds.document).toBe(1500);
   await page.screenshot({ path: info.outputPath("dense-card-readouts.png") });
 });
@@ -582,3 +596,62 @@ test("an armed cursor can be placed by dragging all the way to release", async (
     page.getByRole("button", { name: "Add horizontal cursor", exact: true }),
   ).toHaveAttribute("aria-pressed", "false");
 });
+
+for (const format of ["number", "iso-time"])
+  test(`relative crossing readouts use durations with ${format} formatting`, async ({
+    page,
+  }) => {
+    await fixture(page);
+    await page.evaluate((format) => {
+      const s = (window as any).geometry;
+      const catalog = {
+        ...s.context.catalog,
+        runs: s.context.catalog.runs.map((r: any) => ({ ...r, created_at: 0 })),
+      };
+      s.card.setSpec({
+        ...s.card.spec,
+        source: { mode: "selected", keys: ["train/loss"] },
+        config: { ...s.card.spec.config, axis: "relative", xFormat: format },
+      });
+      s.card.setContext({
+        ...s.context,
+        catalog,
+        store: {
+          clear() {},
+          async load(ref: any) {
+            return (
+              ref.runId === "a"
+                ? [
+                    [0, 1],
+                    [10000, 3],
+                    [20000, 1],
+                  ]
+                : [
+                    [6000, 2],
+                    [8000, 2],
+                    [20000, 4],
+                  ]
+            ).map(([timestamp, value], i) => ({
+              seq: i + 1,
+              step: i,
+              timestamp,
+              value,
+            }));
+          },
+        },
+      });
+    }, format);
+    await expect(page.locator(".card-status")).toHaveText("");
+    await page
+      .getByRole("button", { name: "Add horizontal cursor", exact: true })
+      .click();
+    await page.getByLabel("Cursor A level", { exact: true }).fill("2");
+    await page.getByLabel("Cursor A level", { exact: true }).press("Tab");
+    const a = page.locator(".card-crossings").filter({ hasText: "Run a" });
+    const b = page.locator(".card-crossings").filter({ hasText: "Run b" });
+    await a.locator("summary").click();
+    await b.locator("summary").click();
+    await expect(a).toContainText("5s, 15s");
+    await expect(b).toContainText("6s – 8s");
+    await expect(page.locator(".card-results")).not.toContainText("1970");
+  });

@@ -4,6 +4,7 @@ import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { withMetricLabel } from "./card-label";
+import { formatXValue } from "./options";
 import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
@@ -70,6 +71,9 @@ export class ChartCard {
   private results = element("div", "card-results");
   private hover = element("div", "card-hover");
   private legend = element("div", "card-legend");
+  private lastHoverX: number | null = null;
+  private legendCoordinate = element("div", "card-legend-coordinate");
+  private legendValues: [HTMLElement, Analyzed][] = [];
   private clipping = element("div", "card-clipping");
   private plot?: PlotPanel;
   private images?: ImagePanel;
@@ -392,13 +396,23 @@ export class ChartCard {
       onHover: (x) => {
         this.hover.replaceChildren();
         if (x === null) return;
-        for (const series of this.data) {
+        this.lastHoverX = x;
+        this.updateLegendReadout();
+        for (const series of this.data.slice(0, 3)) {
           const row = element("div", "card-hover-row");
           const name = element("span", "", series.run.name);
           name.title = series.run.name;
           row.append(name, element("span", "", this.number(series.fn.at(x))));
           this.hover.append(row);
         }
+        if (this.data.length > 3)
+          this.hover.append(
+            element(
+              "div",
+              "card-hover-more",
+              `${this.data.length - 3} more in legend`,
+            ),
+          );
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
@@ -487,8 +501,23 @@ export class ChartCard {
     this.renderResults();
   }
 
+  private updateLegendReadout() {
+    const x = this.lastHoverX;
+    this.legendCoordinate.hidden = x === null;
+    this.legendCoordinate.textContent =
+      x === null
+        ? ""
+        : `At ${this.spec.config.axis === "step" ? "step " : ""}${formatXValue(x, this.spec.config.axis, this.spec.config.xFormat)}`;
+    for (const [cell, series] of this.legendValues) {
+      cell.textContent = x === null ? "" : this.number(series.fn.at(x));
+      cell.title = cell.textContent;
+    }
+  }
+
   private renderLegend() {
-    this.legend.replaceChildren();
+    this.legend.replaceChildren(this.legendCoordinate);
+    this.legendValues = [];
+    this.legend.tabIndex = 0;
     const config = this.displayConfig();
     const advanced = config.advanced.legend as { show?: boolean } | undefined;
     this.legendDetails.hidden = !(advanced?.show ?? config.legend);
@@ -508,7 +537,9 @@ export class ChartCard {
       const key = element("span", "card-legend-key", source?.key ?? "");
       name.title = name.textContent ?? "";
       key.title = key.textContent ?? "";
-      item.append(swatch, name, key);
+      const value = element("span", "card-legend-value");
+      this.legendValues.push([value, series]);
+      item.append(swatch, name, key, value);
       if (!style.visible) {
         item.classList.add("card-series-hidden");
         item.title = "Hidden in chart settings";
@@ -517,6 +548,7 @@ export class ChartCard {
     });
     if (config.smoothing)
       this.legend.append(element("span", "card-series-note", "Smoothed"));
+    this.updateLegendReadout();
   }
 
   private setPin(pin: keyof Pins, value: number | null) {
@@ -586,11 +618,15 @@ export class ChartCard {
           list.textContent =
             [
               ...crossings.points.map((x) =>
-                formatValue(x, this.spec.config.xFormat),
+                formatXValue(
+                  x,
+                  this.spec.config.axis,
+                  this.spec.config.xFormat,
+                ),
               ),
               ...crossings.plateaus.map(
                 ([a, b]) =>
-                  `${formatValue(a, this.spec.config.xFormat)} – ${formatValue(b, this.spec.config.xFormat)}`,
+                  `${formatXValue(a, this.spec.config.axis, this.spec.config.xFormat)} – ${formatXValue(b, this.spec.config.axis, this.spec.config.xFormat)}`,
               ),
             ].join(", ") || "No crossings";
           details.append(list);
@@ -629,6 +665,8 @@ export class ChartCard {
     this.legend.replaceChildren();
     this.plot?.clear();
     this.hover.textContent = "";
+    this.lastHoverX = null;
+    this.legendValues = [];
     this.clipping.replaceChildren();
     this.renderResults();
     const sources = (this.sources = resolveSources(
@@ -770,6 +808,8 @@ export class ChartCard {
     this.status.textContent = "";
     this.notice.textContent = "";
     this.hover.textContent = "";
+    this.lastHoverX = null;
+    this.legendValues = [];
     this.clipping.replaceChildren();
     this.renderResults();
     this.updateActive();
