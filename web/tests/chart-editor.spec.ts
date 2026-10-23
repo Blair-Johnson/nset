@@ -5,6 +5,7 @@ type FixtureOptions = {
   explicit?: boolean;
   image?: boolean;
   delayed?: boolean;
+  constant?: boolean;
   advanced?: boolean;
   saveError?: boolean;
   many?: boolean;
@@ -138,7 +139,11 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
             (runs.find((run) => run.id === ref.runId)?.created_at ?? 0) +
             1000 +
             i * i,
-          value: i === 177 ? 900 : 1 + Math.exp(-i / 100),
+          value: options.constant
+            ? 5
+            : i === 177
+              ? 900
+              : 1 + Math.exp(-i / 100),
         }));
         if (state.failLoads)
           return Promise.reject(new Error("History offline"));
@@ -1570,6 +1575,116 @@ for (const action of ["Cancel", "Escape"]) {
     await expect(page.locator("#launch")).toBeFocused();
   });
 }
+
+for (const scenario of [
+  { name: "automatic", config: {}, applies: true },
+  {
+    name: "one-sided manual",
+    config: { yMax: 1000 },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "two-sided manual",
+    config: { yMin: 0, yMax: 1000 },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "advanced manual",
+    config: { advanced: { scales: { y: { range: [null, 1000], dir: -1 } } } },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "custom range",
+    config: {
+      advanced: {
+        scales: {
+          y: { range: { min: { hard: 0 }, max: { soft: 1000 } }, dir: -1 },
+        },
+      },
+    },
+    applies: false,
+    reason: "custom range rules",
+  },
+  { name: "constant values", config: {}, constant: true, applies: false },
+]) {
+  test(`effective robust-range feedback: ${scenario.name}`, async ({
+    page,
+  }, testInfo) => {
+    await fixture(page, {
+      config: scenario.config,
+      constant: scenario.constant,
+    });
+    const status = dialog(page).locator('.ce-preview [role="status"]');
+    const policy = dialog(page).getByLabel("Y auto range", { exact: true });
+    await expect(status).toHaveText("1 curve(s) · 301 observations");
+    const before = (await state(page)).plots.at(-1).config;
+    await expect(policy).toBeEnabled();
+    if (scenario.reason)
+      await expect(
+        dialog(page).getByText(
+          `Saved for automatic bounds; ${scenario.reason} are active.`,
+          { exact: true },
+        ),
+      ).toBeVisible();
+    const renders = (await state(page)).renderCount;
+    await policy.selectOption("robust");
+    await expect
+      .poll(async () => (await state(page)).renderCount)
+      .toBeGreaterThan(renders);
+    await expect(status).toHaveText(
+      `1 curve(s) · 301 observations${scenario.applies ? " · Central 98% display" : ""}`,
+    );
+    const current = (await state(page)).plots.at(-1);
+    expect(current.counts).toEqual([301]);
+    if (scenario.applies) {
+      expect(current.config.yMin).not.toBeNull();
+      expect(current.config.yMax).toBeLessThan(3);
+    } else {
+      expect(current.config).toEqual(before);
+    }
+    if (process.env.NSET_EDITOR_CAPTURE)
+      await page.screenshot({
+        path: testInfo.outputPath("effective-range.png"),
+        fullPage: true,
+      });
+    await dialog(page)
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    const result = await state(page);
+    expect(result.saved[0].outliers).toBe("robust");
+    expect(result.saved[0].config).toEqual(result.original.config);
+    expect(result.card).toEqual(result.original);
+    expect(result.loads).toHaveLength(1);
+  });
+}
+
+test("automatic bounds reactivate the saved robust policy without reloading histories", async ({
+  page,
+}) => {
+  await fixture(page, { config: { yMax: 1000 } });
+  const status = dialog(page).locator('.ce-preview [role="status"]');
+  const policy = dialog(page).getByLabel("Y auto range", { exact: true });
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await policy.selectOption("robust");
+  await dialog(page)
+    .getByLabel("Y bounds", { exact: true })
+    .selectOption("auto");
+  await expect(policy).toHaveValue("robust");
+  await expect(status).toHaveText(
+    "1 curve(s) · 301 observations · Central 98% display",
+  );
+  await expect(
+    dialog(page).getByText(/Saved for automatic bounds;/),
+  ).toHaveCount(0);
+  await policy.selectOption("all");
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  expect((await state(page)).plots.at(-1).config.yMax).toBeNull();
+  expect((await state(page)).plots.at(-1).max).toBe(900);
+  expect((await state(page)).loads).toHaveLength(1);
+});
 
 test("reused scalar preview reports current unavailable-source warnings", async ({
   page,

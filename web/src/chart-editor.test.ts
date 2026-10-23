@@ -4,6 +4,7 @@ import {
   choicePage,
   editorSourceChoices,
   editorAxisTitle,
+  editorAutoRangeHelp,
   removeOverride,
   setEditorAxis,
   setEditorBounds,
@@ -240,4 +241,33 @@ test("saved axis titles and literal empty labels remain authoritative", () => {
   assert.equal(editorAxisTitle(card, "y"), "Edited title");
   setEditorAxis(card.config, "y", "label", "");
   assert.equal(editorAxisTitle(card, "y"), "train/loss");
+});
+
+test("auto-range help follows effective bounds without changing literals or policy", () => {
+  const config = defaults();
+  assert.match(editorAutoRangeHelp(config), /1st/);
+  for (const [min, max] of [
+    [null, 10],
+    [1, null],
+    [1, 10],
+  ]) {
+    setEditorBounds(config, "y", min, max);
+    const before = structuredClone(config);
+    assert.equal(
+      editorAutoRangeHelp(config),
+      "Saved for automatic bounds; manual limits are active.",
+    );
+    assert.deepEqual(config, before);
+  }
+  config.advanced = {
+    scales: { y: { range: { min: { hard: 0 }, max: { soft: 100 } }, dir: -1 } },
+  };
+  const before = structuredClone(config);
+  assert.equal(
+    editorAutoRangeHelp(config),
+    "Saved for automatic bounds; custom range rules are active.",
+  );
+  assert.deepEqual(config, before);
+  config.advanced = { scales: { y: { range: [null, null] } } };
+  assert.match(editorAutoRangeHelp(config), /1st/);
 });

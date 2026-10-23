@@ -90,6 +90,16 @@ export function setEditorBounds(
   removeOverride(config, ["scales", axis, "range"]);
   removeOverride(config, ["scales", axis, "auto"]);
 }
+/** Explain the effective range without changing the saved auto-range preference. */
+export function editorAutoRangeHelp(config: ViewConfig): string {
+  const range = effectiveRange(config, "y");
+  if (!Array.isArray(range))
+    return "Saved for automatic bounds; custom range rules are active.";
+  const [lo, hi] = explicitRangeBounds(range);
+  if (lo !== null || hi !== null)
+    return "Saved for automatic bounds; manual limits are active.";
+  return "Display only: Central 98% fits the 1st–99th percentiles. No observations are removed.";
+}
 export function setEditorAxis(
   config: ViewConfig,
   axis: "x" | "y",
@@ -393,6 +403,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
   function change() {
     saveError.textContent = "";
+    refreshAutoRangeHelp();
     schedulePreview();
   }
   function input(
@@ -969,10 +980,18 @@ export function openChartEditor(options: ChartEditorOptions): {
       (value) => {
         draft.outliers = value as ChartSpec["outliers"];
       },
-      "Display only: Central 98% fits the 1st–99th percentiles. No observations are removed. Set limits take precedence.",
+      editorAutoRangeHelp(draft.config),
     );
     panel.append(advanced);
     refreshAxisTitles();
+  }
+
+  function refreshAutoRangeHelp() {
+    const hint = fields
+      .get("outliers")
+      ?.control.closest(".ce-field")
+      ?.querySelector(".ce-help");
+    if (hint) hint.textContent = editorAutoRangeHelp(draft.config);
   }
 
   function refreshAxisTitles() {
@@ -1675,6 +1694,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         window.matchMedia("(max-width: 760px)").matches ? 240 : 440,
       );
       const analyzed = module.analyze(data, config);
+      let robustRangeApplied = false;
       if (valid.outliers === "robust") {
         const [lo, hi] = explicitRangeBounds(effectiveRange(config, "y"));
         if (
@@ -1702,8 +1722,10 @@ export function openChartEditor(options: ChartEditorOptions): {
               values[Math.ceil(i)] * (i % 1)
             );
           };
-          if (values.length && percentile(0.01) < percentile(0.99))
+          if (values.length && percentile(0.01) < percentile(0.99)) {
             setEditorBounds(config, "y", percentile(0.01), percentile(0.99));
+            robustRangeApplied = true;
+          }
         }
       }
       plot ??= new module.PlotPanel(
@@ -1726,7 +1748,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       renderedScalarKind = valid.kind;
       previewTitle.textContent = valid.title || "Untitled chart";
       const count = data.reduce((sum, series) => sum + series.raw.length, 0);
-      previewStatus.textContent = `${sources.length} curve(s) · ${count.toLocaleString()} observations${valid.outliers === "robust" ? " · Central 98% display" : ""}`;
+      previewStatus.textContent = `${sources.length} curve(s) · ${count.toLocaleString()} observations${robustRangeApplied ? " · Central 98% display" : ""}`;
       previewHost.dataset.observationCount = String(count);
     } catch (error) {
       if (closed || version !== previewVersion) return;
