@@ -343,7 +343,10 @@ export function runTable(
     "text-link",
   );
   tools.append(search, status, columns, selected, clear, chartButton);
-  const wrap = element("div", "table-scroll");
+  const wrap = element("div", "table-scroll run-table-scroll");
+  wrap.tabIndex = 0;
+  wrap.setAttribute("role", "region");
+  wrap.setAttribute("aria-label", "Scrollable runs table");
   const table = element("table", "data-table run-table");
   table.setAttribute("aria-label", "Runs");
   const head = element("thead");
