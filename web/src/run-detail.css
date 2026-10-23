@@ -1,0 +1,265 @@
+.run-detail {
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 12px 24px;
+  color: var(--text);
+}
+.run-detail *,
+.run-detail *::before,
+.run-detail *::after {
+  box-sizing: border-box;
+}
+.run-detail button {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.run-detail button:focus-visible,
+.run-detail input:focus-visible {
+  outline: 2px solid #75baff;
+  outline-offset: 2px;
+}
+.run-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+.run-detail-header h1 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.run-detail-status {
+  font-size: 11px;
+  color: var(--muted);
+}
+.run-detail-status.running {
+  color: #87c4f7;
+}
+.run-detail-status.finished {
+  color: #8bc7a2;
+}
+.run-detail-status.failed {
+  color: #f29a9a;
+}
+.run-detail-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 5px 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.run-detail-metadata > div {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+}
+.run-detail-metadata dt,
+.run-detail-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.run-detail-id {
+  font-family: monospace;
+}
+.run-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.run-detail h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.run-detail-tag {
+  display: inline-flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 5px;
+}
+.run-detail-tag strong,
+.run-detail-tag code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.run-config {
+  min-width: 0;
+}
+.run-config-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.run-config-heading h2 {
+  margin-right: auto;
+}
+.run-config-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin: 6px 0;
+}
+.run-config-tools input {
+  flex: 1 1 240px;
+  min-width: 120px;
+  height: 30px;
+  padding: 4px 8px;
+}
+.run-config-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+.run-config-hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 4px 0 6px;
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.run-config-status {
+  min-height: 14px;
+}
+.run-config-rows {
+  border-top: 1px solid var(--border);
+}
+.run-config-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 66px minmax(140px, 1.2fr) 100px;
+  align-items: start;
+  gap: 8px;
+  padding: 5px 6px;
+  min-height: 32px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.run-config-row:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+.run-config-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  min-width: 0;
+  padding-left: calc(var(--config-depth, 0) * 8px);
+}
+.run-config-path {
+  flex: 1;
+  min-width: 0;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.run-config-toggle,
+.run-config-toggle-space {
+  flex: 0 0 20px;
+  width: 20px;
+}
+.run-detail .run-config-toggle {
+  min-height: 20px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+.run-config-source {
+  flex-basis: 100%;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.run-config-type {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 20px;
+}
+.run-config-value {
+  min-width: 0;
+  margin: 0;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.run-config-value[data-type="number"] {
+  color: #a8cafa;
+}
+.run-config-value[data-type="boolean"],
+.run-config-value[data-type="null"] {
+  color: #d2b7ea;
+}
+.run-config-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+.run-detail .run-config-actions button {
+  min-height: 22px;
+  padding: 1px 5px;
+  font-size: 10px;
+}
+.run-config-more {
+  margin-top: 8px;
+}
+.run-config-more[hidden] {
+  display: none;
+}
+@media (max-width: 650px) {
+  .run-detail {
+    padding: 6px 8px 20px;
+  }
+  .run-detail-header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .run-detail-header h1 {
+    flex-basis: 45%;
+    font-size: 14px;
+  }
+  .run-config-row {
+    grid-template-columns: minmax(0, 1fr) 92px;
+    gap: 2px 6px;
+  }
+  .run-config-key {
+    grid-column: 1;
+  }
+  .run-config-type {
+    grid-column: 2;
+    text-align: right;
+  }
+  .run-config-value {
+    grid-column: 1 / -1;
+    padding-left: 20px;
+  }
+  .run-config-actions {
+    grid-column: 2;
+  }
+  .run-config-hint {
+    display: block;
+  }
+  .run-config-status {
+    display: block;
+  }
+  .run-config-count {
+    flex-basis: 100%;
+  }
+}
