@@ -193,6 +193,9 @@ async function fixture(page: Page) {
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.locator("#connection")).toHaveText("Connected");
   await page.getByRole("button", { name: "Vision study", exact: true }).click();
+  await expect(
+    page.getByRole("table", { name: "Runs", exact: true }),
+  ).toBeVisible();
 }
 async function dashboard(page: Page) {
   await page
@@ -464,8 +467,12 @@ test("empty, error, validation and maximized-card surfaces remain readable", asy
   page,
 }, info) => {
   await fixture(page);
-  const search = page.locator('.table-toolbar input[type="search"]');
+  const search = page.getByRole("searchbox", {
+    name: "Search runs, parameters or tags",
+    exact: true,
+  });
   await search.fill("no matching run");
+  await expect(page.locator(".empty-table")).toBeVisible();
   await readable(page, ".empty-table");
   await darkSurfaces(page);
   await search.fill("");
