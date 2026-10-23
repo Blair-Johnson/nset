@@ -146,7 +146,7 @@ try {
   await loss
     .getByRole("button", { name: "Previous view", exact: true })
     .click();
-  await surface.focus();
+  await loss.locator(".uplot").focus();
   await page.keyboard.press("+");
   await page.keyboard.press("0");
   await loss
@@ -160,6 +160,9 @@ try {
     "horizontal",
   );
   await coordinate(loss, "Cursor A level", 2);
+  const crossingDetails = loss.locator(".card-series-details");
+  if (!(await crossingDetails.evaluate((node) => node.open)))
+    await crossingDetails.locator(":scope > summary").click();
   const aCross = loss.locator(".card-crossings").filter({ hasText: "Curve A" }),
     bCross = loss.locator(".card-crossings").filter({ hasText: "Curve B" });
   await aCross.locator("summary").click();
