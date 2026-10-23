@@ -2,6 +2,11 @@ import type { Catalog, CatalogSeries } from "./workspace-types";
 import type { Experiment, Run } from "./api";
 import { element } from "./utils";
 import { runSwatch } from "./run-drawer";
+import {
+  scalarParameters,
+  parameterLabel,
+  compareParameters,
+} from "./run-table-fields";
 
 export interface TableState {
   query: string;
@@ -10,6 +15,8 @@ export interface TableState {
   descending: boolean;
   page: number;
   metrics: string[] | null;
+  parameters?: string[];
+  columnQuery?: string;
 }
 export const tableState = (): TableState => ({
   query: "",
@@ -224,6 +231,18 @@ export function runTable(
     ...new Set([...summaries.values()].flatMap((m) => [...m.keys()])),
   ].sort();
   if (state.metrics === null) state.metrics = keys.slice(0, 3);
+  state.parameters ??= [];
+  const parameters = new Map(
+    runs.map((run) => [
+      run.id,
+      new Map(
+        scalarParameters(run.params).map((field) => [field.sourcePath, field]),
+      ),
+    ]),
+  );
+  const parameterFields = new Map(
+    [...parameters.values()].flatMap((fields) => [...fields]),
+  );
   const tools = element("div", "table-toolbar");
   const search = input("Search runs, parameters or tags", state.query);
   const status = element("select");
@@ -243,22 +262,75 @@ export function runTable(
   const columnsSummary = element("summary", "", "Columns");
   columns.append(columnsSummary);
   const columnMenu = element("div", "menu-popover column-picker");
-  if (!keys.length)
-    columnMenu.append(element("span", "muted", "No metrics logged yet"));
-  for (const key of keys) {
-    const label = element("label", "check-option");
-    const check = element("input");
-    check.type = "checkbox";
-    check.checked = state.metrics.includes(key);
-    check.onchange = () => {
-      state.metrics = check.checked
-        ? [...state.metrics!, key]
-        : state.metrics!.filter((k) => k !== key);
-      render();
-    };
-    label.append(check, document.createTextNode(key));
-    columnMenu.append(label);
+  const columnSearch = input("Search columns", state.columnQuery ?? "");
+  const choices = element("div", "column-choices");
+  const empty = element("span", "muted", "No matching columns");
+  empty.setAttribute("role", "status");
+  const groups: {
+    group: HTMLElement;
+    options: { label: HTMLElement; search: string }[];
+  }[] = [];
+  for (const [kind, title, fields] of [
+    [
+      "metrics",
+      "Metrics · latest",
+      keys.map((key) => [key, key.toLowerCase()]),
+    ],
+    [
+      "parameters",
+      "Parameters",
+      [...parameterFields]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, field]) => [key, field.search]),
+    ],
+  ] as const) {
+    const group = element("fieldset", "column-group");
+    group.append(element("legend", "", title));
+    const options: { label: HTMLElement; search: string }[] = [];
+    for (const [key, searchable] of fields) {
+      const label = element("label", "check-option");
+      const check = element("input");
+      check.type = "checkbox";
+      check.checked = state[kind]!.includes(key);
+      check.onchange = () => {
+        state[kind] = check.checked
+          ? [...state[kind]!, key]
+          : state[kind]!.filter((k) => k !== key);
+        render();
+      };
+      label.append(check, element("span", "", key));
+      label.title = kind === "metrics" ? `${key} · latest logged value` : key;
+      group.append(label);
+      options.push({ label, search: searchable });
+    }
+    groups.push({ group, options });
+    choices.append(group);
   }
+  function filterColumns() {
+    const query = columnSearch.value.trim().toLowerCase();
+    state.columnQuery = columnSearch.value;
+    let matches = 0;
+    for (const { group, options } of groups) {
+      let count = 0;
+      for (const option of options) {
+        option.label.hidden = !option.search.includes(query);
+        if (!option.label.hidden) count++;
+      }
+      group.hidden = count === 0;
+      matches += count;
+    }
+    empty.hidden = matches > 0;
+    choices.scrollTop = 0;
+  }
+  columnSearch.oninput = filterColumns;
+  columns.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    columns.open = false;
+    columnsSummary.focus();
+  };
+  columnMenu.append(columnSearch, choices, empty);
+  filterColumns();
   columns.append(columnMenu);
   const chartButton = button("View charts", onCharts, "primary");
   const selected = element("span", "selection-count");
@@ -271,7 +343,10 @@ export function runTable(
     "text-link",
   );
   tools.append(search, status, columns, selected, clear, chartButton);
-  const wrap = element("div", "table-scroll");
+  const wrap = element("div", "table-scroll run-table-scroll");
+  wrap.tabIndex = 0;
+  wrap.setAttribute("role", "region");
+  wrap.setAttribute("aria-label", "Scrollable runs table");
   const table = element("table", "data-table run-table");
   table.setAttribute("aria-label", "Runs");
   const head = element("thead");
@@ -308,6 +383,13 @@ export function runTable(
           if (av == null) return bv == null ? 0 : 1;
           if (bv == null) return -1;
           result = av - bv;
+        } else if (state.sort.startsWith("parameter:")) {
+          const key = state.sort.slice(10);
+          return compareParameters(
+            parameters.get(a.id)?.get(key)?.value,
+            parameters.get(b.id)?.get(key)?.value,
+            state.descending,
+          );
         } else result = a.created_at - b.created_at;
         return (state.descending ? -1 : 1) * result;
       });
@@ -359,7 +441,8 @@ export function runTable(
       ["name", "Run"],
       ["status", "Status"],
       ["created_at", "Created"],
-      ...state.metrics!.map((k) => [`metric:${k}`, k]),
+      ...state.metrics!.map((k) => [`metric:${k}`, `${k} · latest`]),
+      ...state.parameters!.map((k) => [`parameter:${k}`, k]),
     ]) {
       const th = element("th");
       th.setAttribute(
@@ -382,6 +465,10 @@ export function runTable(
       control.dataset.sortKey = key;
       if (focusedSort === key) restoreFocus = control;
       control.title = key.startsWith("metric:") ? "Latest logged value" : label;
+      if (key.startsWith("parameter:")) {
+        th.classList.add("parameter-header");
+        control.title = `Parameter ${label}`;
+      }
       th.append(control);
       header.append(th);
     }
@@ -424,8 +511,14 @@ export function runTable(
         const summary = summaries.get(run.id)?.get(key);
         const metric = cell(numberLabel(summary?.last_value), "number-cell");
         if (summary)
-          metric.title = `Step ${summary.last_step} · ${summary.count.toLocaleString()} logged values`;
+          metric.title = `Latest logged value · Step ${summary.last_step} · ${summary.count.toLocaleString()} logged values`;
         tr.append(metric);
+      }
+      for (const key of state.parameters!) {
+        const value = parameters.get(run.id)?.get(key)?.value;
+        const parameter = cell(parameterLabel(value), "parameter-cell");
+        parameter.title = `${key}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
+        tr.append(parameter);
       }
       body.append(tr);
     }
@@ -437,7 +530,7 @@ export function runTable(
           : "No runs in this experiment yet.",
         "empty-table",
       );
-      td.colSpan = 4 + state.metrics!.length;
+      td.colSpan = 4 + state.metrics!.length + state.parameters!.length;
       tr.append(td);
       body.append(tr);
     }
