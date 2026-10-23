@@ -3,6 +3,13 @@ import type { Catalog } from "./workspace-types";
 import type { Run } from "./api";
 import { element } from "./utils";
 import { runColorButton } from "./run-color-picker";
+import { RunFilterMenu } from "./run-filter-menu";
+import {
+  activeConditions,
+  emptyFilter,
+  runMatchesFilter,
+  type RunFilter,
+} from "./run-filter";
 
 export interface RunDrawerState {
   open: boolean;
@@ -11,6 +18,8 @@ export interface RunDrawerState {
   status: string;
   scrollTop: number;
   selectedOnly?: boolean;
+  /** Structured config/tag conditions (filter menu). */
+  filter?: RunFilter;
 }
 const DEFAULT_WIDTH = 300;
 const MIN_WIDTH = 250;
@@ -70,9 +79,13 @@ export class RunDrawer {
   private readonly clearFilters = this.button("Clear filters", () => {
     this.state.query = this.search.value = "";
     this.state.status = this.status.value = "all";
+    this.state.filter = emptyFilter();
+    this.filterMenu = this.makeFilterMenu();
     this.filter();
     this.search.focus({ preventScroll: true });
   });
+  private filterMenu?: RunFilterMenu;
+  private readonly filterSlot = element("span", "run-filter-slot");
   private readonly empty = element("p", "drawer-empty muted");
   private readonly matching = element("span", "muted");
   private readonly rows = new Map<
@@ -177,7 +190,8 @@ export class RunDrawer {
     this.clearFilters.className = "drawer-clear-filters";
     this.clearFilters.title =
       "Clear text and status filters; keep Selected mode";
-    searchTools.append(this.search, this.status, this.clearFilters);
+    searchTools.append(this.search, this.filterSlot, this.status);
+    this.filterMenu = this.makeFilterMenu();
     this.list.append(this.empty);
     this.root.addEventListener("focusin", (event) => {
       this.previousFocus = event.target as HTMLElement;
@@ -195,9 +209,7 @@ export class RunDrawer {
       const option = element(
         "option",
         "",
-        value === "all"
-          ? "Any status"
-          : value[0].toUpperCase() + value.slice(1),
+        value === "all" ? "Status" : value[0].toUpperCase() + value.slice(1),
       );
       option.value = value;
       this.status.append(option);
@@ -215,6 +227,7 @@ export class RunDrawer {
         ]),
       ),
       this.button("Clear selection", () => this.onSelection([])),
+      this.clearFilters,
     );
     this.list.onscroll = () => {
       if (this.list.isConnected && !this.root.hidden)
@@ -255,6 +268,22 @@ export class RunDrawer {
     window.addEventListener("keydown", this.onCancel);
     this.setOpen(state.open, false, false);
   }
+  private makeFilterMenu() {
+    const menu = new RunFilterMenu(
+      this.state.filter ?? emptyFilter(),
+      (filter) => {
+        this.state.filter = filter;
+        this.filter();
+      },
+      (filter) =>
+        [...this.rows.values()].filter((row) =>
+          runMatchesFilter(row.run, filter),
+        ).length,
+    );
+    menu.setRuns([...this.rows.values()].map((row) => row.run));
+    this.filterSlot.replaceChildren(menu.root);
+    return menu;
+  }
   private button(label: string, action: () => void) {
     const button = element("button", "", label);
     button.type = "button";
@@ -269,6 +298,7 @@ export class RunDrawer {
       .filter(
         (run) =>
           (this.state.status === "all" || run.status === this.state.status) &&
+          runMatchesFilter(run, this.state.filter) &&
           (!query ||
             `${run.name} ${JSON.stringify(run.params)} ${JSON.stringify(run.tags)}`
               .toLowerCase()
@@ -297,7 +327,10 @@ export class RunDrawer {
       "aria-label",
       `${this.selected.size} selected · ${outside} outside filters`,
     );
-    this.clearFilters.hidden = !this.state.query && this.state.status === "all";
+    this.clearFilters.hidden =
+      !this.state.query &&
+      this.state.status === "all" &&
+      !activeConditions(this.state.filter).length;
     this.matching.textContent = this.state.selectedOnly
       ? `${visible} of ${this.selected.size} selected shown`
       : `${matches.size} matching`;
@@ -468,6 +501,7 @@ export class RunDrawer {
         );
         this.list.append(row.root);
       }
+      this.filterMenu?.setRuns(runs);
       this.list.scrollTop = this.state.scrollTop;
     }
     for (const [id, row] of this.rows)

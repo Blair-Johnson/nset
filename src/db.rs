@@ -407,7 +407,14 @@ impl Database {
                     run.params.extend(params);
                 }
                 if let Some(tags) = patch.tags {
-                    run.tags.extend(tags);
+                    // Tags merge; a null value removes that tag.
+                    for (key, value) in tags {
+                        if value.is_null() {
+                            run.tags.remove(&key);
+                        } else {
+                            run.tags.insert(key, value);
+                        }
+                    }
                 }
                 run.updated_at = now();
                 tx.execute(

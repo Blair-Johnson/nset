@@ -190,11 +190,71 @@ h3 {
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
   color: var(--text);
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
+  text-decoration: none;
+}
+/* An academic mark, not a SaaS logo: {n} set in a TeX-like math face. */
+.brand-mark {
+  font-family:
+    "Latin Modern Math", "STIX Two Math", "STIX Two Text", "Cambria Math",
+    "Times New Roman", Times, serif;
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+.brand-mark i {
+  font-family: "STIX Two Text", "Times New Roman", Times, serif;
+  font-style: italic;
+  font-size: 1.08em;
+  padding: 0 1.5px 0 0.5px;
+}
+.brand:hover .brand-mark {
+  color: var(--accent);
+}
+/* Segmented view switch (mlflow-style): runs table | charts. Each segment is a
+   rounded pill inset 2px inside the rounded group, so highlights and hover
+   states follow the group's corner radius instead of cutting square corners. */
+.view-switch {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  margin-right: 6px;
+  padding: 2px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.view-switch .view-switch-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 24px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+}
+.view-switch .view-switch-button:hover:not(.active) {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+.view-switch .view-switch-button.active {
+  background: var(--selected);
+  border-color: var(--accent);
+  color: var(--text);
+  cursor: default;
+}
+.view-switch .view-switch-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.view-switch .view-switch-button svg {
+  width: 17px;
+  height: 17px;
 }
 .header-context {
   display: flex;
@@ -359,6 +419,42 @@ h3 {
 .run-table-scroll {
   max-height: max(160px, calc(100dvh - 190px));
   isolation: isolate;
+}
+/* The runs page fills the viewport: toolbar, scrolling rows, then a footer
+   with counts — no dead space under a short or long table. */
+.browser-panel.run-browser {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--run-browser-top, 46px) - 10px);
+  min-height: 260px;
+}
+.run-browser .run-table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+.table-footer {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  min-height: 34px;
+  padding: 0 8px 0 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+.table-footer > span {
+  align-self: center;
+}
+.table-footer .table-pager {
+  margin-left: auto;
+  padding: 0;
+}
+.table-footer .table-more-below {
+  color: var(--accent);
+}
+.table-footer .table-more-below[hidden] {
+  display: none;
 }
 .run-table {
   border-collapse: separate;
@@ -873,8 +969,8 @@ dialog::backdrop {
   .app-header .connection {
     display: none;
   }
-  .brand {
-    font-size: 15px;
+  .brand-mark {
+    font-size: 19px;
   }
   #main {
     padding: 6px 8px 30px;
@@ -975,7 +1071,6 @@ optgroup {
     padding: 0 8px;
   }
   .brand {
-    font-size: 0;
     gap: 0;
   }
   .header-context {

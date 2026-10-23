@@ -151,6 +151,15 @@ async fn experiments_and_runs_merge_objects_and_persist() {
     assert_eq!(run["params"], json!({"a":3,"b":2,"c":4}));
     assert_eq!(run["tags"], json!({"owner":"me","note":"done"}));
     assert_eq!(run["status"], "finished");
+    // A null tag value removes that tag; other tags are untouched.
+    let (status, untagged) = app
+        .json("PATCH", &url, json!({"tags":{"note":null}}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(untagged["tags"], json!({"owner":"me"}));
+    let (_, run) = app
+        .json("PATCH", &url, json!({"tags":{"note":"done"}}))
+        .await;
     let (_, list) = app
         .json(
             "GET",

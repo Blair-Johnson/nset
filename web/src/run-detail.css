@@ -66,6 +66,109 @@
 }
 .run-detail-id {
   font-family: monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Small square ghost icon buttons (copy ID, edit tag). */
+.run-detail button.run-detail-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+.run-detail button.run-detail-icon:hover {
+  border-color: var(--control-border);
+  color: var(--text);
+}
+.run-detail button.run-detail-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.run-detail button.run-detail-icon[data-copied="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.run-detail-charts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.run-detail-charts svg {
+  width: 14px;
+  height: 14px;
+}
+.run-detail-tag {
+  align-items: center;
+}
+.run-detail button.run-detail-tag-remove {
+  min-height: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.run-detail button.run-detail-tag-remove:hover {
+  color: #f29a9a;
+}
+.run-detail-tag .run-detail-tag-action {
+  margin-left: 2px;
+}
+@media (hover: hover) {
+  .run-detail-tag .run-detail-tag-action,
+  .run-detail-tag .run-detail-tag-remove {
+    opacity: 0;
+  }
+  .run-detail-tag:hover .run-detail-tag-action,
+  .run-detail-tag:hover .run-detail-tag-remove,
+  .run-detail-tag:focus-within .run-detail-tag-action,
+  .run-detail-tag:focus-within .run-detail-tag-remove {
+    opacity: 1;
+  }
+}
+.run-detail button.run-detail-tag-add {
+  min-height: 22px;
+  padding: 1px 7px;
+  font-size: 11px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--muted);
+}
+.run-detail button.run-detail-tag-add:hover {
+  color: var(--text);
+}
+.run-detail-tag-form {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.run-detail-tag-form input {
+  height: 24px;
+  padding: 2px 6px;
+  font-size: 12px;
+  width: 120px;
+}
+.run-detail-tag-form input + input {
+  width: 200px;
+}
+.run-detail-tag-form button {
+  min-height: 24px;
+  padding: 1px 8px;
+}
+.run-detail-tag-error {
+  color: #f29a9a;
+  font-size: 11px;
 }
 .run-detail-tags {
   display: flex;

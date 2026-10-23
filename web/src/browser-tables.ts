@@ -366,7 +366,36 @@ export function runTable(
   table.append(head, body);
   wrap.append(table);
   const pager = element("div", "table-pager");
-  host.append(tools, wrap, pager);
+  const footer = element("div", "table-footer");
+  const summary = element("span", "table-summary");
+  summary.setAttribute("aria-live", "polite");
+  const below = element("span", "table-more-below");
+  below.hidden = true;
+  footer.append(summary, below, pager);
+  host.classList.add("run-browser");
+  host.append(tools, wrap, footer);
+  // "More below" tracks the native scroll viewport, not the page.
+  const updateBelow = () => {
+    const hiddenPx = wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop;
+    const rowHeight =
+      body.querySelector("tr")?.getBoundingClientRect().height || 35;
+    const rows = Math.ceil(Math.max(0, hiddenPx - 1) / rowHeight);
+    below.hidden = rows <= 0;
+    below.textContent = `↓ ${rows} more below`;
+  };
+  wrap.addEventListener("scroll", updateBelow, { passive: true });
+  new ResizeObserver(updateBelow).observe(wrap);
+  // Fill exactly to the bottom of the viewport from wherever the panel starts.
+  const fit = () => {
+    if (!host.isConnected) {
+      window.removeEventListener("resize", fit);
+      return;
+    }
+    const top = host.getBoundingClientRect().top + window.scrollY;
+    host.style.setProperty("--run-browser-top", `${Math.max(0, top)}px`);
+  };
+  window.addEventListener("resize", fit);
+  requestAnimationFrame(fit);
   function changed() {
     if (onSelection([...selection]) === false) selection = new Set(selectedIds);
     else selectedIds = [...selection];
@@ -548,6 +577,16 @@ export function runTable(
       body.append(tr);
     }
     pagination(pager, rows.length, state, render);
+    const shown = Math.min(pageSize, rows.length - state.page * pageSize);
+    summary.textContent = [
+      `${runs.length} run${runs.length === 1 ? "" : "s"}`,
+      rows.length !== runs.length ? `${rows.length} matching` : "",
+      rows.length > pageSize ? `${Math.max(0, shown)} on this page` : "",
+      selection.size ? `${selection.size} selected` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    requestAnimationFrame(updateBelow);
     restoreFocus?.focus({ preventScroll: true });
   }
   search.oninput = () => {

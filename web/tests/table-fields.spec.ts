@@ -324,7 +324,7 @@ test("existing shell routes retain columns, search, sort, page and selection", a
   await page.getByRole("button", { name: "View charts", exact: true }).click();
   await page.locator(".dashboard-cell canvas").first().waitFor();
   await page
-    .locator(".view-tabs")
+    .locator(".view-switch")
     .getByRole("button", { name: "Runs", exact: true })
     .click();
   await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();

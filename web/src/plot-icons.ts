@@ -16,6 +16,12 @@ const paths = {
   play: "M8 5.5v13l10.5-6.5z",
   pause: "M8 5v14M16 5v14",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  // Experiment view switcher (runs table | charts), mlflow-style.
+  "view-runs": "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
+  "view-charts": "M4 4v16h16M7.5 15l4-5 3 3L19 7",
+  filter: "M4 5h16l-6 7.5V19l-4-2v-4.5z",
+  copy: "M9 9h10v10H9zM5 15V5h10",
+  tag: "M3.5 12.5V4h8.5L20 12l-8 8zM8 8h.01",
 } as const;
 
 export type PlotIconName = keyof typeof paths;
@@ -36,7 +42,13 @@ export function plotIcon(name: PlotIconName): SVGSVGElement {
   path.setAttribute("stroke", "currentColor");
   path.setAttribute(
     "stroke-width",
-    name === "more" ? "3" : name === "pause" ? "2.6" : "1.8",
+    name === "more"
+      ? "3"
+      : name === "pause"
+        ? "2.6"
+        : name === "view-runs"
+          ? "2"
+          : "1.8",
   );
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");

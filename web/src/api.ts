@@ -53,6 +53,30 @@ export class Api {
   async json<T>(path: string, signal?: AbortSignal): Promise<T> {
     return (await this.response(path, signal)).json();
   }
+  /** Merge tags into a run; a null value removes that tag. */
+  async patchRun(
+    id: string,
+    patch: { tags?: Record<string, unknown> },
+  ): Promise<Run> {
+    const response = await this.fetcher(`/api/runs/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${this.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(patch),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body = await response.json();
+        if (typeof body.error === "string") detail = body.error;
+      } catch {}
+      throw new Error(detail);
+    }
+    return response.json();
+  }
   async metrics(
     run: string,
     key: string,

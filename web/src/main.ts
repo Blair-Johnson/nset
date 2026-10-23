@@ -30,11 +30,12 @@ import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
 import { createDashboardControls } from "./workspace-controls";
 import { dashboardSettings, withDashboardSettings } from "./workspace-settings";
 import type { DashboardControls } from "./dashboard-controls";
+import { plotIcon } from "./plot-icons";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
-app.innerHTML = `<header class="app-header"><a class="brand" href="#/experiments"><img src="/favicon.svg" alt="" width="24" height="24">NSET</a><nav id="header-context" class="header-context" aria-label="Location"></nav><div class="header-spacer"></div><span id="connection" class="connection">Disconnected</span><button id="refresh" title="Refresh runs and charts">Refresh</button><button id="logout">Disconnect</button></header><main id="main"><div id="global-error" class="alert" role="alert" hidden></div><div id="page"></div></main><dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="connect-form"><h2 id="login-title">Connect to your tracker</h2><label>Access token<input id="token" name="token" type="password" required autocomplete="off"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>`;
+app.innerHTML = `<header class="app-header"><a class="brand" href="#/experiments" title="Experiments" aria-label="NSET home"><span class="brand-mark" aria-hidden="true">{<i>n</i>}</span></a><nav id="header-context" class="header-context" aria-label="Location"></nav><div class="header-spacer"></div><span id="connection" class="connection">Disconnected</span><button id="refresh" title="Refresh runs and charts">Refresh</button><button id="logout">Disconnect</button></header><main id="main"><div id="global-error" class="alert" role="alert" hidden></div><div id="page"></div></main><dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="connect-form"><h2 id="login-title">Connect to your tracker</h2><label>Access token<input id="token" name="token" type="password" required autocomplete="off"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>`;
 let token = sessionStorage.getItem("nset.token") ?? "";
 const api = new Api(() => token);
 const store = new MetricStore(api);
@@ -212,8 +213,8 @@ function updateSelection(workspace: Workspace, ids: string[]) {
   });
   return saved;
 }
-/** Location (breadcrumb + view tabs) lives in the app header so the page body is all content. */
-function pageHeader(experimentId: string, view: string): void {
+/** Location (breadcrumb) lives in the app header so the page body is all content. */
+function pageHeader(experimentId: string, _view: string): void {
   const head = $("header-context");
   const experiment = catalog.experiments.find((e) => e.id === experimentId);
   if (!experiment) {
@@ -227,18 +228,34 @@ function pageHeader(experimentId: string, view: string): void {
     element("span", "breadcrumb-current", experiment.name),
   );
   crumb.lastElementChild?.setAttribute("title", experiment.name);
-  const tabs = element("nav", "view-tabs");
-  tabs.setAttribute("aria-label", "Experiment views");
-  for (const [key, label] of [
-    ["runs", "Runs"],
-    ["charts", "Charts"],
-  ]) {
-    const tab = button(label, () => navigate(experimentId, key));
-    tab.classList.toggle("active", view === key);
-    if (view === key) tab.setAttribute("aria-current", "page");
-    tabs.append(tab);
+  head.replaceChildren(crumb);
+}
+/**
+ * Mutually exclusive view toggle (runs table | charts) that sits at the far
+ * left of each experiment page's own toolbar, where the eye already is.
+ */
+function viewSwitch(experimentId: string, view: "runs" | "charts" | null) {
+  const group = element("nav", "view-switch");
+  group.setAttribute("aria-label", "Experiment views");
+  for (const [key, label, icon] of [
+    ["runs", "Runs", "view-runs"],
+    ["charts", "Charts", "view-charts"],
+  ] as const) {
+    const active = view === key;
+    const item = element("button", "view-switch-button");
+    item.type = "button";
+    item.title = key === "runs" ? "Runs table" : "Charts";
+    item.setAttribute("aria-label", label);
+    item.setAttribute("aria-pressed", String(active));
+    if (active) item.setAttribute("aria-current", "page");
+    item.classList.toggle("active", active);
+    item.append(plotIcon(icon));
+    item.onclick = () => {
+      if (!active) navigate(experimentId, key);
+    };
+    group.append(item);
   }
-  head.replaceChildren(crumb, tabs);
+  return group;
 }
 function renderPage() {
   if (!connected) return;
@@ -277,14 +294,26 @@ function renderPage() {
         (r) => r.id === route.runId && r.experiment_id === experiment.id,
       );
       pageHeader(experiment.id, "runs");
-      $("page").replaceChildren(
-        run
-          ? renderRunDetail(run, {
-              catalog,
-              onBack: () => navigate(experiment.id),
-            })
-          : element("p", "", "Run not found"),
-      );
+      const detail = run
+        ? renderRunDetail(run, {
+            catalog,
+            onBack: () => navigate(experiment.id),
+            onCharts: () => {
+              if (updateSelection(workspace, [run.id]))
+                navigate(experiment.id, "charts");
+            },
+            onTags: async (patch) => {
+              const updated = await api.patchRun(run.id, { tags: patch });
+              const index = catalog.runs.findIndex((r) => r.id === run.id);
+              if (index >= 0) catalog.runs[index] = updated;
+              return updated;
+            },
+          })
+        : element("p", "", "Run not found");
+      // Same switcher as the other experiment pages; neither view is current.
+      const switcher = viewSwitch(experiment.id, null);
+      if (run) detail.querySelector(".run-detail-header")?.prepend(switcher);
+      $("page").replaceChildren(...(run ? [detail] : [switcher, detail]));
     } else if (route.view === "runs") {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
@@ -295,17 +324,19 @@ function renderPage() {
         runStates.set(experiment.id, state);
       }
       pageHeader(experiment.id, "runs");
-      $("page").replaceChildren(
-        runTable(
-          catalog,
-          experiment,
-          workspace.selectedRunIds,
-          (ids) => updateSelection(workspace, ids),
-          () => navigate(experiment.id, "charts"),
-          openRun,
-          state,
-        ),
+      const table = runTable(
+        catalog,
+        experiment,
+        workspace.selectedRunIds,
+        (ids) => updateSelection(workspace, ids),
+        () => navigate(experiment.id, "charts"),
+        openRun,
+        state,
       );
+      table
+        .querySelector(".table-toolbar")
+        ?.prepend(viewSwitch(experiment.id, "runs"));
+      $("page").replaceChildren(table);
     } else {
       pageHeader(experiment.id, "charts");
       if (currentWorkspaceId === workspace.id && suspendedDashboard) {
@@ -503,7 +534,7 @@ function workspaceToolbar(workspace: Workspace) {
   const openMenus = [
     ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
   ].map((d) => d.dataset.menu);
-  host.replaceChildren();
+  host.replaceChildren(viewSwitch(workspace.experimentId, "charts"));
   const views = element("select");
   views.id = "view-select";
   views.setAttribute("aria-label", "Saved view");
