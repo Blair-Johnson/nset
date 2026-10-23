@@ -109,7 +109,6 @@ export function newChart(
 ): ChartSpec {
   const config = defaults();
   config.height = 280;
-  config.style.color = "#2563eb";
   config.advanced = {
     axes: [
       {

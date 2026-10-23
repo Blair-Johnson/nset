@@ -61,10 +61,10 @@ test("history is bounded, snapshots are copied and duplicate views are omitted",
     assert.equal(history.pop()?.x[0], i);
   assert.equal(history.pop(), undefined);
 });
-test("light axes retain advanced explicit color overrides", () => {
+test("dark axes retain advanced explicit color overrides", () => {
   const options = resolveOptions(validateConfig({}), 800, [{}]);
-  assert.equal(options.axes?.[0].stroke, "#475569");
-  assert.equal(options.axes?.[0].grid?.stroke, "#e2e8f0");
+  assert.equal(options.axes?.[0].stroke, "#abb3bc");
+  assert.equal(options.axes?.[0].grid?.stroke, "#363b40");
   const custom = resolveOptions(
     validateConfig({
       advanced: { axes: [{ stroke: "red", grid: { stroke: "blue" } }] },
