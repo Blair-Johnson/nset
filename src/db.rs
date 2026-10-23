@@ -17,6 +17,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+pub const SCHEMA_VERSION: i64 = 1;
+
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
 struct Actor(mpsc::Sender<Job>);
@@ -113,16 +115,23 @@ fn image_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Image> {
     })
 }
 const IMAGE_COLUMNS: &str = "id,run_id,key,step,timestamp,content_type,byte_length";
-impl Database {
-    pub fn open(directory: &Path) -> Result<Self> {
-        std::fs::create_dir_all(directory)?;
-        let images = directory.join("images");
-        std::fs::create_dir_all(&images)?;
-        let path = directory.join("nset.sqlite3");
-        let connection = Connection::open(&path)?;
-        setup(&connection)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.execute_batch("BEGIN IMMEDIATE;
+fn schema_version(connection: &Connection) -> Result<i64> {
+    let version =
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    if !(0..=SCHEMA_VERSION).contains(&version) {
+        return Err(ApiError::internal(format!(
+            "unsupported database schema version {version}; expected at most {SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
+fn initialize_schema(connection: &mut Connection) -> Result<()> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Recheck under the write lock. Version zero also covers the original,
+    // unversioned schema: IF NOT EXISTS preserves its tables, indexes and data.
+    if schema_version(&tx)? == 0 {
+        tx.execute_batch("
             CREATE TABLE IF NOT EXISTS experiments(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(id), name TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('running','finished','failed')), params TEXT NOT NULL, tags TEXT NOT NULL,
@@ -135,8 +144,43 @@ impl Database {
             CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL,
                 step INTEGER NOT NULL, timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, byte_length INTEGER NOT NULL,
                 filename TEXT NOT NULL UNIQUE);
-            CREATE INDEX IF NOT EXISTS images_stream ON images(run_id,key,step,timestamp,id);
-            COMMIT;")?;
+            CREATE INDEX IF NOT EXISTS images_stream ON images(run_id,key,step,timestamp,id);")?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn sync_image_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // Persist the renamed directory entry before committing its SQLite index.
+        std::fs::File::open(directory)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        // std cannot portably open/sync directories on non-Unix platforms.
+        // File contents are synced, but rename durability across power loss is
+        // best-effort there; a committed index may outlive its directory entry.
+        let _ = directory;
+        Ok(())
+    }
+}
+
+impl Database {
+    pub fn open(directory: &Path) -> Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join("nset.sqlite3");
+        let mut connection = Connection::open(&path)?;
+        // Reject unknown versions before any persistent PRAGMA, DDL, or image
+        // directory creation. In particular, do not change a newer DB to WAL.
+        schema_version(&connection)?;
+        setup(&connection)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        initialize_schema(&mut connection)?;
+        let images = directory.join("images");
+        std::fs::create_dir_all(&images)?;
         let writer = Actor::start(connection, "nset-sqlite-writer")?;
         let mut readers = Vec::new();
         for i in 0..2 {
@@ -420,6 +464,7 @@ impl Database {
                 temp.as_file().sync_all()?;
                 temp.persist_noclobber(&path).map_err(ApiError::internal)?;
                 let indexed = (|| -> Result<()> {
+                    sync_image_directory(&directory)?;
                     tx.execute(
                         "INSERT INTO images VALUES(?,?,?,?,?,?,?,?)",
                         params![
@@ -494,4 +539,28 @@ impl Database {
 }
 fn name_check(value: &str) -> Result<()> {
     name(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writer_uses_full_synchronous_wal() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let settings = db
+            .writer
+            .call(|connection| {
+                Ok((
+                    connection
+                        .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                    connection
+                        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(settings, (2, "wal".to_owned()));
+    }
 }

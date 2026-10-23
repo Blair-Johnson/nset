@@ -574,7 +574,7 @@ async fn body_limit_extractor_errors_and_assets_are_safe() {
                 .unwrap()
                 .starts_with("text/html")
         );
-        assert!(!body.is_empty());
+        assert_eq!(body, include_bytes!("../web/dist/index.html"));
     }
     for path in [
         "/../Cargo.toml",
@@ -811,4 +811,42 @@ async fn concurrent_writers_and_readers_keep_every_observation() {
         .collect();
     steps.sort_unstable();
     assert_eq!(steps, (0..2000).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn security_headers_cover_assets_api_errors_and_image_content() {
+    let app = TestApp::new();
+    let id = app.run().await;
+    let (status, _, body) = app
+        .raw(
+            "POST",
+            &format!("/api/runs/{id}/images?key=x&step=0&timestamp=0"),
+            encoded_image(image::ImageFormat::Png),
+            "image/png",
+            Some("test-secret"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let image: Value = serde_json::from_slice(&body).unwrap();
+    let content = format!("/api/images/{}/content", image["id"].as_str().unwrap());
+    for (path, token, expected) in [
+        ("/", None, StatusCode::OK),
+        ("/runs/client-route", None, StatusCode::OK),
+        ("/missing.js", None, StatusCode::NOT_FOUND),
+        ("/api/health", None, StatusCode::UNAUTHORIZED),
+        ("/api/health", Some("test-secret"), StatusCode::OK),
+        ("/api/missing", Some("test-secret"), StatusCode::NOT_FOUND),
+        (content.as_str(), Some("test-secret"), StatusCode::OK),
+    ] {
+        let (status, headers, _) = app.raw("GET", path, vec![], "", token).await;
+        assert_eq!(status, expected, "{path}");
+        assert_eq!(
+            headers["content-security-policy"],
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        );
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert!(!headers.contains_key("access-control-allow-origin"));
+    }
 }

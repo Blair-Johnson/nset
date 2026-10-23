@@ -36,7 +36,23 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback(assets::serve)
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    // Bundled scripts only; uPlot needs inline styles and OSD displays blob images.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    response
 }
 async fn normalize_errors(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
