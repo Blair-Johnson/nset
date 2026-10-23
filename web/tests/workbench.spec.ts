@@ -128,13 +128,20 @@ test("namespace collapse, view names and run choices survive reload", async ({
 }, info) => {
   await fixture(page);
   await charts(page);
+  await expect(page.locator(".workspace-view-label")).toHaveText("View");
+  await expect(page.locator(".workspace-view-name")).toHaveText("Overview");
+  await expect(
+    page.getByRole("combobox", { name: "Saved view", exact: true }),
+  ).toHaveCount(0);
   const section = page
     .locator(".chart-section")
     .filter({ has: page.locator(".section-toggle", { hasText: "train" }) });
   await section.locator(".section-toggle").click();
   await expect(section.locator(".chart-grid")).toBeHidden();
   await page.getByLabel("View actions", { exact: true }).click();
-  await page.getByRole("button", { name: "Save as…", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save view as…", exact: true })
+    .click();
   const dialog = page.getByRole("dialog", {
     name: "Save view as",
     exact: true,
@@ -416,4 +423,42 @@ test("Add chart creates a scatter plot directly", async ({ page }) => {
   );
   expect(saved.config.style.width).toBe(0);
   expect(saved.config.style.markers.show).toBe(true);
+});
+
+test("failed saved-view creation rolls back name, identity and view-action focus", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
+  const before = await page.evaluate(() =>
+    localStorage.getItem("nset.workspaces.v2"),
+  );
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === "nset.workspaces.v2") throw new Error("View storage full");
+      original.call(this, key, value);
+    };
+  });
+  await page.getByLabel("View actions", { exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save view as\u2026", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Save view as",
+    exact: true,
+  });
+  await dialog.getByLabel("View name", { exact: true }).fill("Not saved");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator("#global-error")).toContainText(
+    "View storage full",
+  );
+  await expect(page.locator(".workspace-view-name")).toHaveText("Overview");
+  await expect(
+    page.getByRole("combobox", { name: "Saved view", exact: true }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(() => localStorage.getItem("nset.workspaces.v2")),
+  ).toBe(before);
+  await expect(page.getByLabel("View actions", { exact: true })).toBeFocused();
 });

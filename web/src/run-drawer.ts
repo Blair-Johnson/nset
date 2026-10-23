@@ -6,16 +6,35 @@ import { runColorButton } from "./run-color-picker";
 
 export interface RunDrawerState {
   open: boolean;
+  width: number;
   query: string;
   status: string;
   scrollTop: number;
 }
-export const runDrawerState = (): RunDrawerState => ({
-  open: !matchMedia("(max-width: 760px)").matches,
-  query: "",
-  status: "all",
-  scrollTop: 0,
-});
+const DEFAULT_WIDTH = 300;
+const MIN_WIDTH = 250;
+// Pane preferences belong to the experiment, not a saved chart view.
+const preferenceKey = (experimentId: string) => `nset.run-pane.${experimentId}`;
+export function runDrawerState(experimentId: string): RunDrawerState {
+  const state = {
+    open: !matchMedia("(max-width: 760px)").matches,
+    width: DEFAULT_WIDTH,
+    query: "",
+    status: "all",
+    scrollTop: 0,
+  };
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(preferenceKey(experimentId)) ?? "null",
+    );
+    if (typeof saved?.open === "boolean") state.open = saved.open;
+    if (typeof saved?.width === "number" && Number.isFinite(saved.width))
+      state.width = Math.max(MIN_WIDTH, Math.min(600, saved.width));
+  } catch {
+    /* Storage is optional; malformed or blocked preferences are ignored. */
+  }
+  return state;
+}
 
 /** Refresh only color controls: no selection, chart or history mutation. */
 export function refreshRunSwatches(root: ParentNode, catalog: Catalog) {
@@ -37,9 +56,11 @@ export function runSwatch(catalog: Catalog, runId: string) {
 
 /** Rows are keyed and remain mounted while filtering and selecting. */
 export class RunDrawer {
+  readonly pane = element("div", "run-pane");
   readonly root = element("aside", "run-drawer");
+  readonly divider = element("div", "run-pane-divider");
   readonly backdrop = element("div", "run-drawer-backdrop");
-  readonly toggle = element("button", "run-drawer-toggle", "Runs");
+  readonly toggle = element("button", "run-pane-toggle");
   private readonly list = element("div", "run-drawer-list");
   private readonly search = element("input");
   private readonly status = element("select");
@@ -52,7 +73,21 @@ export class RunDrawer {
   private readonly narrow = matchMedia("(max-width: 760px)");
   private catalog?: Catalog;
   private selected = new Set<string>();
-  private readonly onViewport = () => this.setOpen(!this.narrow.matches, false);
+  private previousFocus?: HTMLElement;
+  private drag?: { pointerId: number; startX: number; width: number };
+  private readonly observer = new ResizeObserver(() => this.measure());
+  private readonly onViewport = () => {
+    if (this.narrow.matches) this.setOpen(false, false, false);
+    else this.setOpen(this.state.open, false, false);
+    this.measure();
+  };
+  private readonly onGeometry = () => this.measure();
+  private readonly onCancel = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && this.drag) {
+      event.preventDefault();
+      this.finishResize(true);
+    }
+  };
 
   constructor(
     private readonly experimentId: string,
@@ -65,13 +100,61 @@ export class RunDrawer {
     this.root.setAttribute("aria-label", "Chart runs");
     this.toggle.type = "button";
     this.toggle.setAttribute("aria-controls", this.root.id);
-    this.toggle.setAttribute("aria-label", "Toggle runs drawer");
     this.toggle.onclick = () => this.setOpen(!state.open);
+    this.divider.setAttribute("role", "separator");
+    this.divider.setAttribute("aria-label", "Resize run list");
+    this.divider.setAttribute("aria-orientation", "vertical");
+    this.divider.setAttribute("aria-controls", this.root.id);
+    this.divider.title = "Drag to resize run list, or use arrow keys";
+    this.divider.onkeydown = (event) => {
+      if (event.target !== this.divider || !state.open) return;
+      const step = event.shiftKey ? 50 : 10;
+      const width =
+        event.key === "ArrowLeft"
+          ? state.width - step
+          : event.key === "ArrowRight"
+            ? state.width + step
+            : event.key === "Home"
+              ? MIN_WIDTH
+              : event.key === "End"
+                ? this.maxWidth()
+                : undefined;
+      if (width === undefined) return;
+      event.preventDefault();
+      this.resize(width);
+      this.persist();
+    };
+    this.divider.onpointerdown = (event) => {
+      if (
+        event.target !== this.divider ||
+        !state.open ||
+        this.narrow.matches ||
+        event.button !== 0
+      )
+        return;
+      event.preventDefault();
+      this.divider.focus({ preventScroll: true });
+      this.drag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        width: state.width,
+      };
+      this.divider.setPointerCapture(event.pointerId);
+      document.body.classList.add("resizing-run-pane");
+    };
+    this.divider.onpointermove = (event) => {
+      if (this.drag?.pointerId === event.pointerId)
+        this.resize(this.drag.width + event.clientX - this.drag.startX);
+    };
+    this.divider.onpointerup = () => this.finishResize(false);
+    this.divider.onpointercancel = () => this.finishResize(true);
+    this.divider.onlostpointercapture = () => this.finishResize(true);
+    this.pane.append(this.root, this.divider, this.toggle);
     const heading = element("div", "run-drawer-heading");
-    const close = this.button("Close runs drawer", () => this.setOpen(false));
-    close.textContent = "×";
-    close.title = "Close runs drawer";
-    heading.append(element("strong", "", "Runs"), this.count, close);
+    heading.append(element("strong", "", "Runs"), this.count);
+    this.root.addEventListener("focusin", (event) => {
+      this.previousFocus = event.target as HTMLElement;
+    });
     this.search.type = "search";
     this.search.placeholder = "Find runs";
     this.search.setAttribute("aria-label", "Find runs");
@@ -121,14 +204,15 @@ export class RunDrawer {
       footer,
     );
     this.backdrop.onclick = () => this.setOpen(false);
-    this.root.onkeydown = (event) => {
+    this.pane.onkeydown = (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        this.setOpen(false);
+        if (this.drag) this.finishResize(true);
+        else this.setOpen(false);
       }
       if (event.key !== "Tab" || !this.narrow.matches) return;
       const controls = [
-        ...this.root.querySelectorAll<HTMLElement>(
+        ...this.pane.querySelectorAll<HTMLElement>(
           "button,input,select,a[href]",
         ),
       ].filter(
@@ -146,7 +230,10 @@ export class RunDrawer {
       }
     };
     this.narrow.addEventListener("change", this.onViewport);
-    this.setOpen(state.open, false);
+    window.addEventListener("resize", this.onGeometry);
+    window.addEventListener("scroll", this.onGeometry, { passive: true });
+    window.addEventListener("keydown", this.onCancel);
+    this.setOpen(state.open, false, false);
   }
   private button(label: string, action: () => void) {
     const button = element("button", "", label);
@@ -173,21 +260,105 @@ export class RunDrawer {
     for (const [id, row] of this.rows) row.root.hidden = !matches.has(id);
     this.matching.textContent = `${matches.size} matching`;
   }
-  setOpen(open: boolean, focus = true) {
+  /** Called after mounting; charts and list nodes never move during resizing. */
+  mount() {
+    if (this.pane.parentElement) this.observer.observe(this.pane.parentElement);
+    this.measure();
+    this.restoreScroll();
+  }
+  private maxWidth() {
+    if (this.narrow.matches) return 600;
+    return Math.max(
+      MIN_WIDTH,
+      Math.min(600, (this.pane.parentElement?.clientWidth ?? 1020) - 420),
+    );
+  }
+  private measure() {
+    if (!this.pane.isConnected) return;
+    const top = Math.max(
+      46,
+      this.pane.parentElement?.getBoundingClientRect().top ?? 46,
+    );
+    this.pane.style.setProperty(
+      "--run-pane-height",
+      `${Math.max(120, window.innerHeight - top - 12)}px`,
+    );
+    this.resize(this.state.width);
+  }
+  private resize(width: number) {
+    this.state.width = Math.max(MIN_WIDTH, Math.min(this.maxWidth(), width));
+    this.pane.style.setProperty("--run-pane-width", `${this.state.width}px`);
+    this.divider.setAttribute("aria-valuemin", String(MIN_WIDTH));
+    this.divider.setAttribute("aria-valuemax", String(this.maxWidth()));
+    this.divider.setAttribute(
+      "aria-valuenow",
+      String(Math.round(this.state.width)),
+    );
+    this.divider.setAttribute(
+      "aria-valuetext",
+      `${Math.round(this.state.width)} pixels`,
+    );
+  }
+  private finishResize(cancel: boolean) {
+    const drag = this.drag;
+    if (!drag) return;
+    this.drag = undefined;
+    if (cancel) this.resize(drag.width);
+    else this.persist();
+    if (this.divider.hasPointerCapture(drag.pointerId))
+      this.divider.releasePointerCapture(drag.pointerId);
+    document.body.classList.remove("resizing-run-pane");
+  }
+  private persist() {
+    try {
+      localStorage.setItem(
+        preferenceKey(this.experimentId),
+        JSON.stringify({ open: this.state.open, width: this.state.width }),
+      );
+    } catch {
+      /* Browser preferences must not block chart interactions. */
+    }
+  }
+  setOpen(open: boolean, focus = true, persist = true) {
+    this.finishResize(true);
+    if (!open && this.root.contains(document.activeElement))
+      this.previousFocus = document.activeElement as HTMLElement;
+    if (!open && this.root.isConnected && !this.root.hidden)
+      this.state.scrollTop = this.list.scrollTop;
     this.state.open = open;
     this.root.hidden = !open;
+    this.pane.classList.toggle("is-collapsed", !open);
     this.backdrop.hidden = !open || !this.narrow.matches;
     this.toggle.setAttribute("aria-expanded", String(open));
+    this.toggle.setAttribute(
+      "aria-label",
+      open ? "Collapse run list" : "Expand run list",
+    );
+    this.toggle.title = open ? "Collapse run list" : "Expand run list";
+    this.toggle.textContent = open ? "\u2039" : "\u203a";
+    this.divider.tabIndex = open && !this.narrow.matches ? 0 : -1;
+    this.divider.setAttribute(
+      "aria-disabled",
+      String(!open || this.narrow.matches),
+    );
     if (this.narrow.matches && open) {
-      this.root.setAttribute("role", "dialog");
-      this.root.setAttribute("aria-modal", "true");
+      this.pane.setAttribute("role", "dialog");
+      this.pane.setAttribute("aria-label", "Chart runs");
+      this.pane.setAttribute("aria-modal", "true");
     } else {
-      this.root.removeAttribute("role");
-      this.root.removeAttribute("aria-modal");
+      this.pane.removeAttribute("role");
+      this.pane.removeAttribute("aria-modal");
+      this.pane.removeAttribute("aria-label");
     }
+    this.measure();
+    if (persist) this.persist();
     if (open) {
       this.list.scrollTop = this.state.scrollTop;
-      if (focus) this.search.focus({ preventScroll: true });
+      if (focus)
+        (this.previousFocus?.isConnected
+          ? this.previousFocus
+          : this.search
+        ).focus({ preventScroll: true });
     } else if (focus) this.toggle.focus({ preventScroll: true });
   }
   update(catalog: Catalog, selectedIds: string[]) {
@@ -244,12 +415,16 @@ export class RunDrawer {
     for (const [id, row] of this.rows)
       row.check.checked = this.selected.has(id);
     this.count.textContent = `${this.selected.size} selected`;
-    this.toggle.textContent = `Runs (${this.selected.size})`;
   }
   restoreScroll() {
     this.list.scrollTop = this.state.scrollTop;
   }
   destroy() {
+    this.finishResize(true);
+    this.observer.disconnect();
     this.narrow.removeEventListener("change", this.onViewport);
+    window.removeEventListener("resize", this.onGeometry);
+    window.removeEventListener("scroll", this.onGeometry);
+    window.removeEventListener("keydown", this.onCancel);
   }
 }

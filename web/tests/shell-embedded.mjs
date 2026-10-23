@@ -91,7 +91,7 @@ try {
   ).toEqual(layout);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator(".run-drawer")).toBeHidden();
-  await page.getByLabel("Toggle runs drawer").click();
+  await page.getByLabel("Expand run list").click();
   await expect(page.getByRole("dialog", { name: "Chart runs" })).toBeVisible();
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
