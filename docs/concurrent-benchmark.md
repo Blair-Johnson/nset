@@ -36,8 +36,9 @@ exceed producers, and experiments cannot exceed runs.
 
 `--keys` spreads observations deterministically over `loss`, `loss_1`, etc.
 Readers start with producers and stop when writes finish (or their request budget
-is exhausted). Each history reader samples one first page, rotating runs and keys;
-it does not continuously fetch full histories. Each reader pauses at least
+is exhausted). Each history reader samples one first page, rotating through
+run/key pairs that the workload writes; those may still be empty at startup.
+It does not continuously fetch full histories. Each reader pauses at least
 `--reader-interval` seconds **after** every response, so the configured interval is
 not a fixed offered rate. `--max-reader-requests` caps requests per reader.
 
@@ -57,15 +58,13 @@ pixi run python -m unittest discover -s tests -p test_benchmark.py -v
 
 Each invocation emits JSON `kind=config` and `kind=final` records with
 `schema_version=1`, resolved options, binary SHA-256, and environment details.
-The final event includes:
-
-- `attempted_points`, `acknowledged_points`, and `points` (exactly verified rows);
-- attempted/acknowledged/failed request totals, explicit `http_503`, `http_500`,
-  `timeouts`, status/error-category counts, and bounded error examples;
-- per-operation request counts and p50/p95/p99 latencies, plus aggregate
-  `write_latency` and `request_latency`, all in milliseconds;
-- producer-to-run assignments, actual run/experiment IDs, invalid acknowledgments,
-  missing acknowledged points, integrity errors, and a `success` flag.
+The final event reports `attempted_points`, `acknowledged_points`, and `points`
+(exactly verified rows), together with attempted/acknowledged/failed request totals.
+It includes explicit `http_503`, `http_500`, `timeouts`, error-category counts and
+bounded examples. Per-operation request counts and p50/p95/p99 latencies accompany
+aggregate `write_latency` and `request_latency`, in milliseconds. Producer/run
+assignments, actual IDs, invalid acknowledgments, missing acknowledged points,
+integrity errors and a `success` flag make the correctness outcome inspectable.
 
 Percentiles use nearest rank over **all attempts**, including failures; empty
 samples yield JSON null. Aggregate request latency includes setup and final

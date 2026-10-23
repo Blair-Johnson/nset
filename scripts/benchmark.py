@@ -67,6 +67,11 @@ def batches(producer, args):
         yield [point(step, args.keys) for step in steps[offset:offset + args.batch_size]]
 
 
+def history_target(reader, request_index, args):
+    """Choose a run/key pair that the configured workload actually writes."""
+    step = (reader + request_index) % args.points
+    return (step % args.concurrency) % args.runs, point(step, args.keys)["key"]
+
 def latency_summary(seconds):
     """Nearest-rank percentiles over all attempts (including failed requests)."""
     values = sorted(seconds)
@@ -230,8 +235,7 @@ def execute(args, server, report, recorders):
             if kind == "catalog":
                 recorder.request("catalog", "GET", "/api/catalog")
             else:
-                run_index = (index + request_index) % args.runs
-                key = point(request_index % args.keys, args.keys)["key"]
+                run_index, key = history_target(index, request_index, args)
                 recorder.request("history", "GET", paths[run_index] + "/metrics",
                                  query={"key": key, "limit": args.page_size})
             if stop.wait(args.reader_interval):

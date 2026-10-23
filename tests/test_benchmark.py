@@ -51,6 +51,18 @@ class BenchmarkHelpersTests(unittest.TestCase):
         self.assertEqual(len({row["timestamp"] for row in rows}), args.points)
         self.assertEqual({row["key"] for row in rows}, {"loss", "loss_1", "loss_2"})
 
+    def test_history_readers_only_sample_streams_the_workload_writes(self):
+        for concurrency, runs, keys in [(2, 2, 2), (8, 8, 4), (3, 2, 4)]:
+            args = benchmark.parse_args(["--points", "23", "--concurrency", str(concurrency),
+                                         "--runs", str(runs), "--keys", str(keys)])
+            written = {(producer % runs, row["key"])
+                       for producer in range(concurrency)
+                       for batch in benchmark.batches(producer, args) for row in batch}
+            for reader in range(4):
+                targets = {benchmark.history_target(reader, index, args)
+                           for index in range(args.points * 2)}
+                self.assertEqual(targets, written)
+
     def test_nearest_rank_percentiles_and_empty(self):
         self.assertEqual(benchmark.latency_summary([]),
                          {"count": 0, "p50_ms": None, "p95_ms": None, "p99_ms": None})
