@@ -52,7 +52,7 @@ Default numeric Y ticks may use a shorter equivalent exponential spelling to avo
 
 ## Inspect images
 
-Each image panel displays one run/key source at a time; choose a source when the panel has several. Different panels are independent. Drag to pan, use **+/−** or **Alt + wheel** to zoom, and use the timeline, previous/next buttons or playback to move between frames. The caption identifies the actual logged step. Frame changes preserve the camera, so you can inspect the same region across a sequence. The current decoded image and its caption remain until the replacement is ready, rather than flashing a Loading frame.
+Each image panel displays one run/key source at a time; choose a source when the panel has several. Different panels are independent. Drag to pan. **Alt + wheel** zooms around the pointer; **+/−** zooms around the image viewport center. Use the timeline, previous/next buttons or playback to move between frames. The caption identifies the actual logged step. Frame changes preserve the camera, so you can inspect the same region across a sequence. The current decoded image and its caption remain until the replacement is ready, rather than flashing a Loading frame.
 
 **Fit** resets the view, and **1:1 pixels** shows native pixel size. **More** contains smooth/nearest pixel display, rotation and flip. **Maximize** keeps the image and timeline together. Images are not recompressed or interpolated between steps. Playback waits for frames to load, so its selected rate is a target rather than guaranteed playback speed.
 
