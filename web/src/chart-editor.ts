@@ -211,6 +211,8 @@ export interface ChartEditorOptions {
   catalog: Catalog;
   selectedRunIds: string[];
   onSave: (card: ChartSpec) => void | Promise<void>;
+  /** Called once after removal and fallback focus restoration; hosts may focus rebuilt controls. */
+  onClose?: () => void;
   api?: Api;
   store?: MetricLoader;
   /** Optional host copy for new cards; existing callers need only the contract fields. */
@@ -1730,6 +1732,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     dialog.remove();
     if (originalFocus?.isConnected)
       originalFocus.focus({ preventScroll: true });
+    options.onClose?.();
   }
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();

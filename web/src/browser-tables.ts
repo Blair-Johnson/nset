@@ -298,6 +298,16 @@ export function runTable(
       });
   }
   function render() {
+    // Selection rebuilds the header and rows. Retain identity, not a detached
+    // element or row index (names may repeat and sorting may change).
+    const active = document.activeElement;
+    const focused =
+      active instanceof HTMLInputElement && table.contains(active)
+        ? active
+        : null;
+    const focusedRunId = focused?.dataset.runId;
+    const focusedAll = focused?.dataset.selectAll !== undefined;
+    let restoreFocus: HTMLInputElement | undefined;
     const rows = visible();
     state.page = Math.min(
       state.page,
@@ -312,6 +322,8 @@ export function runTable(
     const choose = element("th");
     const all = element("input");
     all.type = "checkbox";
+    all.dataset.selectAll = "";
+    if (focusedAll) restoreFocus = all;
     all.setAttribute("aria-label", "Select all matching runs");
     all.checked = rows.length > 0 && rows.every((r) => selection.has(r.id));
     all.indeterminate = !all.checked && rows.some((r) => selection.has(r.id));
@@ -363,6 +375,8 @@ export function runTable(
       const check = element("input");
       check.type = "checkbox";
       check.checked = selection.has(run.id);
+      check.dataset.runId = run.id;
+      if (focusedRunId === run.id) restoreFocus = check;
       check.setAttribute("aria-label", `Select ${run.name}`);
       check.onchange = () => {
         if (check.checked) selection.add(run.id);
@@ -408,6 +422,7 @@ export function runTable(
       body.append(tr);
     }
     pagination(pager, rows.length, state, render);
+    restoreFocus?.focus({ preventScroll: true });
   }
   search.oninput = () => {
     state.query = search.value;
