@@ -148,7 +148,12 @@ function remember(workspace: Workspace) {
   if (stack.length > 15) stack.shift();
   undo.set(workspace.id, stack);
 }
-function change(workspace: Workspace, mutate: () => void, strict = false, render = true): boolean {
+function change(
+  workspace: Workspace,
+  mutate: () => void,
+  strict = false,
+  render = true,
+): boolean {
   const before = structuredClone(workspace);
   try {
     mutate();
@@ -158,7 +163,9 @@ function change(workspace: Workspace, mutate: () => void, strict = false, render
   } catch (e) {
     Object.assign(workspace, before);
     renderCharts(workspace);
-    const failure = new Error(`Could not save this view in your browser: ${message(e)}`);
+    const failure = new Error(
+      `Could not save this view in your browser: ${message(e)}`,
+    );
     if (strict) throw failure;
     error(failure.message);
     return false;
@@ -238,7 +245,8 @@ function renderPage() {
     }
     const workspace = workspaceFor(experiment.id);
     if (route.view === "runs") {
-      if (currentWorkspaceId && currentWorkspaceId !== workspace.id) disposeCards();
+      if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
+        disposeCards();
       else suspendDashboard();
       let state = runStates.get(experiment.id);
       if (!state) {
@@ -290,7 +298,13 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
     card: structuredClone(card),
     isNew: add,
     onClose: () => {
-      const trigger = add ? document.querySelector<HTMLElement>("details[data-menu=add] > summary") : cards.get(card.id)?.host.querySelector<HTMLElement>(".card-menu > summary");
+      const trigger = add
+        ? document.querySelector<HTMLElement>(
+            "details[data-menu=add] > summary",
+          )
+        : cards
+            .get(card.id)
+            ?.host.querySelector<HTMLElement>(".card-menu > summary");
       trigger?.focus({ preventScroll: true });
     },
     catalog,
@@ -300,25 +314,29 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
     onSave: (next) => {
       const current = library.views.find((v) => v.id === workspace.id);
       if (!current) throw new Error("This view is no longer available.");
-      change(current, () => {
-        const found = locate(current, card.id);
-        if (found && !add) found.section.cards[found.index] = next;
-        else {
-          let section = current.sections.find(
-            (s) => s.title === "Custom charts",
-          );
-          if (!section) {
-            section = {
-              id: crypto.randomUUID(),
-              title: "Custom charts",
-              collapsed: false,
-              cards: [],
-            };
-            current.sections.push(section);
+      change(
+        current,
+        () => {
+          const found = locate(current, card.id);
+          if (found && !add) found.section.cards[found.index] = next;
+          else {
+            let section = current.sections.find(
+              (s) => s.title === "Custom charts",
+            );
+            if (!section) {
+              section = {
+                id: crypto.randomUUID(),
+                title: "Custom charts",
+                collapsed: false,
+                cards: [],
+              };
+              current.sections.push(section);
+            }
+            section.cards.push(next);
           }
-          section.cards.push(next);
-        }
-      }, true);
+        },
+        true,
+      );
     },
   });
 }
@@ -416,7 +434,9 @@ async function confirmRemoval(
 
 function workspaceToolbar(workspace: Workspace) {
   const host = $("workspace-toolbar");
-  const focused = host.contains(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : null;
+  const focused = host.contains(document.activeElement)
+    ? document.activeElement?.getAttribute("aria-label")
+    : null;
   const oldScroll = host.querySelector(".run-picker-options")?.scrollTop ?? 0;
   const openMenus = [
     ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
@@ -437,7 +457,12 @@ function workspaceToolbar(workspace: Workspace) {
   views.value = workspace.id;
   views.onchange = () => {
     scrollPositions.set(workspace.id, window.scrollY);
-    if (!commitLibrary(() => { library.activeByExperiment[workspace.experimentId] = views.value; })) return;
+    if (
+      !commitLibrary(() => {
+        library.activeByExperiment[workspace.experimentId] = views.value;
+      })
+    )
+      return;
     renderPage();
     requestAnimationFrame(() =>
       window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
@@ -568,10 +593,13 @@ function workspaceToolbar(workspace: Workspace) {
         copy.id = crypto.randomUUID();
         copy.name = name;
         copy.updatedAt = Date.now();
-        if (commitLibrary(() => {
-          library.views.push(copy);
-          library.activeByExperiment[copy.experimentId] = copy.id;
-        })) renderPage();
+        if (
+          commitLibrary(() => {
+            library.views.push(copy);
+            library.activeByExperiment[copy.experimentId] = copy.id;
+          })
+        )
+          renderPage();
       })(),
   );
   action(
@@ -629,10 +657,13 @@ function workspaceToolbar(workspace: Workspace) {
           "This view belongs to an experiment that is not on this server.",
         );
       imported.id = crypto.randomUUID();
-      if (!commitLibrary(() => {
-        library.views.push(imported);
-        library.activeByExperiment[imported.experimentId] = imported.id;
-      })) return;
+      if (
+        !commitLibrary(() => {
+          library.views.push(imported);
+          library.activeByExperiment[imported.experimentId] = imported.id;
+        })
+      )
+        return;
       if (currentRoute().experimentId === imported.experimentId) {
         renderPage();
       } else navigate(imported.experimentId, "charts");
@@ -657,18 +688,24 @@ function workspaceToolbar(workspace: Workspace) {
           ))
         )
           return;
-        if (commitLibrary(() => {
-          library.views = library.views.filter((v) => v.id !== workspace.id);
-          delete library.activeByExperiment[workspace.experimentId];
-          workspaceFor(workspace.experimentId);
-        })) renderPage();
+        if (
+          commitLibrary(() => {
+            library.views = library.views.filter((v) => v.id !== workspace.id);
+            delete library.activeByExperiment[workspace.experimentId];
+            workspaceFor(workspace.experimentId);
+          })
+        )
+          renderPage();
       })(),
   );
   more.append(menu, file);
   const undoButton = button("Undo", () => {
     const stack = undo.get(workspace.id);
     const previous = stack?.at(-1);
-    if (previous && change(workspace, () => Object.assign(workspace, previous), false, false)) {
+    if (
+      previous &&
+      change(workspace, () => Object.assign(workspace, previous), false, false)
+    ) {
       stack!.splice(-2);
       renderCharts(workspace);
     }
@@ -679,7 +716,10 @@ function workspaceToolbar(workspace: Workspace) {
   for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
     if (openMenus.includes(d.dataset.menu)) d.open = true;
   choices.scrollTop = oldScroll;
-  if (focused) [...host.querySelectorAll<HTMLElement>("[aria-label]")].find(node => node.getAttribute("aria-label") === focused)?.focus({ preventScroll: true });
+  if (focused)
+    [...host.querySelectorAll<HTMLElement>("[aria-label]")]
+      .find((node) => node.getAttribute("aria-label") === focused)
+      ?.focus({ preventScroll: true });
 }
 
 function renderCharts(workspace: Workspace) {
@@ -705,8 +745,13 @@ function renderCharts(workspace: Workspace) {
     const toggle = button(
       `${section.collapsed ? "▸" : "▾"} ${section.title}`,
       () => {
-        change(workspace, () => { section.collapsed = !section.collapsed; });
-        sectionNodes.get(section.id)?.querySelector<HTMLButtonElement>(".section-toggle")?.focus({ preventScroll: true });
+        change(workspace, () => {
+          section.collapsed = !section.collapsed;
+        });
+        sectionNodes
+          .get(section.id)
+          ?.querySelector<HTMLButtonElement>(".section-toggle")
+          ?.focus({ preventScroll: true });
       },
       "section-toggle",
     );

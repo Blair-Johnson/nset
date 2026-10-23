@@ -87,13 +87,11 @@ async function charts(page: Page) {
   await page.locator(".dashboard-cell canvas").first().waitFor();
 }
 const card = (page: Page, title: string) =>
-  page
-    .locator(".dashboard-cell")
-    .filter({
-      has: page.locator(".card-title", {
-        hasText: new RegExp("^" + title + "$"),
-      }),
-    });
+  page.locator(".dashboard-cell").filter({
+    has: page.locator(".card-title", {
+      hasText: new RegExp("^" + title + "$"),
+    }),
+  });
 
 test("experiment and run tables preserve filtering and selection through navigation", async ({
   page,
@@ -143,7 +141,9 @@ test("namespace collapse, view names and run choices survive reload", async ({
   });
   await dialog.getByLabel("View name", { exact: true }).fill("Review");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByLabel("Saved view", { exact: true }).locator("option:checked")).toHaveText("Review");
+  await expect(
+    page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
+  ).toHaveText("Review");
   await page.reload();
   await expect(page.locator("#connection")).toHaveText("Connected");
   await expect(
@@ -171,6 +171,7 @@ test("editing is contextual and cancel does not mutate a card", async ({
     .fill("Cancelled edit");
   await editor.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(loss.locator(".card-title")).toHaveText("loss");
+  await expect(loss.getByLabel("Chart actions", { exact: true })).toBeFocused();
   await loss.getByLabel("Chart actions", { exact: true }).click();
   await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
   await editor.getByRole("tab", { name: "Axes", exact: true }).click();
@@ -238,8 +239,11 @@ test("narrow dashboard stays within viewport and logout removes credentials", as
   expect(errors).toEqual([]);
 });
 
-test("chart state survives run-table navigation and run picker keeps keyboard focus", async ({ page }) => {
-  await fixture(page); await charts(page);
+test("chart state survives run-table navigation and run picker keeps keyboard focus", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
   const loss = card(page, "loss");
   await loss.getByRole("button", { name: "Inspect", exact: true }).click();
   await loss.getByLabel("Cursor A coordinate", { exact: true }).fill("2.5");
@@ -248,48 +252,145 @@ test("chart state survives run-table navigation and run picker keeps keyboard fo
   const canvas = await loss.locator("canvas").elementHandle();
   await page.getByRole("button", { name: "Runs", exact: true }).click();
   await page.getByRole("button", { name: "Charts", exact: true }).click();
-  expect(await loss.locator("canvas").evaluate((node, old) => node === old, canvas)).toBe(true);
-  await expect(loss.getByLabel("Cursor A coordinate", { exact: true })).toHaveValue("2.5");
-  await expect(loss.getByRole("button", { name: "Previous view", exact: true })).toBeEnabled();
+  expect(
+    await loss.locator("canvas").evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  await expect(
+    loss.getByLabel("Cursor A coordinate", { exact: true }),
+  ).toHaveValue("2.5");
+  await expect(
+    loss.getByRole("button", { name: "Previous view", exact: true }),
+  ).toBeEnabled();
   await page.locator(".run-picker summary").click();
-  const choice = page.getByRole("checkbox", { name: `Show ${runs[0].name}`, exact: true });
-  await choice.focus(); await choice.press("Space");
-  await expect(choice).toBeFocused(); await expect(choice).not.toBeChecked();
-  await choice.press("Space"); await expect(choice).toBeChecked();
+  const choice = page.getByRole("checkbox", {
+    name: `Show ${runs[0].name}`,
+    exact: true,
+  });
+  await choice.focus();
+  await choice.press("Space");
+  await expect(choice).toBeFocused();
+  await expect(choice).not.toBeChecked();
+  await choice.press("Space");
+  await expect(choice).toBeChecked();
   await expect(choice).toBeFocused();
 });
 
-test("failed storage writes retain editor drafts and leave saved chart unchanged", async ({ page }) => {
-  await fixture(page); await charts(page);
+test("failed storage writes retain editor drafts and leave saved chart unchanged", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
   const loss = card(page, "loss");
   await loss.getByLabel("Chart actions", { exact: true }).click();
   await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
   const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
-  await editor.getByLabel("Chart title", { exact: true }).fill("Draft survives");
-  const before = await page.evaluate(() => localStorage.getItem("nset.workspaces.v2"));
+  await editor
+    .getByLabel("Chart title", { exact: true })
+    .fill("Draft survives");
+  const before = await page.evaluate(() =>
+    localStorage.getItem("nset.workspaces.v2"),
+  );
   await page.evaluate(() => {
     const original = Storage.prototype.setItem;
-    (window as any).restoreStorage = () => { Storage.prototype.setItem = original; };
+    (window as any).restoreStorage = () => {
+      Storage.prototype.setItem = original;
+    };
     Storage.prototype.setItem = function (key, value) {
-      if (key === "nset.workspaces.v2") throw new DOMException("Storage is full", "QuotaExceededError");
+      if (key === "nset.workspaces.v2")
+        throw new DOMException("Storage is full", "QuotaExceededError");
       return original.call(this, key, value);
     };
   });
-  await editor.getByRole("button", { name: "Save changes", exact: true }).click();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   await expect(editor).toBeVisible();
   await expect(editor).toContainText("Storage is full");
-  await expect(editor.getByLabel("Chart title", { exact: true })).toHaveValue("Draft survives");
-  expect(await page.evaluate(() => localStorage.getItem("nset.workspaces.v2"))).toBe(before);
+  await expect(editor.getByLabel("Chart title", { exact: true })).toHaveValue(
+    "Draft survives",
+  );
+  expect(
+    await page.evaluate(() => localStorage.getItem("nset.workspaces.v2")),
+  ).toBe(before);
   await expect(loss.locator(".card-title")).toHaveText("loss");
   await page.evaluate(() => (window as any).restoreStorage());
-  await editor.getByRole("button", { name: "Save changes", exact: true }).click();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   await expect(editor).toBeHidden();
-  await expect(card(page, "Draft survives").locator(".card-title")).toBeVisible();
+  await expect(
+    card(page, "Draft survives").locator(".card-title"),
+  ).toBeVisible();
 });
 
 test("Escape cannot strand a disconnected user", async ({ page }) => {
   await page.goto("/");
   await page.keyboard.press("Escape");
   await expect(page.locator("#login-dialog")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Connect", exact: true }),
+  ).toBeVisible();
+});
+
+test("explicit custom series stay independent of selected-run changes", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
+  await page.evaluate(() => {
+    const library = JSON.parse(localStorage.getItem("nset.workspaces.v2")!);
+    const loss = library.views[0].sections
+      .flatMap((s: any) => s.cards)
+      .find((c: any) => c.title === "loss");
+    loss.source = {
+      mode: "explicit",
+      series: [{ runId: "r1", key: "train/loss", kind: "metric" }],
+    };
+    localStorage.setItem("nset.workspaces.v2", JSON.stringify(library));
+  });
+  await page.reload();
+  const loss = card(page, "loss");
+  await loss.locator("canvas").waitFor();
+  await loss.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const canvas = await loss.locator("canvas").elementHandle();
+  await page.locator(".run-picker summary").click();
+  await page
+    .getByRole("checkbox", { name: `Show ${runs[1].name}`, exact: true })
+    .uncheck();
+  expect(
+    await loss.locator("canvas").evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  await expect(
+    loss.getByRole("button", { name: "Previous view", exact: true }),
+  ).toBeEnabled();
+  await expect(loss.locator(".card-legend")).toContainText(runs[0].name);
+});
+
+test("returning to a long dashboard restores scroll without rebuilding plots", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
+  await page.evaluate(() => {
+    const library = JSON.parse(localStorage.getItem("nset.workspaces.v2")!);
+    const section = library.views[0].sections[0];
+    const original = section.cards[0];
+    for (let i = 0; i < 12; i++)
+      section.cards.push({
+        ...original,
+        id: crypto.randomUUID(),
+        title: `Repeated ${i}`,
+      });
+    localStorage.setItem("nset.workspaces.v2", JSON.stringify(library));
+  });
+  await page.reload();
+  await card(page, "Repeated 10").scrollIntoViewIfNeeded();
+  await card(page, "Repeated 10").locator("canvas").waitFor();
+  const y = await page.evaluate(() => scrollY);
+  await page.evaluate(() => {
+    location.hash = location.hash.replace("/charts", "/runs");
+  });
+  await expect(page.locator(".run-table")).toBeVisible();
+  await page.getByRole("button", { name: "Charts", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => scrollY)).toBeCloseTo(y, 0);
 });
