@@ -620,12 +620,33 @@
   flex-wrap: nowrap;
   gap: 2px;
 }
-.card-header .card-chart-toolbar button {
-  padding: 3px;
-}
+.card-header .card-chart-toolbar button,
 .card-header > .card-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 3px;
   min-width: 28px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.card-header .card-chart-toolbar button:hover:not(:disabled),
+.card-header > .card-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: transparent;
+  color: var(--text);
+}
+.card-header .card-chart-toolbar button[aria-pressed="true"],
+.card-header > .card-button[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.card-icon {
+  display: block;
+  flex: none;
+  pointer-events: none;
 }
 .card-legend-mixed .card-legend-item {
   grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 10ch);

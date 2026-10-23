@@ -5,6 +5,7 @@ import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { withMetricLabel } from "./card-label";
 import { nextCursorPlacement } from "./cursor-placement";
+import { plotIcon, type PlotIconName } from "./plot-icons";
 import { formatDuration, formatXValue } from "./options";
 import { element, isAbort, message } from "./utils";
 import type {
@@ -62,6 +63,11 @@ function button(
   return result;
 }
 
+function iconButton(icon: PlotIconName, label: string, action: () => void) {
+  const control = button("", label, action);
+  control.append(plotIcon(icon));
+  return control;
+}
 export class ChartCard {
   private root = element("article", "chart-card");
   private header = element("header", "card-header");
@@ -118,7 +124,7 @@ export class ChartCard {
     private actions: CardActions,
   ) {
     const header = this.header;
-    this.maximize = button("⛶", "Maximize chart", () =>
+    this.maximize = iconButton("maximize", "Maximize chart", () =>
       this.setMaximized(!this.full),
     );
     header.append(this.title, this.maximize, this.menu);
@@ -336,6 +342,7 @@ export class ChartCard {
       value ? "Restore chart" : "Maximize chart",
     );
     this.maximize.title = value ? "Restore chart" : "Maximize chart";
+    this.maximize.replaceChildren(plotIcon(value ? "restore" : "maximize"));
     this.maximize.setAttribute("aria-pressed", String(value));
     this.updateActive();
     this.measureFolds();
@@ -382,18 +389,22 @@ export class ChartCard {
       return;
     }
     const toolbar = element("div", "card-chart-toolbar");
-    this.backButton = button("↶", "Previous view", () => this.plot?.back());
+    this.backButton = iconButton("back", "Previous view", () =>
+      this.plot?.back(),
+    );
     toolbar.append(
-      button("−", "Zoom out", () => this.plot?.zoom(1 / 1.5, "both")),
-      button("+", "Zoom in", () => this.plot?.zoom(1.5, "both")),
-      button("⛶", "Fit configured range", () => this.plot?.reset()),
+      iconButton("zoom-out", "Zoom out", () =>
+        this.plot?.zoom(1 / 1.5, "both"),
+      ),
+      iconButton("zoom-in", "Zoom in", () => this.plot?.zoom(1.5, "both")),
+      iconButton("fit", "Fit configured range", () => this.plot?.reset()),
       this.backButton,
     );
     for (const [axis, icon, label] of [
-      ["x", "┆", "Add vertical cursor"],
-      ["y", "╌", "Add horizontal cursor"],
+      ["x", "vertical-cursor", "Add vertical cursor"],
+      ["y", "horizontal-cursor", "Add horizontal cursor"],
     ] as const) {
-      const control = button(icon, label, () => {
+      const control = iconButton(icon, label, () => {
         this.cursorAxis = axis;
         this.activePin = "a";
         this.mode = "inspect";

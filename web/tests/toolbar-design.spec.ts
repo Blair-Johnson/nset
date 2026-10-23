@@ -2,7 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 
 const candidates = `
-[data-design=outlined] .card-header button { background:var(--surface);border-color:var(--control-border);color:var(--text) }
+[data-design=outlined] .card-header button:not([aria-pressed=true]):not(:hover) { background:var(--surface);border-color:var(--control-border);color:var(--text) }
 [data-design=quiet] .card-header .card-chart-toolbar button,
 [data-design=quiet] .card-header > button,
 [data-design=grouped] .card-header .card-chart-toolbar button,
@@ -14,7 +14,7 @@ const candidates = `
 [data-design=grouped] .card-chart-toolbar { background:var(--surface-raised);box-shadow:0 0 0 1px var(--border);border-radius:5px }
 `;
 
-async function fixture(page: Page, width: number) {
+async function fixture(page: Page, width: number, compare = true) {
   await page.setViewportSize({ width, height: 1120 });
   await page.route(/^http:\/\/127\.0\.0\.1:[0-9]+\/$/, (route) =>
     route.fulfill({
@@ -102,7 +102,7 @@ async function fixture(page: Page, width: number) {
       (window as any).designCards.push(card);
     }
   });
-  await page.addStyleTag({ content: candidates });
+  if (compare) await page.addStyleTag({ content: candidates });
   await expect(page.locator(".u-over")).toHaveCount(3);
 }
 
@@ -224,5 +224,88 @@ for (const width of [1440, 390]) {
         path: info.outputPath(`${variant}-active.png`),
       });
     }
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`production toolbar uses quiet distinct icons and retained focus at ${width}px`, async ({
+    page,
+  }, info) => {
+    await fixture(page, width, false);
+    const card = page.locator("[data-design=outlined] .chart-card");
+    const icons = card.locator(".card-header svg");
+    await expect(icons).toHaveCount(7);
+    const data = await icons.evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        icon: (node as SVGElement).dataset.icon,
+        hidden: node.getAttribute("aria-hidden"),
+        path: node.querySelector("path")?.getAttribute("d"),
+        width: node.getBoundingClientRect().width,
+        height: node.getBoundingClientRect().height,
+      })),
+    );
+    expect(new Set(data.map((item) => item.path)).size).toBe(7);
+    for (const icon of data) {
+      expect(icon.hidden).toBe("true");
+      expect(icon.width).toBe(16);
+      expect(icon.height).toBe(16);
+    }
+    const zoom = card.getByRole("button", { name: "Zoom in", exact: true });
+    await page.mouse.move(0, 0);
+    expect(
+      await zoom.evaluate((node) => getComputedStyle(node).borderColor),
+    ).toBe("rgba(0, 0, 0, 0)");
+    await zoom.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(zoom).toBeFocused();
+    expect(
+      await zoom.evaluate((node) => getComputedStyle(node).outlineWidth),
+    ).toBe("2px");
+    await page.keyboard.press("Enter");
+    await expect(
+      card.getByRole("button", { name: "Previous view", exact: true }),
+    ).toBeEnabled();
+    const cursor = card.getByRole("button", {
+      name: "Add vertical cursor",
+      exact: true,
+    });
+    await cursor.click();
+    await expect(cursor).toHaveAttribute("aria-pressed", "true");
+    expect(
+      await cursor.evaluate((node) => getComputedStyle(node).borderColor),
+    ).not.toBe("rgba(0, 0, 0, 0)");
+    await card.screenshot({
+      path: info.outputPath("production-toolbar-active.png"),
+    });
+    const fit = card.getByRole("button", {
+      name: "Fit configured range",
+      exact: true,
+    });
+    await expect(fit.locator("svg")).toHaveAttribute("data-icon", "fit");
+    await card
+      .getByRole("button", { name: "Maximize chart", exact: true })
+      .click();
+    const restore = card.getByRole("button", {
+      name: "Restore chart",
+      exact: true,
+    });
+    await expect(restore.locator("svg")).toHaveAttribute(
+      "data-icon",
+      "restore",
+    );
+    await expect(restore).toBeFocused();
+    await card.screenshot({
+      path: info.outputPath("production-toolbar-maximized.png"),
+    });
+    await restore.click();
+    await expect(
+      card
+        .getByRole("button", { name: "Maximize chart", exact: true })
+        .locator("svg"),
+    ).toHaveAttribute("data-icon", "maximize");
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
   });
 }
