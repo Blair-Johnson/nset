@@ -36,6 +36,7 @@ export function defaultLabelLayout(config: ViewConfig): {
     // that clearance when the user owns either axis layout or the padding.
     multilineTime:
       config.axis === "timestamp" &&
+      config.xScale === "linear" &&
       config.xFormat === "number" &&
       config.advanced.padding === undefined &&
       !axes.some(hasLayoutOverride),

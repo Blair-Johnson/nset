@@ -140,3 +140,23 @@ test("UTC tick increments have millisecond precision and cover the Date domain",
     [0.25, 0.5, 1],
   );
 });
+
+test("nonlinear wall-time axes retain native legacy splits instead of promising whole milliseconds", () => {
+  for (const xScale of ["log", "asinh"] as const) {
+    const config = validateConfig({
+      axis: "timestamp",
+      xScale,
+      xMin: 0.01,
+      xMax: 1,
+    });
+    assert.equal(defaultLabelLayout(config).multilineTime, false);
+    const axis = resolveOptions(config, 650, [{}]).axes![0];
+    assert.equal(axis.size, 32);
+    assert.equal(axis.align, undefined);
+    assert.equal(axis.incrs, undefined);
+    assert.deepEqual(
+      labels(config, 0, [0.01, 0.1, 1]),
+      [0.01, 0.1, 1].map((value) => formatXValue(value, "timestamp", "number")),
+    );
+  }
+});
