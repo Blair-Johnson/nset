@@ -355,3 +355,44 @@ test("card dimension transactions persist both axes and roll back failed writes"
     ),
   ).toBe(saved.width);
 });
+
+test("full shell: one cursor activation places A then B while armed drags still zoom", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
+  const card = page.locator(".chart-card").first();
+  await card
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
+  const overlay = card.locator(".u-over");
+  const box = (await overlay.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.3);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.7, {
+    steps: 5,
+  });
+  await page.mouse.up();
+  await expect(
+    card.getByLabel("Cursor A coordinate", { exact: true }),
+  ).toHaveValue("");
+  await expect(
+    card.getByRole("button", { name: "Place vertical cursor A", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  for (const [letter, fraction] of [
+    ["A", 0.25],
+    ["B", 0.75],
+  ] as const) {
+    const r = (await overlay.boundingBox())!;
+    await page.mouse.click(r.x + r.width * fraction, r.y + r.height * 0.5);
+    await expect(
+      card.getByLabel(`Cursor ${letter} coordinate`, { exact: true }),
+    ).not.toHaveValue("");
+  }
+  await expect(
+    card.getByRole("button", { name: "Add vertical cursor", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    card.locator(".card-position-readout output").last(),
+  ).not.toHaveText("\u2014");
+});

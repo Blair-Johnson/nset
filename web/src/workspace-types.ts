@@ -97,6 +97,8 @@ export interface PlotInteraction {
   onHorizontalPin?: (pin: "a" | "b", value: number) => void;
   activePin: "a" | "b";
   onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
+  /** A direct-gesture placement click completed after pointer capture release. */
+  onPlacementComplete?: (pin: "a" | "b" | "threshold" | "yA" | "yB") => void;
   onHover?: (x: number | null) => void;
   onViewChange?: () => void;
 }

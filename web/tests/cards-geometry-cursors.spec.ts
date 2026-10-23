@@ -322,7 +322,11 @@ test("horizontal A/B inspection includes every crossing and plateau plus delta Y
   await page.getByRole("spinbutton", { name: "Cursor A level" }).press("Tab");
   await page.getByRole("spinbutton", { name: "Cursor B level" }).fill("2");
   await page.getByRole("spinbutton", { name: "Cursor B level" }).press("Tab");
-  await expect(page.locator(".card-delta-y")).toHaveText("A 1 · B 2 · Δ Y 1");
+  await expect(page.locator(".card-position-readout output")).toHaveText([
+    "1",
+    "2",
+    "1",
+  ]);
   await expect(page.locator(".card-crossings")).toHaveCount(8);
   await expect(page.locator(".card-crossings").first()).toContainText(
     "5 crossings",
@@ -516,7 +520,7 @@ test("pointer cancellation rolls transient geometry back without persistence", a
     .toBe(before.layout.height);
 });
 
-test("cursor creation returns to zoom and existing horizontal/vertical pins drag directly", async ({
+test("cursor pairs return to zoom and existing horizontal/vertical pins drag directly", async ({
   page,
 }) => {
   await fixture(page);
@@ -547,7 +551,16 @@ test("cursor creation returns to zoom and existing horizontal/vertical pins drag
   await page.mouse.click(point.x, point.y);
   await expect
     .poll(() => page.evaluate(() => (window as any).geometry.card.mode))
-    .toBe("zoom");
+    .toBe("inspect");
+  await expect(
+    page.getByRole("button", { name: "Place horizontal cursor B" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  const second = await at(4, 1.7);
+  await page.mouse.click(second.x, second.y);
+  expect((await snapshot(page)).pins.yB).toBeCloseTo(1.7, 1);
+  expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe(
+    "zoom",
+  );
   expect((await snapshot(page)).pins.yA).toBeCloseTo(0.8, 1);
   await expect(
     page.getByRole("button", { name: "Place horizontal cursor A" }),
@@ -571,7 +584,7 @@ test("cursor creation returns to zoom and existing horizontal/vertical pins drag
   expect(after.pins).toEqual(pins);
 });
 
-test("an armed cursor can be placed by dragging all the way to release", async ({
+test("an armed cursor drag zooms without placing or advancing", async ({
   page,
 }) => {
   await fixture(page);
@@ -593,10 +606,14 @@ test("an armed cursor can be placed by dragging all the way to release", async (
   await page.mouse.down();
   await page.mouse.move(positions.x, positions.to, { steps: 12 });
   await page.mouse.up();
-  expect((await snapshot(page)).pins.yA).toBeCloseTo(1.3, 1);
+  expect((await snapshot(page)).pins.yA ?? null).toBeNull();
+  expect((await snapshot(page)).history).toBe(true);
   await expect(
     page.getByRole("button", { name: "Add horizontal cursor", exact: true }),
-  ).toHaveAttribute("aria-pressed", "false");
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "Place horizontal cursor A" }),
+  ).toHaveAttribute("aria-pressed", "true");
 });
 
 for (const format of ["number", "iso-time"])
@@ -656,4 +673,65 @@ for (const format of ["number", "iso-time"])
     await expect(a).toContainText("5s, 15s");
     await expect(b).toContainText("6s – 8s");
     await expect(page.locator(".card-results")).not.toContainText("1970");
+  });
+
+for (const axis of ["step", "timestamp", "relative", "horizontal"] as const)
+  test(`${axis} primary position readout has signed, fractional and zero B-A independent of samples and viewport`, async ({
+    page,
+  }) => {
+    await fixture(page);
+    if (axis !== "horizontal") {
+      await page.evaluate((axis) => {
+        const c = (window as any).geometry.card;
+        c.setSpec({ ...c.spec, config: { ...c.spec.config, axis } });
+      }, axis);
+      await expect(page.locator(".card-status")).toHaveText("");
+    }
+    const horizontal = axis === "horizontal";
+    await page
+      .getByRole("button", {
+        name: horizontal ? "Add horizontal cursor" : "Add vertical cursor",
+        exact: true,
+      })
+      .click();
+    const input = (letter: string) =>
+      page.getByLabel(
+        `Cursor ${letter} ${horizontal ? "level" : "coordinate"}`,
+        { exact: true },
+      );
+    const base = axis === "timestamp" ? 1700000000000 : 0;
+    for (const [a, b, delta] of [
+      [base + 10.25, base + 9.75, -0.5],
+      [base, base, 0],
+      [base, base + 0.5, 0.5],
+    ]) {
+      await input("A").fill(String(a));
+      await input("A").press("Tab");
+      await input("B").fill(String(b));
+      await input("B").press("Tab");
+      const outputs = page.locator(".card-position-readout output");
+      await expect(outputs).toHaveCount(3);
+      await expect(outputs.nth(2)).toHaveText(
+        axis === "timestamp" || axis === "relative"
+          ? `${delta} ms`
+          : String(delta),
+      );
+      if (axis === "timestamp")
+        await expect(outputs.first()).toContainText("2023-11-14");
+      else
+        await expect(outputs.first()).toHaveText(
+          axis === "relative" ? `${a} ms` : String(a),
+        );
+      const text = await page.locator(".card-results").innerText();
+      const pins = (await snapshot(page)).pins;
+      await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      await resize(page, 10, 10);
+      expect((await snapshot(page)).pins).toEqual(pins);
+      expect(await page.locator(".card-results").innerText()).toBe(text);
+    }
+    expect(
+      await page
+        .locator(".card-results")
+        .evaluate((el) => el.firstElementChild?.className),
+    ).toBe("card-position-readout");
   });

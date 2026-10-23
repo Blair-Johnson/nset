@@ -581,3 +581,23 @@
   font-size: 11px;
   padding-top: 2px;
 }
+
+/* Cursor coordinates are primary; per-series samples/crossings stay secondary. */
+.card-position-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  padding: 6px 0;
+  font-variant-numeric: tabular-nums;
+}
+.card-position-value {
+  display: inline-flex;
+  gap: 6px;
+}
+.card-position-value > span {
+  color: var(--muted);
+}
+.card-position-value output {
+  font-weight: 600;
+}

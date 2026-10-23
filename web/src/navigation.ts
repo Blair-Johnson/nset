@@ -127,7 +127,7 @@ interface Gesture {
   mode: PlotInteraction["mode"];
   pin?: Pin;
   moved: boolean;
-  placing: boolean;
+  placement?: Pin;
 }
 
 /** Opt-in DOM controller. One instance belongs to exactly one rendered uPlot. */
@@ -310,7 +310,9 @@ export class PlotNavigation {
       if (pin === "yA" || pin === "yB")
         this.options.onHorizontalPin?.(pin === "yA" ? "a" : "b", value);
       else this.options.onPin?.(pin, value);
+      return true;
     }
+    return false;
   }
   private contextmenu = (e: MouseEvent) => {
     if (this.options.directGestures) e.preventDefault();
@@ -339,21 +341,26 @@ export class PlotNavigation {
     )
       mode = "zoom";
     let pin: Pin | undefined;
-    const placing = mode === "inspect" || mode === "threshold";
-    if (mode === "inspect") {
-      const axis = this.options.cursorAxis ?? "x";
-      pin =
-        this.nearestPin(x, y, axis) ??
-        (axis === "y"
+    let placement: Pin | undefined;
+    const pending = mode === "inspect" || mode === "threshold";
+    const axis = this.options.cursorAxis ?? "x";
+    const nextPin: Pin =
+      mode === "threshold"
+        ? "threshold"
+        : axis === "y"
           ? this.options.activePin === "a"
             ? "yA"
             : "yB"
-          : this.options.activePin);
-    } else if (mode === "threshold") pin = "threshold";
-    else if (direct && mode === "zoom") {
+          : this.options.activePin;
+    if (direct && mode !== "pan") {
+      // Existing lines always win. Empty space is a zoom gesture until a
+      // genuine click is confirmed, even while either placement is armed.
       pin = this.nearestPin(x, y);
-      if (pin) mode = "inspect";
-    }
+      mode = pin ? "inspect" : "zoom";
+      if (!pin && pending) placement = nextPin;
+    } else if (mode === "inspect") {
+      pin = this.nearestPin(x, y, axis) ?? nextPin;
+    } else if (mode === "threshold") pin = "threshold";
     this.gesture = {
       id: e.pointerId,
       x,
@@ -362,7 +369,7 @@ export class PlotNavigation {
       mode,
       pin,
       moved: false,
-      placing,
+      placement,
     };
     try {
       this.u.over.setPointerCapture(e.pointerId);
@@ -450,9 +457,21 @@ export class PlotNavigation {
       this.options.onViewChange?.();
     }
     this.release();
-    if (g.placing && this.options.directGestures) {
-      this.options = { ...this.options, mode: "zoom" };
+    if (
+      g.placement &&
+      !g.moved &&
+      this.xy(e).inside &&
+      this.pinAt(g.placement, x, y)
+    ) {
+      const first = g.placement === "a" || g.placement === "yA";
+      this.options = {
+        ...this.options,
+        mode: first ? "inspect" : "zoom",
+        activePin: first ? "b" : this.options.activePin,
+      };
       this.cursor();
+      // Reconfiguration is safe now: no live gesture/capture can be cancelled.
+      this.options.onPlacementComplete?.(g.placement);
     }
   };
   cancelGesture() {

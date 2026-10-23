@@ -4,7 +4,7 @@ import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { withMetricLabel } from "./card-label";
-import { formatXValue } from "./options";
+import { formatDuration, formatXValue } from "./options";
 import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
@@ -325,8 +325,7 @@ export class ChartCard {
     ] as const) {
       const control = button(icon, label, () => {
         this.cursorAxis = axis;
-        this.activePin =
-          (axis === "x" ? this.pins.a : this.pins.yA) == null ? "a" : "b";
+        this.activePin = "a";
         this.mode = "inspect";
         this.inspectOpen = true;
         this.configure();
@@ -370,20 +369,6 @@ export class ChartCard {
 
   private configure(rebuild = true) {
     if (!this.plot) return;
-    const placed = (pin: keyof Pins, value: number) => {
-      this.setPin(pin, value);
-      if (this.mode === "inspect" || this.mode === "threshold") {
-        this.mode = "zoom";
-        // Navigation owns the active pointer capture and disarms after release.
-        // Reconfiguring it from this live callback would cancel placement drags.
-        for (const control of this.cursorButtons.values())
-          control.setAttribute("aria-pressed", "false");
-        for (const control of this.inspection.querySelectorAll(
-          "button[aria-pressed]",
-        ))
-          control.setAttribute("aria-pressed", "false");
-      }
-    };
     this.plot.configureInteraction({
       mode: this.mode,
       axis: "both",
@@ -391,8 +376,15 @@ export class ChartCard {
       directGestures: true,
       cursorAxis: this.cursorAxis,
       activePin: this.activePin,
-      onPin: placed,
-      onHorizontalPin: (pin, value) => placed(pin === "a" ? "yA" : "yB", value),
+      onPin: (pin, value) => this.setPin(pin, value),
+      onHorizontalPin: (pin, value) =>
+        this.setPin(pin === "a" ? "yA" : "yB", value),
+      onPlacementComplete: (pin) => {
+        const first = pin === "a" || pin === "yA";
+        this.activePin = first ? "b" : this.activePin;
+        this.mode = first ? "inspect" : "zoom";
+        this.configure(false);
+      },
       onHover: (x) => {
         this.hover.replaceChildren();
         if (x === null) return;
@@ -563,6 +555,63 @@ export class ChartCard {
   }
   private renderResults() {
     this.results.replaceChildren();
+    if (this.inspectOpen && this.mode !== "threshold") {
+      const vertical = this.cursorAxis === "x";
+      const a = vertical ? this.pins.a : this.pins.yA;
+      const b = vertical ? this.pins.b : this.pins.yB;
+      const delta = a == null || b == null ? null : b - a;
+      const position = (value: number | null | undefined) =>
+        value == null
+          ? "—"
+          : vertical
+            ? formatXValue(
+                value,
+                this.spec.config.axis,
+                this.spec.config.xFormat,
+              )
+            : this.number(value);
+      const difference =
+        delta === null
+          ? "—"
+          : vertical && this.spec.config.axis !== "step"
+            ? formatDuration(delta)
+            : vertical
+              ? formatValue(
+                  delta,
+                  this.spec.config.xFormat === "iso-time"
+                    ? "number"
+                    : this.spec.config.xFormat,
+                )
+              : this.number(delta);
+      const readout = element("div", "card-position-readout");
+      readout.setAttribute(
+        "aria-label",
+        `Cursor ${vertical ? "positions" : "levels"}`,
+      );
+      readout.append(
+        element(
+          "strong",
+          "",
+          vertical
+            ? this.spec.config.axis === "step"
+              ? "Step"
+              : this.spec.config.axis === "timestamp"
+                ? "Time (UTC)"
+                : "Elapsed time"
+            : "Value",
+        ),
+      );
+      for (const [label, value] of [
+        ["A", position(a)],
+        ["B", position(b)],
+        ["B − A", difference],
+      ]) {
+        const cell = element("span", "card-position-value");
+        cell.append(element("span", "", label), element("output", "", value));
+        readout.append(cell);
+      }
+      this.results.append(readout);
+    }
     if (
       this.inspectOpen &&
       this.cursorAxis === "x" &&
@@ -570,7 +619,7 @@ export class ChartCard {
     ) {
       const table = element("table", "card-value-table");
       const head = element("tr");
-      for (const name of ["Series", "A", "B", "Δ B − A"])
+      for (const name of ["Series value", "At A", "At B", "Δ value"])
         head.append(element("th", "", name));
       table.append(head);
       for (const series of this.data) {
@@ -591,17 +640,6 @@ export class ChartCard {
               ["A", this.pins.yA],
               ["B", this.pins.yB],
             ];
-      if (this.mode !== "threshold") {
-        const a = this.pins.yA,
-          b = this.pins.yB;
-        this.results.append(
-          element(
-            "div",
-            "card-delta-y",
-            `A ${this.number(a ?? null)} · B ${this.number(b ?? null)} · Δ Y ${this.number(a == null || b == null ? null : b - a)}`,
-          ),
-        );
-      }
       for (const [label, level] of levels) {
         if (level == null) continue;
         for (const series of this.data) {
