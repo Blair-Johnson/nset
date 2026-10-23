@@ -23,6 +23,8 @@ import {
 } from "./options";
 import { matchedPath } from "./matched-path";
 import type { Run } from "./api";
+import { PlotNavigation, readViewport } from "./navigation";
+import type { NavigationAxis, PlotInteraction } from "./workspace-types";
 export interface PlotRun {
   run: Run;
   raw: Point[];
@@ -57,6 +59,8 @@ export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
 export class PlotPanel {
   private chart?: uPlot;
   private generation = 0;
+  private interaction?: PlotInteraction;
+  private navigation?: PlotNavigation;
   private resize: ResizeObserver;
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
@@ -67,16 +71,20 @@ export class PlotPanel {
     private onWarnings: (warnings: string[]) => void,
   ) {
     this.resize = new ResizeObserver(() => {
-      if (this.chart && this.config && this.host.clientWidth > 0)
+      if (this.chart && this.config && this.host.clientWidth > 0) {
+        this.navigation?.cancelGesture();
         this.chart.setSize({
           width: this.config.width ?? Math.max(320, this.host.clientWidth),
           height: this.config.height,
         });
+      }
     });
     this.resize.observe(host);
   }
   clear() {
     this.generation++;
+    this.navigation?.destroy();
+    this.navigation = undefined;
     this.chart?.destroy();
     this.chart = undefined;
     this.host.replaceChildren();
@@ -86,10 +94,43 @@ export class PlotPanel {
     this.resize.disconnect();
   }
   setPins(pins: Pins) {
-    this.pins = pins;
+    this.pins = { ...pins };
     this.chart?.redraw(false);
   }
+  configureInteraction(options: PlotInteraction): void {
+    this.interaction = { ...options };
+    if (this.navigation) this.navigation.configure(this.interaction);
+    else this.attachNavigation();
+  }
+  private attachNavigation() {
+    if (!this.chart || !this.interaction || !readViewport(this.chart)) return;
+    this.navigation = new PlotNavigation(
+      this.chart,
+      this.interaction,
+      () => this.pins,
+      (pin, value) => this.setPins({ ...this.pins, [pin]: value }),
+    );
+  }
+  zoom(factor: number, axis?: NavigationAxis): void {
+    this.navigation?.zoom(factor, axis);
+  }
+  pan(dx: number, dy: number): void {
+    this.navigation?.pan(dx, dy);
+  }
+  back(): void {
+    this.navigation?.back();
+  }
+  canGoBack(): boolean {
+    return this.navigation?.canGoBack() ?? false;
+  }
+  viewport(): { x: [number, number]; y: [number, number] } | null {
+    return this.chart ? readViewport(this.chart) : null;
+  }
   reset() {
+    if (this.navigation) {
+      this.navigation.reset();
+      return;
+    }
     if (this.config) this.render(this.analyzed, this.config, this.pins);
   }
   render(data: Analyzed[], config: ViewConfig, pins: Pins) {
@@ -262,7 +303,7 @@ export class PlotPanel {
               );
           };
           u.over.addEventListener("pointerdown", (e) => {
-            if (e.button === 0 && e.isPrimary)
+            if (!this.interaction && e.button === 0 && e.isPrimary)
               down = { x: e.clientX, y: e.clientY, distance: 0 };
           });
           u.over.addEventListener("pointermove", moved);
@@ -273,6 +314,10 @@ export class PlotPanel {
             down = undefined;
           });
           u.over.addEventListener("pointerup", (e) => {
+            if (this.interaction) {
+              down = undefined;
+              return;
+            }
             moved(e);
             const drag = opts.cursor?.drag;
             const threshold =
@@ -290,13 +335,21 @@ export class PlotPanel {
       ],
     });
     opts.cursor!.bind = {
+      mousedown: (_u, _target, native) => (event) => {
+        if (!this.interaction) native(event);
+        return null;
+      },
+      dblclick: (_u, _target, native) => (event) => {
+        if (!this.interaction) native(event);
+        return null;
+      },
       click: (u, target, native) => (event) => {
         const selected = Number(
           target.closest<HTMLElement>(".u-series")?.dataset.seriesIndex,
         );
         const before = u.series.map((s) => s.show !== false),
           changes = visibilityChanges;
-        native(event); // Native cursor lock must remain authoritative.
+        if (!this.interaction || target !== u.over) native(event); // Legacy cursor lock and legends retain native behavior.
         if (selected > 0 && visibilityChanges !== changes) {
           const isolated =
             Boolean(event.ctrlKey || event.metaKey) !==
@@ -337,6 +390,8 @@ export class PlotPanel {
       candidate?.destroy();
       throw error;
     }
+    this.navigation?.destroy();
+    this.navigation = undefined;
     this.chart?.destroy();
     this.host.replaceChildren(...staging.childNodes);
     this.chart = candidate;
@@ -344,6 +399,8 @@ export class PlotPanel {
     this.analyzed = data;
     this.pins = pins;
     this.generation = generation;
+    this.attachNavigation();
+    this.interaction?.onViewChange?.();
     publishWarnings();
   }
   private drawPins(
@@ -361,10 +418,15 @@ export class PlotPanel {
     ctx.lineWidth = 1.5 * ratio;
     ctx.font = `${12 * ratio}px ui-monospace`;
     for (const [label, value, color] of [
-      ["A", pins.a, "#78d7ff"],
-      ["B", pins.b, "#c4a8ff"],
+      ["A", pins.a, "#0369a1"],
+      ["B", pins.b, "#7c3aed"],
     ] as const) {
-      if (value === null) continue;
+      if (
+        value === null ||
+        !Number.isFinite(value) ||
+        (config?.xScale === "log" && value <= 0)
+      )
+        continue;
       const x = u.valToPos(value, "x", true);
       if (x < left || x > left + width) continue;
       ctx.strokeStyle = color;
@@ -382,8 +444,8 @@ export class PlotPanel {
     ) {
       const y = u.valToPos(pins.threshold, "y", true);
       if (y >= top && y <= top + height) {
-        ctx.strokeStyle = "#ffc77a";
-        ctx.fillStyle = "#ffc77a";
+        ctx.strokeStyle = "#b45309";
+        ctx.fillStyle = "#b45309";
         ctx.setLineDash([3 * ratio, 4 * ratio]);
         ctx.beginPath();
         ctx.moveTo(left, y);
