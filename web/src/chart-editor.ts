@@ -1,5 +1,6 @@
 import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
+import { withRunColors } from "./series-colors";
 import {
   deepMerge,
   effectiveRange,
@@ -94,6 +95,29 @@ export function setEditorAxis(
   removeOverride(config, ["axes", axis === "x" ? 0 : 1, key]);
   // Static split positions are independent of a number formatter and are preserved.
 }
+/** Automatic display titles never become saved overrides. Explicit literals remain authoritative. */
+export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
+  const literal = axisOverride(card.config, axis).label;
+  if (typeof literal === "string") return literal;
+  const saved = card.config[`${axis}Label`];
+  if (saved) return saved;
+  if (axis === "x") return card.config.axis === "timestamp" ? "Time" : "Step";
+  const keys = [
+    ...new Set(
+      card.source.mode === "selected"
+        ? card.source.keys
+        : card.source.series
+            .filter((source) => source.kind === "metric")
+            .map((source) => source.key),
+    ),
+  ];
+  return keys.length === 1
+    ? keys[0]
+    : keys.length > 1
+      ? "Metric value (mixed metrics)"
+      : "Metric value";
+}
+
 export function setEditorToggle(
   config: ViewConfig,
   key: "grid" | "ticks" | "legend",
@@ -234,7 +258,6 @@ export function openChartEditor(options: ChartEditorOptions): {
   let sequence = 0;
   let closed = false;
   let saving = false;
-  let activeSection = "Data";
   let previewTimer: ReturnType<typeof setTimeout> | undefined;
   let previewVersion = 0;
   let sourceToken = "";
@@ -280,51 +303,16 @@ export function openChartEditor(options: ChartEditorOptions): {
   form.noValidate = true;
   const body = el("div", "ce-body");
   const settings = el("div", "ce-settings");
-  const nav = el("div", "ce-tabs");
-  nav.setAttribute("role", "tablist");
-  nav.setAttribute("aria-label", "Chart settings");
+  settings.setAttribute("aria-label", "Chart settings");
   const panels = new Map<string, HTMLElement>();
-  const tabs = new Map<string, HTMLButtonElement>();
-  const showSection = (name: string, focus = false) => {
-    activeSection = name;
-    for (const [key, panel] of panels) panel.hidden = key !== name;
-    for (const [key, tab] of tabs) {
-      tab.setAttribute("aria-selected", String(key === name));
-      tab.tabIndex = key === name ? 0 : -1;
-    }
-    if (focus) tabs.get(name)?.focus();
-  };
+  const advancedOpen = new Map<string, boolean>();
   for (const name of ["Data", "Axes", "Appearance"]) {
-    const tab = button(name, () => showSection(name));
     const panel = el("section", "ce-panel");
-    tab.id = `${prefix}-tab-${name}`;
     panel.id = `${prefix}-panel-${name}`;
-    tab.setAttribute("role", "tab");
-    tab.setAttribute("aria-controls", panel.id);
-    panel.setAttribute("role", "tabpanel");
-    panel.setAttribute("aria-labelledby", tab.id);
-    tabs.set(name, tab);
+    panel.setAttribute("aria-labelledby", `${panel.id}-heading`);
     panels.set(name, panel);
-    nav.append(tab);
   }
-  nav.onkeydown = (event) => {
-    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const names = [...tabs.keys()].filter((name) => !tabs.get(name)!.disabled);
-    const index = names.indexOf(activeSection);
-    showSection(
-      event.key === "Home"
-        ? names[0]
-        : event.key === "End"
-          ? names.at(-1)!
-          : names[
-              (index + (event.key === "ArrowRight" ? 1 : names.length - 1)) %
-                names.length
-            ],
-      true,
-    );
-  };
-  settings.append(nav, ...panels.values());
+  settings.append(...panels.values());
   const preview = el("aside", "ce-preview");
   preview.setAttribute("aria-label", "Chart preview");
   const previewTitle = el("h3", "", draft.title || "Untitled chart");
@@ -398,7 +386,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     const section =
       [...panels].find(
         ([, panel]) => panel === parent || panel.contains(parent),
-      )?.[0] ?? activeSection;
+      )?.[0] ?? "Appearance";
     fields.set(key, { control, error, section });
     setError(key, errors.get(key) ?? "");
     return box;
@@ -507,7 +495,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     };
     return control;
   }
-  function more(parent: HTMLElement, label = "More options") {
+  function more(parent: HTMLElement, label: string) {
     const details = el("details", "ce-more");
     details.append(el("summary", "", label));
     parent.append(details);
@@ -520,7 +508,12 @@ export function openChartEditor(options: ChartEditorOptions): {
         fields.delete(key);
         errors.delete(key);
       }
-    panel.replaceChildren();
+    const advanced =
+      panel.querySelector<HTMLDetailsElement>(":scope > details");
+    if (advanced) advancedOpen.set(name, advanced.open);
+    const heading = el("h3", "", name);
+    heading.id = `${panel.id}-heading`;
+    panel.replaceChildren(heading);
     return panel;
   }
 
@@ -530,7 +523,6 @@ export function openChartEditor(options: ChartEditorOptions): {
   let renderChoices = () => {};
   function renderData() {
     const panel = clearPanel("Data");
-    panel.append(el("h3", "", "Choose your data"));
     input(panel, "title", "Chart title", draft.title, (value) => {
       draft.title = value;
       setError("title", value.trim() ? "" : "Give this chart a title.");
@@ -566,6 +558,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         renderData();
         renderAxes();
         renderAppearance();
+        fields.get("kind")?.control.focus({ preventScroll: true });
       },
     );
     select(
@@ -596,7 +589,9 @@ export function openChartEditor(options: ChartEditorOptions): {
         pickerPage = 0;
         pickerSearch = "";
         renderData();
+        refreshAxisTitles();
         renderAppearance();
+        fields.get("source-mode")?.control.focus({ preventScroll: true });
       },
       draft.source.mode === "selected"
         ? "These keys follow the run selection in your saved view."
@@ -724,14 +719,17 @@ export function openChartEditor(options: ChartEditorOptions): {
                   (ref) => seriesId(ref) !== choice.id,
                 );
           setError("source", "");
+          const scrollTop = list.scrollTop;
           renderChoices();
+          list.scrollTop = scrollTop;
+          refreshAxisTitles();
           renderAppearance();
           change();
-          list
-            .querySelector<HTMLInputElement>(
+          (
+            list.querySelector<HTMLInputElement>(
               `input[data-source-id="${CSS.escape(choice.id)}"]`,
-            )
-            ?.focus();
+            ) ?? list
+          ).focus({ preventScroll: true });
         };
       }
       previous.disabled = pickerPage === 0;
@@ -740,14 +738,14 @@ export function openChartEditor(options: ChartEditorOptions): {
       setError("source", errors.get("source") ?? "");
     };
     renderChoices();
-    tabs.get("Axes")!.disabled = draft.kind === "image";
-    if (draft.kind === "image" && activeSection === "Axes") showSection("Data");
   }
 
   function renderAxes() {
     const panel = clearPanel("Axes");
+    panel.hidden = draft.kind === "image";
     if (draft.kind === "image") return;
-    panel.append(el("h3", "", "Axes & range"));
+    const advanced = more(panel, "Advanced axes");
+    advanced.open = advancedOpen.get("Axes") ?? false;
     select(
       panel,
       "axis",
@@ -759,6 +757,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       ],
       (value) => {
         draft.config.axis = value as ViewConfig["axis"];
+        refreshAxisTitles();
       },
       "Time uses the recorded UTC timestamp in milliseconds.",
     );
@@ -767,8 +766,21 @@ export function openChartEditor(options: ChartEditorOptions): {
       const group = el("fieldset", "ce-group");
       group.append(el("legend", "", `${name} axis`));
       panel.append(group);
-      select(
+      const patch = axisOverride(draft.config, axis);
+      input(
         group,
+        `${axis}Label`,
+        `${name} axis title`,
+        String(patch.label ?? draft.config[`${axis}Label`]),
+        (value) => {
+          setEditorAxis(draft.config, axis, "label", value);
+          refreshAxisTitles();
+        },
+      );
+      const scaleBounds = el("div", "ce-pair");
+      group.append(scaleBounds);
+      select(
+        scaleBounds,
         `${axis}Scale`,
         `${name} scale`,
         draft.config[`${axis}Scale`],
@@ -779,6 +791,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         ],
         (value) => {
           draft.config[`${axis}Scale`] = value as ViewConfig["xScale"];
+          refreshScaleOptions();
           checkBounds();
         },
       );
@@ -788,7 +801,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       const manual = lo !== null || hi !== null;
       const boundsBox = el("div", "ce-pair");
       const rangeSelect = select(
-        group,
+        scaleBounds,
         `${axis}-range`,
         `${name} bounds`,
         custom ? "custom" : manual ? "manual" : "auto",
@@ -870,15 +883,9 @@ export function openChartEditor(options: ChartEditorOptions): {
           error = "Logarithmic bounds must be greater than zero.";
         setError(`${axis}-range`, error);
       }
-      const labels = more(group, "Labels & more options");
-      const patch = axisOverride(draft.config, axis);
-      input(
-        labels,
-        `${axis}Label`,
-        `${name} label`,
-        String(patch.label ?? draft.config[`${axis}Label`]),
-        (value) => setEditorAxis(draft.config, axis, "label", value),
-      );
+      const labels = el("fieldset", "ce-group");
+      labels.append(el("legend", "", `${name} axis details`));
+      advanced.append(labels);
       const staticValues = Array.isArray(patch.values);
       select(
         labels,
@@ -909,7 +916,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         (value) =>
           override(draft.config, ["scales", axis, "dir"], value ? -1 : 1),
       );
-      select(
+      const logBase = select(
         labels,
         `${axis}-log-base`,
         `${name} log base`,
@@ -922,7 +929,7 @@ export function openChartEditor(options: ChartEditorOptions): {
           override(draft.config, ["scales", axis, "log"], Number(value)),
         "Used only for logarithmic axes.",
       );
-      number(
+      const asinh = number(
         labels,
         `${axis}-asinh`,
         `${name} asinh transition`,
@@ -933,6 +940,17 @@ export function openChartEditor(options: ChartEditorOptions): {
         false,
         "Used only for asinh axes; larger values widen the linear region.",
       );
+      function refreshScaleOptions() {
+        logBase.closest<HTMLElement>(".ce-field")!.hidden =
+          draft.config[`${axis}Scale`] !== "log";
+        asinh.closest<HTMLElement>(".ce-field")!.hidden =
+          draft.config[`${axis}Scale`] !== "asinh";
+        if (draft.config[`${axis}Scale`] !== "asinh") {
+          setError(`${axis}-asinh`, "");
+          asinh.value = String(scaleOverride(draft.config, axis).asinh ?? 1);
+        }
+      }
+      refreshScaleOptions();
       // Keep the control reachable for validation even when its optional inputs are hidden.
       rangeSelect.dataset.axis = axis;
     }
@@ -950,24 +968,29 @@ export function openChartEditor(options: ChartEditorOptions): {
       },
       "Display only: Central 98% fits the 1st–99th percentiles. No observations are removed. Set limits take precedence.",
     );
+    panel.append(advanced);
+    refreshAxisTitles();
+  }
+
+  function refreshAxisTitles() {
+    for (const axis of ["x", "y"] as const) {
+      const control = fields.get(`${axis}Label`)?.control as
+        HTMLInputElement | undefined;
+      if (!control) continue;
+      const automatic = clone(draft);
+      setEditorAxis(automatic.config, axis, "label", "");
+      const title = editorAxisTitle(automatic, axis);
+      const savedEmpty = axisOverride(draft.config, axis).label === "";
+      control.placeholder = savedEmpty ? "Saved empty title" : title;
+      control.closest(".ce-field")!.querySelector(".ce-help")!.textContent =
+        savedEmpty
+          ? "Saved empty title is kept. Type a title to replace it."
+          : `Automatic: ${title}. Leave blank to follow the data.`;
+    }
   }
 
   function renderAppearance() {
     const panel = clearPanel("Appearance");
-    panel.append(el("h3", "", "Make it readable"));
-    select(
-      panel,
-      "size",
-      "Card width",
-      draft.size,
-      [
-        ["normal", "Standard"],
-        ["wide", "Wide"],
-      ],
-      (value) => {
-        draft.size = value as ChartSpec["size"];
-      },
-    );
     if (draft.kind === "image") {
       panel.append(
         el(
@@ -1051,14 +1074,21 @@ export function openChartEditor(options: ChartEditorOptions): {
         : "",
     );
     grid.indeterminate = grids[0] !== grids[1];
-    const styleDetails = more(panel, "Default curve style");
+    const styleDetails = el("fieldset", "ce-group ce-default-style");
+    styleDetails.append(el("legend", "", "Default curve style"));
+    panel.append(styleDetails);
+    const extra = more(panel, "Advanced appearance");
+    extra.open = advancedOpen.get("Appearance") ?? false;
+    const strokeDetails = el("fieldset", "ce-group");
+    strokeDetails.append(el("legend", "", "Default line & marker details"));
+    extra.append(strokeDetails);
     styleDetails.append(
       el("p", "ce-help", "Applies unless a curve has its own style below."),
     );
     toggle(
       styleDetails,
       "palette",
-      "Use a different color for each curve",
+      "Use shared run colors",
       draft.config.palette,
       (value) => {
         draft.config.palette = value;
@@ -1073,8 +1103,12 @@ export function openChartEditor(options: ChartEditorOptions): {
       "default",
       draft.config.style,
       draft.config.palette,
+      () => {},
+      strokeDetails,
     );
-    const details = more(panel, "Individual curves");
+    const details = el("fieldset", "ce-group");
+    details.append(el("legend", "", "Individual curves"));
+    extra.append(details);
     let styleSearch = "";
     let stylePage = 0;
     let activeId = "";
@@ -1135,6 +1169,9 @@ export function openChartEditor(options: ChartEditorOptions): {
             activeId = choice.id;
             renderSeriesForm(resolved, choice.id);
             renderSeriesList();
+            rows
+              .querySelector<HTMLButtonElement>('[aria-pressed="true"]')
+              ?.focus({ preventScroll: true });
           },
           "ce-series-button",
         );
@@ -1153,7 +1190,11 @@ export function openChartEditor(options: ChartEditorOptions): {
         }
       curveForm.replaceChildren();
       const index = resolved.findIndex((ref) => ref.id === id);
-      const style = styleFor(draft.config, id, index);
+      const style = styleFor(
+        withRunColors(draft.config, resolved, options.catalog),
+        id,
+        index,
+      );
       const patch: Partial<RunStyle> = clone(draft.config.runs[id] ?? {});
       const heading = el("h4", "", resolved[index].label);
       curveForm.append(heading);
@@ -1168,7 +1209,6 @@ export function openChartEditor(options: ChartEditorOptions): {
       });
     }
     renderSeriesList();
-    const extra = more(panel);
     number(
       extra,
       "height",
@@ -1224,6 +1264,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     effective: RunStyle,
     palette: boolean,
     commit = () => {},
+    extra: HTMLElement = parent,
   ) {
     const shapeFor = (style: RunStyle) =>
       style.width === 0 && (style.markers?.show ?? style.points)
@@ -1318,7 +1359,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         }
       },
       palette
-        ? "Turn off different colors above to choose one default color."
+        ? "Turn off shared run colors above to choose one default color."
         : "Hex, named, rgb, or hsl color.",
     );
     color.disabled = palette;
@@ -1353,9 +1394,10 @@ export function openChartEditor(options: ChartEditorOptions): {
         changed();
       },
     );
-    const extra = more(parent, "Line & marker details");
+    const basic = el("div", "ce-pair");
+    parent.append(basic);
     number(
-      extra,
+      basic,
       `${key}:width`,
       "Line width",
       effective.width,
@@ -1379,7 +1421,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       1,
     );
     number(
-      extra,
+      basic,
       `${key}:fill`,
       "Area opacity",
       effective.fill,
@@ -1391,7 +1433,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       1,
     );
     number(
-      extra,
+      basic,
       `${key}:marker-size`,
       "Point size",
       effective.markers?.size ?? effective.pointSize,
@@ -1609,10 +1651,19 @@ export function openChartEditor(options: ChartEditorOptions): {
       previewStatus.textContent = "Loading complete histories…";
       const [data, module] = await Promise.all([pendingLoad, import("./plot")]);
       if (closed || version !== previewVersion) return;
-      const config = clone(valid.config);
+      const config = withRunColors(
+        clone(valid.config),
+        sources,
+        options.catalog,
+      );
+      config.xLabel = editorAxisTitle(valid, "x");
+      config.yLabel = editorAxisTitle(valid, "y");
       // Preview fits its pane; saved dimensions remain untouched.
       config.width = null;
-      config.height = Math.min(config.height, 440);
+      config.height = Math.min(
+        config.height,
+        window.matchMedia("(max-width: 760px)").matches ? 180 : 440,
+      );
       const analyzed = module.analyze(data, config);
       if (valid.outliers === "robust") {
         const [lo, hi] = explicitRangeBounds(effectiveRange(config, "y"));
@@ -1697,7 +1748,6 @@ export function openChartEditor(options: ChartEditorOptions): {
     if (errors.size) {
       const first = fields.get(errors.keys().next().value!);
       if (first) {
-        showSection(first.section);
         let parent = first.control.parentElement;
         while (parent && parent !== dialog) {
           if (parent instanceof HTMLDetailsElement) parent.open = true;
@@ -1736,6 +1786,8 @@ export function openChartEditor(options: ChartEditorOptions): {
     ++previewVersion;
     clearTimeout(previewTimer);
     loadAbort?.abort();
+    window.removeEventListener("nset:run-colors-changed", schedulePreview);
+    window.removeEventListener("resize", schedulePreview);
     clearPreview();
     dialog.close();
     dialog.remove();
@@ -1751,7 +1803,8 @@ export function openChartEditor(options: ChartEditorOptions): {
   renderData();
   renderAxes();
   renderAppearance();
-  showSection("Data");
+  window.addEventListener("nset:run-colors-changed", schedulePreview);
+  window.addEventListener("resize", schedulePreview);
   document.body.append(dialog);
   dialog.showModal();
   fields.get("title")?.control.focus();

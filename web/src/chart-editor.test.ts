@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   choicePage,
   editorSourceChoices,
+  editorAxisTitle,
   removeOverride,
   setEditorAxis,
   setEditorBounds,
@@ -195,4 +196,41 @@ test("smoothing strength has predictable positive alpha at both ends", () => {
   assert.equal(smoothingAlpha(99), 0.010000000000000009);
   assert.equal(smoothingAlpha(100), 0.01);
   assert.equal(smoothingAlpha(-10), 1);
+});
+
+test("automatic axis titles use actual metric keys, honest mixed labels, and never mutate the card", () => {
+  const card = newChart("timeseries", ["train/loss"]);
+  const before = structuredClone(card);
+  assert.equal(editorAxisTitle(card, "y"), "train/loss");
+  assert.equal(editorAxisTitle(card, "x"), "Step");
+  assert.deepEqual(card, before);
+  card.config.axis = "timestamp";
+  assert.equal(editorAxisTitle(card, "x"), "Time");
+  card.source = {
+    mode: "explicit",
+    series: [
+      { runId: "r1", key: "eval/loss", kind: "metric" },
+      { runId: "r2", key: "eval/loss", kind: "metric" },
+    ],
+  };
+  assert.equal(editorAxisTitle(card, "y"), "eval/loss");
+  card.source.series.push({ runId: "r1", key: "accuracy", kind: "metric" });
+  assert.equal(editorAxisTitle(card, "y"), "Metric value (mixed metrics)");
+  card.source = { mode: "selected", keys: [] };
+  assert.equal(editorAxisTitle(card, "y"), "Metric value");
+});
+
+test("saved axis titles and literal empty labels remain authoritative", () => {
+  const card = newChart("timeseries", ["train/loss"]);
+  card.config.yLabel = "Loss (nats)";
+  assert.equal(editorAxisTitle(card, "y"), "Loss (nats)");
+  card.config.advanced.axes = [{ label: "Epoch" }, { label: "Literal score" }];
+  assert.equal(editorAxisTitle(card, "y"), "Literal score");
+  assert.equal(editorAxisTitle(card, "x"), "Epoch");
+  (card.config.advanced.axes as any[])[1].label = "";
+  assert.equal(editorAxisTitle(card, "y"), "");
+  setEditorAxis(card.config, "y", "label", "Edited title");
+  assert.equal(editorAxisTitle(card, "y"), "Edited title");
+  setEditorAxis(card.config, "y", "label", "");
+  assert.equal(editorAxisTitle(card, "y"), "train/loss");
 });
