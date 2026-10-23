@@ -5,6 +5,7 @@ type FixtureOptions = {
   explicit?: boolean;
   image?: boolean;
   delayed?: boolean;
+  constant?: boolean;
   advanced?: boolean;
   saveError?: boolean;
   many?: boolean;
@@ -123,6 +124,9 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
       loads: [],
       aborted: [],
       rejectSave: !!options.saveError,
+      delay: options.delayed ? 3000 : 0,
+      ignoreAbort: false,
+      failLoads: false,
     };
     const store = {
       clear() {},
@@ -135,16 +139,23 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
             (runs.find((run) => run.id === ref.runId)?.created_at ?? 0) +
             1000 +
             i * i,
-          value: i === 177 ? 900 : 1 + Math.exp(-i / 100),
+          value: options.constant
+            ? 5
+            : i === 177
+              ? 900
+              : 1 + Math.exp(-i / 100),
         }));
-        if (!options.delayed) return Promise.resolve(points);
+        if (state.failLoads)
+          return Promise.reject(new Error("History offline"));
+        if (!state.delay) return Promise.resolve(points);
         return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => resolve(points), 3000);
+          const timer = setTimeout(() => resolve(points), state.delay);
           signal?.addEventListener(
             "abort",
             () => {
-              clearTimeout(timer);
               state.aborted.push(ref.key);
+              if (state.ignoreAbort) return;
+              clearTimeout(timer);
               reject(new DOMException("Aborted", "AbortError"));
             },
             { once: true },
@@ -1287,5 +1298,503 @@ test("default style edits survive axis clones, preview, save and reopen", async 
     await expect(
       dialog(page).getByLabel("Use shared run colors", { exact: true }),
     ).not.toBeChecked();
+  }
+});
+
+// Capture variants are test-only. B is applied only inside a retained rx worktree.
+for (const viewport of [
+  { width: 1440, height: 1000 },
+  { width: 390, height: 844 },
+]) {
+  test(`preview continuity capture ${viewport.width}`, async ({
+    page,
+  }, testInfo) => {
+    const variant = process.env.NSET_EDITOR_CAPTURE;
+    test.skip(!variant, "Opt-in baseline/A/B render evidence");
+    await page.setViewportSize(viewport);
+    await fixture(page);
+    const host = dialog(page).locator('[data-role="preview"]');
+    const status = dialog(page).locator('.ce-preview [role="status"]');
+    await expect(host).toHaveAttribute("data-observation-count", "301");
+    const capture = async (phase: string) => {
+      const geometry = await page.evaluate(() => {
+        const rect = (selector: string) => {
+          const element = document.querySelector(selector)!;
+          const r = element.getBoundingClientRect();
+          return {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+            scrollWidth: element.scrollWidth,
+            clientWidth: element.clientWidth,
+          };
+        };
+        return {
+          viewport: { width: innerWidth, height: innerHeight },
+          documentWidth: document.documentElement.scrollWidth,
+          dialog: rect(".chart-editor"),
+          preview: rect(".ce-preview"),
+          host: rect(".ce-preview-plot"),
+          footer: rect(".ce-footer"),
+          status: document.querySelector('.ce-preview [role="status"]')!
+            .textContent,
+          count: document
+            .querySelector(".ce-preview-plot")!
+            .getAttribute("data-observation-count"),
+          canvases: [
+            ...document.querySelectorAll(".ce-preview-plot canvas"),
+          ].map((c) => {
+            const canvas = c as HTMLCanvasElement;
+            const bytes = canvas
+              .getContext("2d")!
+              .getImageData(0, 0, canvas.width, canvas.height).data;
+            return {
+              width: canvas.width,
+              height: canvas.height,
+              paintedPixels: bytes.filter((_, i) => i % 4 === 3 && bytes[i] > 0)
+                .length,
+            };
+          }),
+        };
+      });
+      expect(geometry.documentWidth).toBeLessThanOrEqual(viewport.width);
+      expect(geometry.dialog.scrollWidth).toBeLessThanOrEqual(
+        geometry.dialog.clientWidth,
+      );
+      await testInfo.attach(`${variant}-${phase}-geometry`, {
+        body: JSON.stringify(geometry, null, 2),
+        contentType: "application/json",
+      });
+      await page.screenshot({
+        path: testInfo.outputPath(`${variant}-${phase}.png`),
+        fullPage: true,
+      });
+      console.log(
+        JSON.stringify({ kind: "capture", variant, phase, ...geometry }),
+      );
+    };
+    await capture("ready");
+    await page.evaluate(() => {
+      (window as any).__editor.delay = 1600;
+    });
+    await dialog(page)
+      .getByRole("checkbox", { name: /eval\/accuracy —/ })
+      .check();
+    await expect(status).toContainText(
+      variant === "A"
+        ? "Previous preview · updating sources"
+        : "Loading complete histories",
+    );
+    await page.waitForTimeout(750);
+    if (variant === "A")
+      await expect(host).toHaveAttribute("data-observation-count", "301");
+    else await expect(host).not.toHaveAttribute("data-observation-count");
+    await capture("loading");
+    await expect(host).toHaveAttribute("data-observation-count", "602");
+    await dialog(page)
+      .getByLabel("Y bounds", { exact: true })
+      .selectOption("manual");
+    await dialog(page).getByLabel("Y maximum", { exact: true }).fill("10");
+    await expect(status).toContainText("602 observations");
+    await dialog(page).getByLabel("Y minimum", { exact: true }).fill("20");
+    await expect(status).toContainText(
+      variant === "baseline"
+        ? "Correct the highlighted fields"
+        : "Previous preview · fix highlighted fields",
+    );
+    await page.waitForTimeout(750);
+    await capture("invalid");
+    await dialog(page)
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    expect((await state(page)).saved).toEqual([]);
+    await dialog(page).getByLabel("Y maximum", { exact: true }).fill("30");
+    await expect(status).toContainText("602 observations");
+    await capture("corrected");
+    await dialog(page)
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    expect((await state(page)).card).toEqual((await state(page)).original);
+  });
+}
+
+test("last-good scalar content survives pending histories and invalid drafts; newest request wins", async ({
+  page,
+}) => {
+  await fixture(page);
+  const host = dialog(page).locator('[data-role="preview"]');
+  const status = dialog(page).locator('.ce-preview [role="status"]');
+  await expect(host).toHaveAttribute("data-observation-count", "301");
+  const originalCanvas = await host.locator("canvas").first().elementHandle();
+  const pixels = await originalCanvas!.evaluate((canvas: HTMLCanvasElement) =>
+    canvas.toDataURL(),
+  );
+  await page.evaluate(() => {
+    Object.assign((window as any).__editor, { delay: 1600, ignoreAbort: true });
+  });
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .check();
+  await expect(status).toHaveText("Previous preview · updating sources…");
+  await dialog(page)
+    .getByLabel("Chart title", { exact: true })
+    .fill("New comparison");
+  await page.waitForTimeout(750);
+  expect(
+    await originalCanvas!.evaluate((canvas: HTMLCanvasElement) => ({
+      connected: canvas.isConnected,
+      pixels: canvas.toDataURL(),
+    })),
+  ).toEqual({ connected: true, pixels });
+  await expect(dialog(page).locator(".ce-preview h3")).toHaveText(
+    "Training loss",
+  );
+  await expect(host).toHaveAttribute("data-observation-count", "301");
+  // A non-cooperative old request must not overwrite the newer result or its status.
+  await page.evaluate(() => {
+    (window as any).__editor.delay = 0;
+  });
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .uncheck();
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await expect(dialog(page).locator(".ce-preview h3")).toHaveText(
+    "New comparison",
+  );
+  const renders = (await state(page)).renderCount;
+  await page.waitForTimeout(1700);
+  expect((await state(page)).renderCount).toBe(renders);
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await dialog(page)
+    .getByLabel("Y bounds", { exact: true })
+    .selectOption("manual");
+  await dialog(page).getByLabel("Y maximum", { exact: true }).fill("10");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1).config.yMax)
+    .toBe(10);
+  const boundedCanvas = await host.locator("canvas").first().elementHandle();
+  await dialog(page).getByLabel("Y minimum", { exact: true }).fill("20");
+  await expect(status).toHaveText("Previous preview · fix highlighted fields");
+  await page.waitForTimeout(750);
+  expect(await boundedCanvas!.evaluate((canvas) => canvas.isConnected)).toBe(
+    true,
+  );
+  await expect(host).toHaveAttribute("data-observation-count", "301");
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved).toEqual([]);
+  await dialog(page).getByLabel("Y maximum", { exact: true }).fill("30");
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await dialog(page)
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  expect((await state(page)).card).toEqual((await state(page)).original);
+  await expect(page.locator("#launch")).toBeFocused();
+});
+
+test("failed scalar replacement retains previous content with retry; empty and image transitions clear it", async ({
+  page,
+}) => {
+  await fixture(page);
+  const host = dialog(page).locator('[data-role="preview"]');
+  const status = dialog(page).locator('.ce-preview [role="status"]');
+  await expect(host).toHaveAttribute("data-observation-count", "301");
+  const canvas = await host.locator("canvas").first().elementHandle();
+  await page.evaluate(() => {
+    (window as any).__editor.failLoads = true;
+  });
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .check();
+  await expect(status).toHaveText(
+    "Previous preview · update unavailable: History offline",
+  );
+  expect(await canvas!.evaluate((node) => node.isConnected)).toBe(true);
+  await page.evaluate(() => {
+    (window as any).__editor.failLoads = false;
+  });
+  await dialog(page).getByRole("button", { name: /Retry/ }).click();
+  await expect(status).toHaveText("2 curve(s) · 602 observations");
+  expect((await state(page)).plots.at(-1).counts).toEqual([301, 301]);
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .uncheck();
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .uncheck();
+  await expect(status).toHaveText("Choose a source in Data to see a preview.");
+  await expect(host.locator("canvas")).toHaveCount(0);
+  await expect(host).not.toHaveAttribute("data-observation-count");
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .check();
+  await expect(host).toHaveAttribute("data-observation-count", "301");
+  await dialog(page)
+    .getByLabel("Plot type", { exact: true })
+    .selectOption("image");
+  await expect(host.locator("canvas")).toHaveCount(0);
+  await expect(host).not.toHaveAttribute("data-observation-count");
+  await expect(status).not.toContainText("Previous preview");
+  await dialog(page)
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  expect((await state(page)).saved).toEqual([]);
+});
+
+for (const action of ["Cancel", "Escape"]) {
+  test(`${action} aborts pending replacement while retaining scalar content and saves nothing`, async ({
+    page,
+  }) => {
+    await fixture(page);
+    const host = dialog(page).locator('[data-role="preview"]');
+    await expect(host).toHaveAttribute("data-observation-count", "301");
+    await page.evaluate(() => {
+      (window as any).__editor.delay = 3000;
+    });
+    await dialog(page)
+      .getByRole("checkbox", { name: /eval\/accuracy —/ })
+      .check();
+    await expect(
+      dialog(page).locator('.ce-preview [role="status"]'),
+    ).toHaveText("Previous preview · updating sources…");
+    await expect(host).toHaveAttribute("data-observation-count", "301");
+    if (action === "Escape") await page.keyboard.press("Escape");
+    else
+      await dialog(page)
+        .getByRole("button", { name: action, exact: true })
+        .click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect((await state(page)).aborted.sort()).toEqual([
+      "eval/accuracy",
+      "train/loss",
+    ]);
+    expect((await state(page)).saved).toEqual([]);
+    expect((await state(page)).card).toEqual((await state(page)).original);
+    await expect(page.locator("#launch")).toBeFocused();
+  });
+}
+
+for (const scenario of [
+  { name: "automatic", config: {}, applies: true },
+  {
+    name: "one-sided manual",
+    config: { yMax: 1000 },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "two-sided manual",
+    config: { yMin: 0, yMax: 1000 },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "advanced manual",
+    config: { advanced: { scales: { y: { range: [null, 1000], dir: -1 } } } },
+    applies: false,
+    reason: "manual limits",
+  },
+  {
+    name: "custom range",
+    config: {
+      advanced: {
+        scales: {
+          y: { range: { min: { hard: 0 }, max: { soft: 1000 } }, dir: -1 },
+        },
+      },
+    },
+    applies: false,
+    reason: "custom range rules",
+  },
+  { name: "constant values", config: {}, constant: true, applies: false },
+]) {
+  test(`effective robust-range feedback: ${scenario.name}`, async ({
+    page,
+  }, testInfo) => {
+    await fixture(page, {
+      config: scenario.config,
+      constant: scenario.constant,
+    });
+    const status = dialog(page).locator('.ce-preview [role="status"]');
+    const policy = dialog(page).getByLabel("Y auto range", { exact: true });
+    await expect(status).toHaveText("1 curve(s) · 301 observations");
+    const before = (await state(page)).plots.at(-1).config;
+    await expect(policy).toBeEnabled();
+    if (scenario.reason)
+      await expect(
+        dialog(page).getByText(
+          `Saved for automatic bounds; ${scenario.reason} are active.`,
+          { exact: true },
+        ),
+      ).toBeVisible();
+    const renders = (await state(page)).renderCount;
+    await policy.selectOption("robust");
+    await expect
+      .poll(async () => (await state(page)).renderCount)
+      .toBeGreaterThan(renders);
+    await expect(status).toHaveText(
+      `1 curve(s) · 301 observations${scenario.applies ? " · Central 98% display" : ""}`,
+    );
+    const current = (await state(page)).plots.at(-1);
+    expect(current.counts).toEqual([301]);
+    if (scenario.applies) {
+      expect(current.config.yMin).not.toBeNull();
+      expect(current.config.yMax).toBeLessThan(3);
+    } else {
+      expect(current.config).toEqual(before);
+    }
+    if (process.env.NSET_EDITOR_CAPTURE)
+      await page.screenshot({
+        path: testInfo.outputPath("effective-range.png"),
+        fullPage: true,
+      });
+    await dialog(page)
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    const result = await state(page);
+    expect(result.saved[0].outliers).toBe("robust");
+    expect(result.saved[0].config).toEqual(result.original.config);
+    expect(result.card).toEqual(result.original);
+    expect(result.loads).toHaveLength(1);
+  });
+}
+
+test("automatic bounds reactivate the saved robust policy without reloading histories", async ({
+  page,
+}) => {
+  await fixture(page, { config: { yMax: 1000 } });
+  const status = dialog(page).locator('.ce-preview [role="status"]');
+  const policy = dialog(page).getByLabel("Y auto range", { exact: true });
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await policy.selectOption("robust");
+  await dialog(page)
+    .getByLabel("Y bounds", { exact: true })
+    .selectOption("auto");
+  await expect(policy).toHaveValue("robust");
+  await expect(status).toHaveText(
+    "1 curve(s) · 301 observations · Central 98% display",
+  );
+  await expect(
+    dialog(page).getByText(/Saved for automatic bounds;/),
+  ).toHaveCount(0);
+  await policy.selectOption("all");
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  expect((await state(page)).plots.at(-1).config.yMax).toBeNull();
+  expect((await state(page)).plots.at(-1).max).toBe(900);
+  expect((await state(page)).loads).toHaveLength(1);
+});
+
+test("reused scalar preview reports current unavailable-source warnings", async ({
+  page,
+}) => {
+  await fixture(page, { explicit: true });
+  await dialog(page)
+    .getByRole("checkbox", { name: /train\/loss —/ })
+    .check();
+  const status = dialog(page).locator('.ce-preview [role="status"]');
+  await expect(status).toHaveText("1 curve(s) · 301 observations");
+  await expect(dialog(page).locator(".ce-preview")).toContainText(
+    "1 source(s) unavailable.",
+  );
+  await dialog(page)
+    .getByRole("checkbox", { name: /old\/loss/ })
+    .click();
+  await expect(dialog(page).getByRole("checkbox", { name: /old\/loss/ })).toHaveCount(0);
+  await dialog(page)
+    .getByRole("checkbox", { name: /eval\/accuracy —/ })
+    .check();
+  await expect(status).toHaveText("2 curve(s) · 602 observations");
+  await expect(dialog(page).locator(".ce-preview")).not.toContainText(
+    "unavailable",
+  );
+});
+
+test("full editor journey cancels unchanged, then saves exact sources, range, and smoothing", async ({
+  page,
+}) => {
+  await fixture(page);
+  const original = (await state(page)).original;
+  const status = () => dialog(page).locator('.ce-preview [role="status"]');
+  for (const action of ["Cancel", "Save changes"]) {
+    await expect(status()).toHaveText("1 curve(s) · 301 observations");
+    await dialog(page)
+      .getByRole("checkbox", { name: /eval\/accuracy —/ })
+      .check();
+    await expect(status()).toHaveText("2 curve(s) · 602 observations");
+    await dialog(page)
+      .getByLabel("Y scale", { exact: true })
+      .selectOption("log");
+    await dialog(page)
+      .getByLabel("Y bounds", { exact: true })
+      .selectOption("manual");
+    await dialog(page).getByLabel("Y minimum", { exact: true }).fill("0.1");
+    await dialog(page).getByLabel("Y maximum", { exact: true }).fill("1000");
+    await dialog(page)
+      .getByRole("slider", { name: "Smoothing strength" })
+      .fill("50");
+    await expect
+      .poll(async () => (await state(page)).plots.at(-1).config.yMax)
+      .toBe(1000);
+    await page.evaluate(() => {
+      (window as any).__editor.delay = 1000;
+    });
+    await dialog(page)
+      .getByRole("checkbox", { name: /train\/loss —/ })
+      .uncheck();
+    await expect(status()).toHaveText("Previous preview · updating sources…");
+    await expect(dialog(page).locator('[data-role="preview"]')).toHaveAttribute(
+      "data-observation-count",
+      "602",
+    );
+    await expect(status()).toHaveText("1 curve(s) · 301 observations");
+    const expected = (await state(page)).plots.at(-1).config;
+    await dialog(page)
+      .getByRole("button", { name: action, exact: true })
+      .click();
+    expect((await state(page)).card).toEqual(original);
+    if (action === "Cancel") {
+      expect((await state(page)).saved).toEqual([]);
+      await page.evaluate(() => {
+        (window as any).__editor.delay = 0;
+      });
+      await page.locator("#launch").click();
+      await expect(
+        dialog(page).getByLabel("Y scale", { exact: true }),
+      ).toHaveValue(original.config.yScale);
+      await expect(
+        dialog(page).getByRole("slider", { name: "Smoothing strength" }),
+      ).toHaveValue("0");
+    } else {
+      const saved = (await state(page)).saved[0];
+      expect(saved.source).toEqual({
+        mode: "selected",
+        keys: ["eval/accuracy"],
+      });
+      expect(saved.config.yScale).toBe("log");
+      expect(saved.config.yMin).toBe(0.1);
+      expect(saved.config.yMax).toBe(1000);
+      expect(saved.config.smoothing).toBe(expected.smoothing);
+      expect(saved.config.alpha).toBe(expected.alpha);
+      // Emulate the host persisting its successful Save result before reopening.
+      await page.evaluate(() => {
+        const state = (window as any).__editor;
+        Object.assign(state.card, state.saved[0]);
+        state.delay = 0;
+      });
+      await page.locator("#launch").click();
+      await expect(
+        dialog(page).getByLabel("Y minimum", { exact: true }),
+      ).toHaveValue("0.1");
+      await expect(
+        dialog(page).getByLabel("Y maximum", { exact: true }),
+      ).toHaveValue("1000");
+      await expect(
+        dialog(page).getByRole("slider", { name: "Smoothing strength" }),
+      ).toHaveValue("50");
+      await expect(status()).toHaveText("1 curve(s) · 301 observations");
+      expect((await state(page)).card).toEqual(saved);
+    }
   }
 });

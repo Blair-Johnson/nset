@@ -90,6 +90,16 @@ export function setEditorBounds(
   removeOverride(config, ["scales", axis, "range"]);
   removeOverride(config, ["scales", axis, "auto"]);
 }
+/** Explain the effective range without changing the saved auto-range preference. */
+export function editorAutoRangeHelp(config: ViewConfig): string {
+  const range = effectiveRange(config, "y");
+  if (!Array.isArray(range))
+    return "Saved for automatic bounds; custom range rules are active.";
+  const [lo, hi] = explicitRangeBounds(range);
+  if (lo !== null || hi !== null)
+    return "Saved for automatic bounds; manual limits are active.";
+  return "Display only: Central 98% fits the 1st–99th percentiles. No observations are removed.";
+}
 export function setEditorAxis(
   config: ViewConfig,
   axis: "x" | "y",
@@ -262,6 +272,8 @@ export function openChartEditor(options: ChartEditorOptions): {
   let pendingLoad: Promise<PlotRun[]> | undefined;
   let loadAbort: AbortController | undefined;
   let plot: PlotPanel | undefined;
+  let renderedScalarKind: ChartSpec["kind"] | undefined;
+  let renderedUnavailable = 0;
   let images: ImagePanel | undefined;
   let imageToken = "";
   const errors = new Map<string, string>();
@@ -391,6 +403,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
   function change() {
     saveError.textContent = "";
+    refreshAutoRangeHelp();
     schedulePreview();
   }
   function input(
@@ -525,7 +538,6 @@ export function openChartEditor(options: ChartEditorOptions): {
       draft.title = value;
       setError("title", value.trim() ? "" : "Give this chart a title.");
       removeOverride(draft.config, ["title"]);
-      previewTitle.textContent = value || "Untitled chart";
     });
     select(
       panel,
@@ -968,10 +980,18 @@ export function openChartEditor(options: ChartEditorOptions): {
       (value) => {
         draft.outliers = value as ChartSpec["outliers"];
       },
-      "Display only: Central 98% fits the 1st–99th percentiles. No observations are removed. Set limits take precedence.",
+      editorAutoRangeHelp(draft.config),
     );
     panel.append(advanced);
     refreshAxisTitles();
+  }
+
+  function refreshAutoRangeHelp() {
+    const hint = fields
+      .get("outliers")
+      ?.control.closest(".ce-field")
+      ?.querySelector(".ce-help");
+    if (hint) hint.textContent = editorAutoRangeHelp(draft.config);
   }
 
   function refreshAxisTitles() {
@@ -1513,19 +1533,27 @@ export function openChartEditor(options: ChartEditorOptions): {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(() => void updatePreview(previewVersion), 100);
   }
+  function hasPreviousScalarPreview() {
+    return (
+      !!plot && draft.kind !== "image" && renderedScalarKind === draft.kind
+    );
+  }
   function clearPreview() {
     plot?.destroy();
     plot = undefined;
+    renderedScalarKind = undefined;
     images?.destroy();
     images = undefined;
     imageToken = "";
     previewHost.replaceChildren();
+    previewTitle.textContent = draft.title || "Untitled chart";
     delete previewHost.dataset.observationCount;
   }
   async function updatePreview(version: number) {
     if (closed || version !== previewVersion) return;
     retry.hidden = true;
-    previewTitle.textContent = draft.title || "Untitled chart";
+    if (!hasPreviousScalarPreview())
+      previewTitle.textContent = draft.title || "Untitled chart";
     const sources = resolveSources(
       draft,
       options.selectedRunIds,
@@ -1540,7 +1568,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       loadAbort = undefined;
       pendingLoad = undefined;
       sourceToken = token;
-      clearPreview();
+      if (!hasPreviousScalarPreview()) clearPreview();
     }
     const unavailable = editorSourceChoices(
       draft,
@@ -1556,17 +1584,22 @@ export function openChartEditor(options: ChartEditorOptions): {
       return;
     }
     if (errors.size) {
-      clearPreview();
-      previewStatus.textContent =
-        "Correct the highlighted fields to update the preview.";
+      const previous = hasPreviousScalarPreview();
+      if (!previous) clearPreview();
+      previewStatus.textContent = previous
+        ? "Previous preview · fix highlighted fields"
+        : "Correct the highlighted fields to update the preview.";
       return;
     }
     let valid: ChartSpec;
     try {
       valid = validateChart(clone(draft));
     } catch (error) {
-      clearPreview();
-      previewStatus.textContent = `Preview paused: ${textError(error)}`;
+      const previous = hasPreviousScalarPreview();
+      if (!previous) clearPreview();
+      previewStatus.textContent = previous
+        ? `Previous preview · fix highlighted fields: ${textError(error)}`
+        : `Preview paused: ${textError(error)}`;
       return;
     }
     try {
@@ -1642,7 +1675,9 @@ export function openChartEditor(options: ChartEditorOptions): {
           })),
         );
       }
-      previewStatus.textContent = "Loading complete histories…";
+      previewStatus.textContent = hasPreviousScalarPreview()
+        ? "Previous preview · updating sources…"
+        : "Loading complete histories…";
       const [data, module] = await Promise.all([pendingLoad, import("./plot")]);
       if (closed || version !== previewVersion) return;
       const config = withRunColors(
@@ -1659,6 +1694,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         window.matchMedia("(max-width: 760px)").matches ? 240 : 440,
       );
       const analyzed = module.analyze(data, config);
+      let robustRangeApplied = false;
       if (valid.outliers === "robust") {
         const [lo, hi] = explicitRangeBounds(effectiveRange(config, "y"));
         if (
@@ -1686,8 +1722,10 @@ export function openChartEditor(options: ChartEditorOptions): {
               values[Math.ceil(i)] * (i % 1)
             );
           };
-          if (values.length && percentile(0.01) < percentile(0.99))
+          if (values.length && percentile(0.01) < percentile(0.99)) {
             setEditorBounds(config, "y", percentile(0.01), percentile(0.99));
+            robustRangeApplied = true;
+          }
         }
       }
       plot ??= new module.PlotPanel(
@@ -1696,22 +1734,30 @@ export function openChartEditor(options: ChartEditorOptions): {
         (warnings) => {
           if (!closed)
             previewWarnings.textContent = [
-              unavailable ? `${unavailable} source(s) unavailable.` : "",
+              renderedUnavailable
+                ? `${renderedUnavailable} source(s) unavailable.`
+                : "",
               ...warnings,
             ]
               .filter(Boolean)
               .join(" ");
         },
       );
+      renderedUnavailable = unavailable;
       plot.render(analyzed, config, { a: null, b: null, threshold: null });
+      renderedScalarKind = valid.kind;
+      previewTitle.textContent = valid.title || "Untitled chart";
       const count = data.reduce((sum, series) => sum + series.raw.length, 0);
-      previewStatus.textContent = `${sources.length} curve(s) · ${count.toLocaleString()} observations${valid.outliers === "robust" ? " · Central 98% display" : ""}`;
+      previewStatus.textContent = `${sources.length} curve(s) · ${count.toLocaleString()} observations${robustRangeApplied ? " · Central 98% display" : ""}`;
       previewHost.dataset.observationCount = String(count);
     } catch (error) {
       if (closed || version !== previewVersion) return;
-      clearPreview();
+      const previous = hasPreviousScalarPreview();
+      if (!previous) clearPreview();
       pendingLoad = undefined;
-      previewStatus.textContent = `Preview unavailable: ${textError(error)}`;
+      previewStatus.textContent = previous
+        ? `Previous preview · update unavailable: ${textError(error)}`
+        : `Preview unavailable: ${textError(error)}`;
       retry.hidden = false;
     }
   }
