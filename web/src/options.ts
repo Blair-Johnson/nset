@@ -136,7 +136,7 @@ export function resolveOptions(
           (config.axis === "step"
             ? "Step"
             : "Timestamp · UTC epoch milliseconds"),
-        stroke: "#8f9db4",
+        stroke: "#475569",
         font: "11px ui-monospace, monospace",
         values: formatter(
           config.axis === "timestamp" && config.xFormat === "number"
@@ -146,18 +146,18 @@ export function resolveOptions(
         space: config.axis === "timestamp" ? 170 : 50,
         size: 64,
         labelSize: 20,
-        grid: { show: config.grid, stroke: "#263347", width: 1 },
-        ticks: { show: config.ticks, stroke: "#455269" },
+        grid: { show: config.grid, stroke: "#e2e8f0", width: 1 },
+        ticks: { show: config.ticks, stroke: "#94a3b8" },
       },
       {
         label: config.yLabel || "Metric value",
-        stroke: "#8f9db4",
+        stroke: "#475569",
         font: "11px ui-monospace, monospace",
         values: formatter(config.yFormat),
         size: 76,
         labelSize: 22,
-        grid: { show: config.grid, stroke: "#263347", width: 1 },
-        ticks: { show: config.ticks, stroke: "#455269" },
+        grid: { show: config.grid, stroke: "#e2e8f0", width: 1 },
+        ticks: { show: config.ticks, stroke: "#94a3b8" },
       },
     ],
     legend: { show: config.legend, live: false },
