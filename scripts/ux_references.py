@@ -13,6 +13,7 @@ SOURCES = [
     ("wandb-line-plot", "W&B line plot", WAND + "line_plot_example.png"),
     ("wandb-run-colors", "W&B run table and colors", WAND + "line_plots_run_table_random_colors.png"),
     ("wandb-legend-settings", "W&B panel legend settings", WAND + "plot_style_line_plot_legend.png"),
+    ("wandb-media-panel", "W&B media panel", WAND + "demo-media-panel.png"),
 ]
 
 
