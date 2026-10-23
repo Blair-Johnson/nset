@@ -202,6 +202,74 @@ impl Database {
     fn reader(&self) -> &Actor {
         &self.readers[self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len()]
     }
+    pub async fn catalog(&self) -> Result<Catalog> {
+        self.reader()
+            .call(|conn| {
+                // One read-only actor and one snapshot for discovery across all experiments.
+                let tx = conn.transaction()?;
+                let experiments = tx
+                    .prepare(
+                        "SELECT id,name,created_at FROM experiments ORDER BY created_at DESC,id",
+                    )?
+                    .query_map([], |row| {
+                        Ok(Experiment {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            created_at: row.get(2)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                let runs = tx
+                    .prepare(&format!(
+                        "SELECT {RUN_COLUMNS} FROM runs ORDER BY created_at DESC,id DESC"
+                    ))?
+                    .query_map([], run_row)?
+                    .collect::<rusqlite::Result<_>>()?;
+                // Group using the existing stream indexes, then fetch only the last row
+                // per series by primary key. No per-series SQL or full histories in memory.
+                // Images have UUID ids, so their implicit rowid (not step/time/id) records
+                // insertion order in the existing append-only table. Indexes include rowid.
+                let series = tx
+                    .prepare(
+                        "WITH metric_summary AS (
+                            SELECT run_id,key,COUNT(*) AS count,MAX(seq) AS last_id
+                            FROM metrics GROUP BY run_id,key
+                        ), image_summary AS (
+                            SELECT run_id,key,COUNT(*) AS count,MAX(rowid) AS last_id
+                            FROM images GROUP BY run_id,key
+                        )
+                        SELECT s.run_id,s.key,0 AS kind,s.count,m.step,m.timestamp,m.value
+                        FROM metric_summary s JOIN metrics m ON m.seq=s.last_id
+                        UNION ALL
+                        SELECT s.run_id,s.key,1 AS kind,s.count,i.step,i.timestamp,NULL
+                        FROM image_summary s JOIN images i ON i.rowid=s.last_id
+                        ORDER BY 1,2,3",
+                    )?
+                    .query_map([], |row| {
+                        Ok(CatalogSeries {
+                            run_id: row.get(0)?,
+                            key: row.get(1)?,
+                            kind: if row.get::<_, i64>(2)? == 0 {
+                                SeriesKind::Metric
+                            } else {
+                                SeriesKind::Image
+                            },
+                            count: row.get(3)?,
+                            last_step: row.get(4)?,
+                            last_timestamp: row.get(5)?,
+                            last_value: row.get(6)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                tx.commit()?;
+                Ok(Catalog {
+                    experiments,
+                    runs,
+                    series,
+                })
+            })
+            .await
+    }
     pub async fn experiments(&self) -> Result<Vec<Experiment>> {
         self.reader()
             .call(|conn| {

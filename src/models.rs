@@ -75,6 +75,29 @@ pub struct Run {
     pub created_at: i64,
     pub updated_at: i64,
 }
+/// Compact discovery metadata; observations and image contents stay on their own routes.
+#[derive(Serialize, Debug)]
+pub struct Catalog {
+    pub experiments: Vec<Experiment>,
+    pub runs: Vec<Run>,
+    pub series: Vec<CatalogSeries>,
+}
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum SeriesKind {
+    Metric,
+    Image,
+}
+#[derive(Serialize, Debug)]
+pub struct CatalogSeries {
+    pub run_id: String,
+    pub key: String,
+    pub kind: SeriesKind,
+    pub count: i64,
+    pub last_step: i64,
+    pub last_timestamp: i64,
+    pub last_value: Option<f64>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewRun {
