@@ -1,0 +1,243 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  defaultSections,
+  exportWorkspace,
+  importWorkspace,
+  loadLibrary,
+  newChart,
+  newWorkspace,
+  resolveSources,
+  saveLibrary,
+  seriesId,
+  validateChart,
+  validateWorkspace,
+} from "./workspace";
+import type { Catalog, WorkspaceLibrary } from "./workspace-types";
+
+function catalog(): Catalog {
+  return {
+    experiments: ["e1", "e2"].map((id) => ({ id, name: id, created_at: 1 })),
+    runs: ["r1", "r2"].map((id, i) => ({
+      id,
+      name: "Run",
+      experiment_id: `e${i + 1}`,
+      status: "finished",
+      params: {},
+      tags: {},
+      created_at: 1,
+      updated_at: 2,
+    })),
+    series: [
+      { run_id: "r1", key: "train/loss", kind: "metric" },
+      { run_id: "r1", key: "train/accuracy", kind: "metric" },
+      { run_id: "r1", key: "train/sample", kind: "image" },
+      { run_id: "r2", key: "train/loss", kind: "metric" },
+      { run_id: "r1", key: "score", kind: "metric" },
+      { run_id: "r1", key: "train/deep/loss", kind: "metric" },
+    ].map((s) => ({
+      ...s,
+      kind: s.kind as "metric" | "image",
+      count: 0,
+      last_step: 0,
+      last_timestamp: 1,
+      last_value: s.kind === "image" ? null : 0,
+    })),
+  };
+}
+function storage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (i) => [...values.keys()][i] ?? null,
+    removeItem: (key) => {
+      values.delete(key);
+    },
+    setItem: (key, value) => {
+      values.set(key, value);
+    },
+  };
+}
+test("default sections mix media, retain nested namespaces and use stable identities", () => {
+  const c = catalog();
+  const sections = defaultSections(c, ["r1"]);
+  assert.deepEqual(
+    sections.map((s) => s.title),
+    ["Overview", "train", "train/deep"],
+  );
+  assert.deepEqual(
+    sections[1].cards.map((c) => c.kind),
+    ["timeseries", "timeseries", "image"],
+  );
+  assert.deepEqual(
+    defaultSections({ ...c, series: [...c.series].reverse() }, ["r1"]),
+    sections,
+  );
+  assert.deepEqual(defaultSections(c, []), []);
+  assert.deepEqual(newWorkspace("e1", "Empty", [], c).selectedRunIds, []);
+});
+test("selected sources have distinct metrics per run, escaped IDs and readable labels", () => {
+  const c = catalog(),
+    card = newChart("timeseries", ["train/loss", "train/accuracy"]);
+  const resolved = resolveSources(card, ["r1", "r1", "r2"], c);
+  assert.equal(resolved.length, 3);
+  assert.equal(new Set(resolved.map((s) => s.id)).size, 3);
+  assert.ok(
+    resolved.every((s) => s.label.includes("Run") && s.label.includes(s.key)),
+  );
+  assert.notEqual(
+    seriesId({ runId: "a/b", key: "c", kind: "metric" }),
+    seriesId({ runId: "a", key: "b/c", kind: "metric" }),
+  );
+  assert.notEqual(
+    seriesId({ runId: "a", key: "b", kind: "metric" }),
+    seriesId({ runId: "a", key: "b", kind: "image" }),
+  );
+});
+test("explicit cross-experiment bindings ignore selection and preserve unavailable references", () => {
+  const card = newChart("timeseries", []);
+  card.source = {
+    mode: "explicit",
+    series: [
+      { runId: "r2", key: "train/loss", kind: "metric" },
+      { runId: "missing", key: "train/loss", kind: "metric" },
+      { runId: "r1", key: "train/sample", kind: "image" },
+    ],
+  };
+  assert.deepEqual(
+    resolveSources(card, ["r1"], catalog()).map((s) => s.runId),
+    ["r2"],
+  );
+  assert.equal(card.source.series.length, 3);
+});
+test("new charts have unique IDs, safe light defaults and no implicit selection", () => {
+  const a = newChart("timeseries", []),
+    b = newChart("timeseries", []);
+  assert.notEqual(a.id, b.id);
+  assert.equal(a.config.height, 280);
+  assert.equal(a.config.style.color, "#2563eb");
+  assert.equal(a.outliers, "all");
+  assert.equal(a.config.smoothing, false);
+  assert.deepEqual(a.source, { mode: "selected", keys: [] });
+  assert.deepEqual(validateChart(a), a);
+});
+test("workspace/library round trip retains only config and references", () => {
+  const view = newWorkspace("e1", "Named view", ["r1"], catalog());
+  assert.deepEqual(importWorkspace(exportWorkspace(view)), view);
+  const library: WorkspaceLibrary = {
+    version: 2,
+    views: [view],
+    activeByExperiment: { e1: view.id },
+  };
+  const target = storage();
+  saveLibrary(library, target);
+  assert.deepEqual(loadLibrary(target), library);
+  assert.equal(
+    target.getItem("nset.workspaces.v2")?.includes("last_value"),
+    false,
+  );
+  assert.equal(target.getItem("nset.workspaces.v2")?.includes("params"), false);
+});
+test("unsafe imports reject unknown fields/modes, duplicate IDs and prototype pollution", () => {
+  const view = newWorkspace("e1", "Named", ["r1"], catalog());
+  for (const field of ["token", "credentials", "points", "rawValues"])
+    assert.throws(() => validateWorkspace({ ...view, [field]: "secret" }));
+  assert.throws(() => importWorkspace('{"__proto__":{"polluted":true}}'));
+  assert.throws(() => importWorkspace('{"constructor":{}}'));
+  assert.throws(
+    () =>
+      validateWorkspace({
+        ...view,
+        sections: [view.sections[0], view.sections[0]],
+      }),
+    /Duplicate/,
+  );
+  const duplicate = structuredClone(view);
+  duplicate.sections[1].cards.push(duplicate.sections[0].cards[0]);
+  assert.throws(() => validateWorkspace(duplicate), /Duplicate/);
+  assert.throws(
+    () =>
+      validateChart({ ...newChart("timeseries", []), source: { mode: "all" } }),
+    /mode/,
+  );
+  assert.throws(() =>
+    validateChart({ ...newChart("timeseries", []), size: "huge" }),
+  );
+  assert.throws(() =>
+    validateChart({ ...newChart("timeseries", []), outliers: "hidden" }),
+  );
+  assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+});
+test("validation rejects duplicate references, malformed values, oversized inputs and executable objects", () => {
+  const card = newChart("timeseries", []),
+    ref = { runId: "r1", key: "loss", kind: "metric" };
+  assert.throws(
+    () =>
+      validateChart({
+        ...card,
+        source: { mode: "explicit", series: [ref, ref] },
+      }),
+    /Duplicate/,
+  );
+  assert.throws(() =>
+    validateChart({
+      ...card,
+      config: { ...card.config, advanced: { hooks: {} } },
+    }),
+  );
+  assert.throws(() =>
+    validateChart({ ...card, config: { ...card.config, height: Infinity } }),
+  );
+  assert.throws(() => importWorkspace(" ".repeat(300000)));
+  const accessor = Object.defineProperty({}, "id", {
+    enumerable: true,
+    get() {
+      throw new Error("getter was called");
+    },
+  });
+  assert.throws(() => validateWorkspace(accessor), /accessors/);
+});
+test("unavailable/corrupt storage loads safely; write failures and invalid libraries are reported", () => {
+  const target = storage();
+  target.setItem("nset.workspaces.v2", "{invalid");
+  assert.deepEqual(loadLibrary(target), {
+    version: 2,
+    views: [],
+    activeByExperiment: {},
+  });
+  const view = newWorkspace("e1", "Named", [], catalog());
+  assert.throws(
+    () =>
+      saveLibrary(
+        { version: 2, views: [view, view], activeByExperiment: {} },
+        target,
+      ),
+    /Duplicate/,
+  );
+  assert.throws(
+    () =>
+      saveLibrary(
+        { version: 2, views: [view], activeByExperiment: { e2: view.id } },
+        target,
+      ),
+    /reference/,
+  );
+  const denied = {
+    getItem() {
+      throw new Error("denied");
+    },
+    setItem() {
+      throw new Error("quota");
+    },
+  } as unknown as Storage;
+  assert.deepEqual(loadLibrary(denied).views, []);
+  assert.throws(
+    () =>
+      saveLibrary({ version: 2, views: [], activeByExperiment: {} }, denied),
+    /quota/,
+  );
+});
