@@ -704,7 +704,7 @@ test("style presets and individual overrides stay synchronized without touching 
   ).toHaveValue("0.15");
   await defaults
     .getByLabel("Curve style", { exact: true })
-    .selectOption("stepped-before");
+    .selectOption("stepped-after");
   await dialog(page).getByText("More style options", { exact: true }).click();
   await dialog(page)
     .getByRole("button", { name: /ResNet seed 1.*train\/loss/ })
@@ -721,8 +721,8 @@ test("style presets and individual overrides stay synchronized without touching 
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   const config = (await state(page)).saved[0].config;
-  expect(config.style.path).toBe("stepped-before");
-  expect(config.style.pathOptions.align).toBe(-1);
+  expect(config.style.path).toBe("stepped-after");
+  expect(config.style.pathOptions.align).toBe(1);
   expect(Object.values(config.runs)).toEqual([
     expect.objectContaining({ color: "#a21caf", visible: false }),
   ]);

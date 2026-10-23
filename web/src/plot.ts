@@ -327,10 +327,6 @@ export class PlotPanel {
         warnings.push(
           `${d.run.name}: ${rawExcluded} raw point markers are excluded from log display only.`,
         );
-      if (s.path !== "matched" && !xy)
-        warnings.push(
-          `${d.run.name}: ${s.path} is a cosmetic display path; readouts use ${config.interpolation}. Choose “matched” for adaptive numerical-curve approximation.`,
-        );
       const adaptive =
         !xy &&
         s.path === "matched" &&
