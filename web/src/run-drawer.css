@@ -97,7 +97,33 @@
   min-height: 26px;
 }
 .drawer-selection-count {
+  padding: 3px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex: none;
+}
+.drawer-selection-count[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+.drawer-outside-count {
   color: var(--muted);
+  font-size: 11px;
+}
+.run-drawer-search {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+.drawer-clear-filters {
+  flex: none;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.drawer-empty {
+  margin: 8px 2px;
+  line-height: 1.5;
 }
 .run-drawer input[type="search"],
 .run-drawer select {

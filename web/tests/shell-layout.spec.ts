@@ -153,7 +153,7 @@ test("60-run drawer retains checkbox identity, focus, filter, scroll and open st
     .getByRole("button", { name: "Select matching", exact: true })
     .click();
   await expect(drawer.locator(".drawer-selection-count")).toHaveText(
-    "31 selected",
+    "Selected (31)",
   );
   await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(30);
   const filter = await drawer
@@ -319,7 +319,7 @@ test("selection persistence failure rolls back drawer checks without replacing f
   expect(await choice.evaluate((node, old) => node === old, handle)).toBe(true);
   await expect(page.locator("#global-error")).toContainText("Storage full");
   await expect(page.locator(".drawer-selection-count")).toHaveText(
-    "1 selected",
+    "Selected (1)",
   );
 });
 
@@ -401,7 +401,7 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
     .getByRole("button", { name: "Clear selection", exact: true })
     .click();
   await expect(drawer.locator(".drawer-selection-count")).toHaveText(
-    "0 selected",
+    "Selected (0)",
   );
   await page
     .getByRole("button", { name: "Collapse run list", exact: true })
