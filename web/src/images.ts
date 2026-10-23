@@ -1,12 +1,19 @@
 import OpenSeadragon from "openseadragon";
 import { Api, type Run, type ImageFrame } from "./api";
 import { boundedIndex, element, isAbort, message, Latest } from "./utils";
+import type { ResolvedSeries } from "./workspace-types";
+import "./cards.css";
 interface Cached {
   url: string;
   bytes: number;
 }
 export class ImagePanel {
   private viewer: OpenSeadragon.Viewer;
+  private sources?: ResolvedSeries[];
+  private lifetime = new AbortController();
+  private destroyed = false;
+  private resume = false;
+  private compact: boolean;
   private runs: Run[] = [];
   private frames: ImageFrame[] = [];
   private all: ImageFrame[] = [];
@@ -34,22 +41,39 @@ export class ImagePanel {
   constructor(
     private host: HTMLElement,
     private api: Api,
+    options: { compact?: boolean } = {},
   ) {
-    const toolbar = element("div", "toolbar");
+    this.compact = options.compact ?? false;
+    this.host.classList.add("card-image-panel");
+    this.host.classList.toggle("card-image-compact", this.compact);
+    const toolbar = element("div", "card-image-toolbar");
+    const timeline = element("div", "card-image-timeline");
+    const extras = element("details", "card-image-more");
+    extras.append(element("summary", "", "More"));
+    const extraControls = element("div", "card-image-menu");
+    extras.append(extraControls);
     this.runSelect.setAttribute("aria-label", "Image run");
     this.keySelect.setAttribute("aria-label", "Image key");
     toolbar.append(this.runSelect, this.keySelect);
     const button = (label: string, fn: () => void) => {
       const b = element("button", "", label);
       b.type = "button";
+      b.title = label;
+      b.setAttribute("aria-label", label);
       b.onclick = fn;
       toolbar.append(b);
       return b;
     };
-    button("← Previous", () => void this.step(-1));
-    button("Next →", () => void this.step(1));
+    const previous = button("← Previous", () => void this.step(-1));
+    const next = button("Next →", () => void this.step(1));
+    if (this.compact) {
+      previous.textContent = "‹";
+      next.textContent = "›";
+    }
+    timeline.append(previous, this.play, next);
     this.play.onclick = () => this.togglePlay();
-    toolbar.append(this.play);
+    this.play.type = "button";
+    this.play.setAttribute("aria-label", "Play image timeline");
     for (const [value, label] of [
       ["1000", "1 fps"],
       ["500", "2 fps"],
@@ -60,9 +84,14 @@ export class ImagePanel {
       o.value = value;
       this.speed.append(o);
     }
-    toolbar.append(this.speed);
+    extraControls.append(this.speed);
     this.speed.setAttribute("aria-label", "Playback rate");
-    button("Reset view", () => this.viewer.viewport.goHome());
+    button("Zoom out", () => this.viewer.viewport.zoomBy(1 / 1.5)).textContent =
+      "−";
+    button("Zoom in", () => this.viewer.viewport.zoomBy(1.5)).textContent = "+";
+    button(this.compact ? "Fit" : "Reset view", () =>
+      this.viewer.viewport.goHome(),
+    );
     button("1:1 pixels", () => {
       const item = this.viewer.world.getItemAt(0);
       if (item)
@@ -83,14 +112,16 @@ export class ImagePanel {
     });
     sampling.title =
       "Choose smooth resampling or nearest-pixel rendering at high magnification";
-    button("Rotate ↻", () =>
+    const rotate = button("Rotate ↻", () =>
       this.viewer.viewport.setRotation(
         (this.viewer.viewport.getRotation() + 90) % 360,
       ),
     );
-    button("Flip ↔", () =>
+    const flip = button("Flip ↔", () =>
       this.viewer.viewport.setFlip(!this.viewer.viewport.getFlip()),
     );
+    extraControls.append(sampling, rotate, flip);
+    toolbar.append(extras);
     const fullscreen = button("Fullscreen", () => {
       const transition =
         document.fullscreenElement === this.host
@@ -100,15 +131,21 @@ export class ImagePanel {
         this.status.textContent = `Fullscreen unavailable: ${message(error)}`;
       });
     });
-    this.host.addEventListener("fullscreenchange", () => {
-      fullscreen.textContent =
-        document.fullscreenElement === this.host
-          ? "Exit fullscreen"
-          : "Fullscreen";
-      this.viewer.forceResize();
-    });
+    fullscreen.hidden = this.compact;
+    this.host.addEventListener(
+      "fullscreenchange",
+      () => {
+        fullscreen.textContent =
+          document.fullscreenElement === this.host
+            ? "Exit fullscreen"
+            : "Fullscreen";
+        this.viewer.forceResize();
+      },
+      { signal: this.lifetime.signal },
+    );
     const canvas = element("div", "image-canvas");
-    canvas.id = "image-viewer";
+    canvas.dataset.role = "image-viewer";
+    canvas.title = "Drag to pan · Alt + scroll to zoom";
     canvas.setAttribute("aria-label", "Native resolution image viewport");
     canvas.tabIndex = 0;
     this.slider.type = "range";
@@ -120,19 +157,10 @@ export class ImagePanel {
       this.stop();
       void this.show(Number(this.slider.value));
     };
-    this.host.append(
-      toolbar,
-      this.info,
-      canvas,
-      this.slider,
-      this.status,
-      this.cameraInfo,
-      element(
-        "p",
-        "hint",
-        "Native pixels · scroll to zoom, drag to pan · ← / → step frames · viewport retained across frames. One run/key at a time.",
-      ),
-    );
+    timeline.append(this.slider, this.info);
+    this.host.append(toolbar, canvas, timeline, this.status, this.cameraInfo);
+    this.status.setAttribute("role", "status");
+    this.cameraInfo.hidden = this.compact;
     this.viewer = OpenSeadragon({
       element: canvas,
       showNavigationControl: false,
@@ -144,8 +172,22 @@ export class ImagePanel {
       animationTime: 0.15,
       blendTime: 0,
       crossOriginPolicy: false,
-      gestureSettingsMouse: { clickToZoom: false },
+      gestureSettingsMouse: { clickToZoom: false, scrollToZoom: false },
     });
+    this.viewer.addHandler("canvas-scroll", (event) => {
+      // OpenSeadragon must not consume ordinary dashboard scrolling.
+      (event as unknown as { preventDefault: boolean }).preventDefault = false;
+    });
+    canvas.addEventListener(
+      "wheel",
+      (event) => {
+        if (!event.altKey || !this.active) return;
+        event.preventDefault();
+        this.viewer.viewport.zoomBy(Math.exp(-event.deltaY * 0.002));
+        this.viewer.viewport.applyConstraints();
+      },
+      { passive: false, signal: this.lifetime.signal },
+    );
     const updateCamera = () => {
       const item = this.viewer.world.getItemAt(0);
       if (!item) {
@@ -177,26 +219,44 @@ export class ImagePanel {
     this.viewer.world.addHandler("remove-item", updateCamera);
     this.runSelect.onchange = () => void this.load();
     this.keySelect.onchange = () => this.filter();
-    this.host.addEventListener("keydown", (e) => {
-      if (
-        !this.active ||
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLSelectElement ||
-        e.target instanceof HTMLTextAreaElement
-      )
-        return;
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        e.preventDefault();
-        this.stop();
-        void this.step(e.key === "ArrowLeft" ? -1 : 1);
-      }
-    });
+    this.host.addEventListener(
+      "keydown",
+      (e) => {
+        if (
+          !this.active ||
+          e.target instanceof HTMLInputElement ||
+          e.target instanceof HTMLSelectElement ||
+          e.target instanceof HTMLTextAreaElement
+        )
+          return;
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          this.stop();
+          void this.step(e.key === "ArrowLeft" ? -1 : 1);
+        }
+      },
+      { signal: this.lifetime.signal },
+    );
   }
   setActive(active: boolean) {
+    if (this.destroyed || this.active === active) return;
     this.active = active;
-    if (!active) this.stop();
-    else
+    if (!active) {
+      this.stop();
+      this.metadata.next();
+      this.requests.next();
+      this.metadataAbort?.abort();
+      this.frameAbort?.abort();
+      this.prefetchAbort?.abort();
+      this.resume = true;
+    } else
       requestAnimationFrame(() => {
+        if (this.destroyed || !this.active) return;
+        if (this.resume) {
+          this.resume = false;
+          void this.load();
+          return;
+        }
         if (this.active && this.needsHome && this.displayed) {
           this.viewer.viewport.resize(
             new OpenSeadragon.Point(
@@ -210,7 +270,27 @@ export class ImagePanel {
         }
       });
   }
+  setSources(sources: ResolvedSeries[]): void {
+    this.sources = sources.filter((source) => source.kind === "image");
+    const previous = this.runSelect.value;
+    this.runs = [
+      ...new Map(
+        this.sources.map((source) => [source.runId, source.run]),
+      ).values(),
+    ];
+    this.runSelect.replaceChildren();
+    for (const run of this.runs) {
+      const option = element("option", "", run.name);
+      option.value = run.id;
+      this.runSelect.append(option);
+    }
+    if (this.runs.some((run) => run.id === previous))
+      this.runSelect.value = previous;
+    this.runSelect.hidden = this.compact && this.runs.length <= 1;
+    void this.load();
+  }
   setRuns(runs: Run[]) {
+    this.sources = undefined;
     const previous = this.runSelect.value;
     this.runs = runs;
     this.runSelect.replaceChildren();
@@ -244,6 +324,9 @@ export class ImagePanel {
     this.info.textContent = "No frame loaded";
   }
   private async load() {
+    if (this.destroyed) return;
+    this.resume = false;
+    const previousKey = this.keySelect.value;
     const generation = this.metadata.next();
     this.metadataAbort?.abort();
     this.metadataAbort = new AbortController();
@@ -251,7 +334,7 @@ export class ImagePanel {
     this.keySelect.replaceChildren();
     const run = this.runSelect.value;
     if (!run) {
-      this.status.textContent = "Select a run to inspect image artifacts.";
+      this.status.textContent = "No images selected";
       return;
     }
     this.status.textContent = "Loading image metadata…";
@@ -262,12 +345,22 @@ export class ImagePanel {
       );
       if (!this.metadata.current(generation)) return;
       this.all = response.images;
-      const keys = [...new Set(this.all.map((f) => f.key))].sort();
+      const keys = this.sources
+        ? [
+            ...new Set(
+              this.sources
+                .filter((source) => source.runId === run)
+                .map((source) => source.key),
+            ),
+          ]
+        : [...new Set(this.all.map((f) => f.key))].sort();
       for (const key of keys) {
         const o = element("option", "", key);
         o.value = key;
         this.keySelect.append(o);
       }
+      if (keys.includes(previousKey)) this.keySelect.value = previousKey;
+      this.keySelect.hidden = this.compact && keys.length <= 1;
       this.filter();
     } catch (error) {
       if (this.metadata.current(generation) && !isAbort(error))
@@ -279,6 +372,10 @@ export class ImagePanel {
     this.requests.next();
     this.frameAbort?.abort();
     this.prefetchAbort?.abort();
+    this.viewer.close();
+    this.displayed = undefined;
+    this.requested = undefined;
+    this.needsHome = true;
     this.frames = this.all.filter((f) => f.key === this.keySelect.value);
     this.slider.max = String(Math.max(0, this.frames.length - 1));
     this.slider.disabled = !this.frames.length;
@@ -286,8 +383,7 @@ export class ImagePanel {
     else {
       this.viewer.close();
       this.info.textContent = "No images in this stream";
-      this.status.textContent =
-        "Log PNG, JPEG or WebP image artifacts to populate the timeline.";
+      this.status.textContent = "No images found";
     }
   }
   private async blob(frame: ImageFrame, signal: AbortSignal): Promise<Cached> {
@@ -330,7 +426,7 @@ export class ImagePanel {
     }
   }
   async show(requested: number): Promise<void> {
-    if (!this.frames.length) return;
+    if (this.destroyed || !this.frames.length) return;
     const index = boundedIndex(requested, this.frames.length);
     this.index = index;
     this.slider.value = String(index);
@@ -378,7 +474,14 @@ export class ImagePanel {
             } else this.viewer.viewport.fitBounds(bounds, true);
             this.displayed = frame.id;
             this.info.textContent = `${this.runs.find((r) => r.id === frame.run_id)?.name ?? "Run"} / ${frame.key}  ·  step ${frame.step}  ·  ${new Date(frame.timestamp).toISOString()}  ·  ${index + 1} of ${this.frames.length}`;
-            this.status.textContent = `${frame.content_type} · ${(frame.byte_length / 1024).toFixed(1)} KiB · native resolution · ${this.cache.size} cached frames`;
+            if (this.compact) {
+              this.info.textContent = `Step ${frame.step} · ${index + 1} / ${this.frames.length}`;
+              this.info.title = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} · ${frame.key} · ${new Date(frame.timestamp).toISOString()}`;
+            }
+            this.status.textContent = this.compact
+              ? ""
+              : `${frame.content_type} · ${(frame.byte_length / 1024).toFixed(1)} KiB`;
+            this.info.dataset.step = String(frame.step);
             this.evict(frame.id);
             resolve();
           },
@@ -397,6 +500,9 @@ export class ImagePanel {
           .catch(() => {});
     } catch (error) {
       if (this.requests.current(generation) && !isAbort(error)) {
+        this.viewer.close();
+        this.displayed = undefined;
+        this.info.textContent = "Frame unavailable";
         this.status.textContent = message(error);
         this.stop();
       }
@@ -409,6 +515,7 @@ export class ImagePanel {
     this.playing = false;
     clearTimeout(this.timer);
     this.play.textContent = "Play";
+    this.play.setAttribute("aria-pressed", "false");
   }
   private togglePlay() {
     if (this.playing) {
@@ -418,6 +525,7 @@ export class ImagePanel {
     if (!this.frames.length) return;
     this.playing = true;
     this.play.textContent = "Pause";
+    this.play.setAttribute("aria-pressed", "true");
     const advance = async () => {
       if (!this.playing) return;
       if (this.index >= this.frames.length - 1) {
@@ -439,7 +547,12 @@ export class ImagePanel {
     this.status.textContent = "Disconnected";
   }
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.lifetime.abort();
     this.clear();
     this.viewer.destroy();
+    this.host.classList.remove("card-image-panel", "card-image-compact");
+    this.host.replaceChildren();
   }
 }
