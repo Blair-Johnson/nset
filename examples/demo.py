@@ -26,7 +26,7 @@ def main():
     if args.frames < 2 or args.points < 2:
         parser.error("--frames and --points must be at least 2")
     client = Client(args.url, token=token)
-    experiment = client.experiment("Vision / honest curves")
+    experiment = client.experiment("Vision training")
     ids = []
     for index, name in enumerate(["baseline · Adam", "cosine schedule", "high-rate stress test"]):
         rng = random.Random(42 + index)
@@ -42,8 +42,8 @@ def main():
                 loss += 0.035 * math.sin(step / 130) + rng.uniform(-0.012, 0.012)
                 if point % 233 == 0:
                     loss += 0.35  # Narrow spikes must remain visible in raw data.
-                for key, value in [("loss/test", loss), ("loss/train", loss * 0.83),
-                                   ("learning_rate", 0.001 * (1 + math.cos(min(t, 1) * math.pi)) + 1e-6)]:
+                for key, value in [("validation/loss", loss), ("train/loss", loss * 0.83),
+                                   ("train/learning_rate", 0.001 * (1 + math.cos(min(t, 1) * math.pi)) + 1e-6)]:
                     batch.append({"key": key, "step": step, "value": value,
                                   "timestamp": 1735689600000 + step * 25})
                 if len(batch) >= 9000:
@@ -54,7 +54,7 @@ def main():
             for frame in range(args.frames):
                 fraction = frame / (args.frames - 1)
                 step = round(fraction * (args.points - 1) * (7 + index))
-                run.log_image_bytes("prediction", frame_png(fraction, index), step=step,
+                run.log_image_bytes("validation/prediction", frame_png(fraction, index), step=step,
                                     timestamp=1735689600000 + step * 25)
         print(json.dumps({"kind": "demo_run", "run_id": run.id, "name": name}), flush=True)
     print(json.dumps({"kind": "demo_complete", "experiment_id": experiment["id"],
