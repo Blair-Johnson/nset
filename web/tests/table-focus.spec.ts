@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-async function fixture(page: Page, reorder = false) {
+async function fixture(page: Page, reorder = false, count = 60) {
   await page.route("**/__table_focus_fixture", (route) =>
     route.fulfill({
       contentType: "text/html",
@@ -8,54 +8,61 @@ async function fixture(page: Page, reorder = false) {
     }),
   );
   await page.goto("/__table_focus_fixture");
-  await page.evaluate(async (reorder) => {
-    const { runTable, tableState } = await import("/src/browser-tables.ts");
-    const experiment = { id: "experiment", name: "Experiment", created_at: 0 };
-    const runs = Array.from({ length: 60 }, (_, i) => ({
-      id: `run-"${i}"`,
-      experiment_id: experiment.id,
-      name: "Duplicate name",
-      status: "finished",
-      params: { index: i },
-      tags: { group: "matching" },
-      created_at: i,
-      updated_at: i,
-    }));
-    const state = tableState();
-    state.descending = false;
-    const selections: string[][] = [];
-    const focusCalls: {
-      runId?: string;
-      selectAll: boolean;
-      preventScroll?: boolean;
-    }[] = [];
-    const focus = HTMLElement.prototype.focus;
-    HTMLElement.prototype.focus = function (options) {
-      if (this instanceof HTMLInputElement && this.closest(".run-table"))
-        focusCalls.push({
-          runId: this.dataset.runId,
-          selectAll: this.dataset.selectAll !== undefined,
-          preventScroll: options?.preventScroll,
-        });
-      focus.call(this, options);
-    };
-    (window as any).__table = { selections, focusCalls };
-    document.querySelector("main")!.append(
-      runTable(
-        { experiments: [experiment], runs, series: [] } as any,
-        experiment,
-        ["other-experiment-run"],
-        (ids: string[]) => {
-          selections.push(ids);
-          // Change row positions during a selection to catch index/name restoration.
-          if (reorder) state.descending = !state.descending;
-        },
-        () => {},
-        () => {},
-        state,
-      ),
-    );
-  }, reorder);
+  await page.evaluate(
+    async ({ reorder, count }) => {
+      const { runTable, tableState } = await import("/src/browser-tables.ts");
+      const experiment = {
+        id: "experiment",
+        name: "Experiment",
+        created_at: 0,
+      };
+      const runs = Array.from({ length: count }, (_, i) => ({
+        id: `run-"${i}"`,
+        experiment_id: experiment.id,
+        name: "Duplicate name",
+        status: "finished",
+        params: { index: i },
+        tags: { group: "matching" },
+        created_at: i,
+        updated_at: i,
+      }));
+      const state = tableState();
+      state.descending = false;
+      const selections: string[][] = [];
+      const focusCalls: {
+        runId?: string;
+        selectAll: boolean;
+        preventScroll?: boolean;
+      }[] = [];
+      const focus = HTMLElement.prototype.focus;
+      HTMLElement.prototype.focus = function (options) {
+        if (this instanceof HTMLInputElement && this.closest(".run-table"))
+          focusCalls.push({
+            runId: this.dataset.runId,
+            selectAll: this.dataset.selectAll !== undefined,
+            preventScroll: options?.preventScroll,
+          });
+        focus.call(this, options);
+      };
+      (window as any).__table = { selections, focusCalls };
+      document.querySelector("main")!.append(
+        runTable(
+          { experiments: [experiment], runs, series: [] } as any,
+          experiment,
+          ["other-experiment-run"],
+          (ids: string[]) => {
+            selections.push(ids);
+            // Change row positions during a selection to catch index/name restoration.
+            if (reorder) state.descending = !state.descending;
+          },
+          () => {},
+          () => {},
+          state,
+        ),
+      );
+    },
+    { reorder, count },
+  );
 }
 const run = (page: Page, index: number) =>
   page.locator(`tbody input[data-run-id='run-"${index}"']`);
@@ -164,4 +171,36 @@ test("render does not steal focus from search or an outside control", async ({
   await run(page, 20).evaluate((node: HTMLInputElement) => node.click());
   await expect(run(page, 20)).toBeChecked();
   await expect(page.locator("#outside")).toBeFocused();
+});
+
+test("120-run sort and pagination retain keyboard focus with enabled boundary fallbacks", async ({
+  page,
+}) => {
+  await fixture(page, false, 120);
+  const sort = page.getByRole("button", { name: /^Created/ });
+  await sort.focus();
+  await page.keyboard.press("Enter");
+  await expect(sort).toBeFocused();
+  await expect(sort.locator("..")).toHaveAttribute("aria-sort", "descending");
+  await expect(run(page, 119)).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(sort).toBeFocused();
+  await expect(sort.locator("..")).toHaveAttribute("aria-sort", "ascending");
+  await expect(run(page, 0)).toBeVisible();
+  const next = page.getByRole("button", { name: "Next", exact: true });
+  const previous = page.getByRole("button", { name: "Previous", exact: true });
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();
+  await expect(next).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("101–120 of 120", { exact: true })).toBeVisible();
+  await expect(next).toBeDisabled();
+  await expect(previous).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(previous).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("1–50 of 120", { exact: true })).toBeVisible();
+  await expect(previous).toBeDisabled();
+  await expect(next).toBeFocused();
 });

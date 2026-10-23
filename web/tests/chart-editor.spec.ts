@@ -115,6 +115,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     const state: any = {
       closes: [],
       plots: [],
+      renderCount: 0,
       requests: [],
       card,
       original: structuredClone(card),
@@ -168,7 +169,9 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
           ),
         ),
       });
-      return originalRender.call(this, data, config, pins);
+      const result = originalRender.call(this, data, config, pins);
+      state.renderCount++;
+      return result;
     };
     let api;
     if (options.imagePreview) {
@@ -276,6 +279,7 @@ const state = (page: Page) =>
       loads: s.loads,
       aborted: s.aborted,
       plots: s.plots,
+      renderCount: s.renderCount,
       requests: s.requests,
     };
   });
@@ -1191,4 +1195,97 @@ test("all three X axes reset incompatible bounds and preview relative to each ru
     xMin: null,
     xMax: null,
   });
+});
+
+for (const resize of [false, true]) {
+  test(`populated scalar preview renders at 390px ${resize ? "after desktop resize" : "on open"} and after smoothing`, async ({
+    page,
+  }) => {
+    if (!resize) await page.setViewportSize({ width: 390, height: 844 });
+    await fixture(page);
+    await expect
+      .poll(async () => (await state(page)).renderCount)
+      .toBeGreaterThan(0);
+    if (resize) {
+      const before = (await state(page)).renderCount;
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect
+        .poll(async () => (await state(page)).renderCount)
+        .toBeGreaterThan(before);
+    }
+    await expect
+      .poll(async () => (await state(page)).plots.at(-1)?.config.height)
+      .toBe(240);
+    await expect(dialog(page).locator(".ce-preview .u-over")).toBeVisible();
+    await expect(dialog(page).locator(".ce-preview")).not.toContainText(
+      "Preview unavailable",
+    );
+    const before = (await state(page)).renderCount;
+    await dialog(page)
+      .getByRole("slider", { name: "Smoothing strength" })
+      .fill("50");
+    await expect
+      .poll(async () => (await state(page)).renderCount)
+      .toBeGreaterThan(before);
+    expect((await state(page)).plots.at(-1).config.smoothing).toBe(true);
+    await expect(dialog(page).locator(".ce-preview .u-over")).toBeVisible();
+    await expect(dialog(page).locator(".ce-preview")).not.toContainText(
+      "Preview unavailable",
+    );
+    await expect(
+      dialog(page).getByRole("button", { name: "Save changes", exact: true }),
+    ).toBeInViewport();
+  });
+}
+
+test("default style edits survive axis clones, preview, save and reopen", async ({
+  page,
+}) => {
+  await fixture(page);
+  for (const [axis, width, color] of [
+    ["timestamp", "7", "#123456"],
+    ["relative", "5", "#654321"],
+  ]) {
+    await dialog(page)
+      .getByLabel("X values", { exact: true })
+      .selectOption(axis);
+    await dialog(page).getByLabel("Line width", { exact: true }).fill(width);
+    await dialog(page)
+      .getByLabel("Use shared run colors", { exact: true })
+      .uncheck();
+    await dialog(page).getByLabel("Curve color", { exact: true }).fill(color);
+    await expect
+      .poll(async () => (await state(page)).plots.at(-1)?.config.style)
+      .toMatchObject({ width: Number(width), color });
+    await expect(dialog(page).locator(".ce-preview")).not.toContainText(
+      "Preview unavailable",
+    );
+    await dialog(page)
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    expect((await state(page)).saved.at(-1).config).toMatchObject({
+      axis,
+      palette: false,
+      style: { width: Number(width), color },
+    });
+    await page.evaluate(() => {
+      const s = (window as any).__editor;
+      s.card = s.saved.at(-1);
+    });
+    await page
+      .getByRole("button", { name: "Edit loss chart", exact: true })
+      .click();
+    await expect(
+      dialog(page).getByLabel("X values", { exact: true }),
+    ).toHaveValue(axis);
+    await expect(
+      dialog(page).getByLabel("Line width", { exact: true }),
+    ).toHaveValue(width);
+    await expect(
+      dialog(page).getByLabel("Curve color", { exact: true }),
+    ).toHaveValue(color);
+    await expect(
+      dialog(page).getByLabel("Use shared run colors", { exact: true }),
+    ).not.toBeChecked();
+  }
 });
