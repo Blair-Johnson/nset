@@ -37,6 +37,38 @@ try {
   expect(contentY).toBeLessThanOrEqual(140);
   const canvas = await card.locator("canvas").elementHandle();
   await card.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const savedBeforeFilter = await page.evaluate(() =>
+    localStorage.getItem("nset.workspaces.v2"),
+  );
+  const drawer = page.locator(".run-drawer");
+  await drawer.getByLabel("Find runs", { exact: true }).fill("Run 00 training");
+  await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(1);
+  await expect(drawer.locator(".drawer-outside-count")).toContainText(
+    "59 outside filters",
+  );
+  await drawer
+    .getByRole("button", { name: "Selected (60)", exact: true })
+    .click();
+  await expect(
+    drawer.getByRole("button", { name: "Selected (60)", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({
+    path: `${output}/selected-filtered.png`,
+    fullPage: true,
+  });
+  await drawer
+    .getByRole("button", { name: "Clear filters", exact: true })
+    .click();
+  await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(60);
+  expect(
+    await page.evaluate(() => localStorage.getItem("nset.workspaces.v2")),
+  ).toBe(savedBeforeFilter);
+  expect(
+    await card.locator("canvas").evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  await expect(
+    card.getByRole("button", { name: "Previous view", exact: true }),
+  ).toBeEnabled();
   await page
     .locator(".run-drawer")
     .getByRole("button", { name: "Run 00 training", exact: true })

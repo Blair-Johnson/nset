@@ -40,4 +40,4 @@ The existing image workflow lets a researcher zoom into a region and scrub adjac
 
 ## Integration evidence
 
-Implementation and final acceptance results will be recorded here after the isolated worktrees are integrated. No intermediate screenshot comparison alone authorizes replacing the deployed preview.
+The drawer component passed 277 unit tests, the production build and 19 browser scenarios in r172 before integration. The parent toolbar passed 18 focused browser scenarios in r180, including dark contrast, active cursor styling, maximize/restore, stable folds and reset behavior. An initial production check found that hover styling hid the active cursor border; the selector was corrected rather than weakening the assertion. Whole-release acceptance remains pending until the editor and table changes are integrated. No intermediate screenshot comparison alone authorizes replacing the deployed preview.
