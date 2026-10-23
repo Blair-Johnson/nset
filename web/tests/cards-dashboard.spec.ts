@@ -621,10 +621,7 @@ test("image pointer anchoring survives actual card maximize and restore", async 
         v = s.cards[2].images.viewer;
       const rect = v.container.getBoundingClientRect(),
         size = v.viewport.getContainerSize();
-      const position = new (v.viewport.getCenter().constructor)(
-        size.x * 0.42,
-        size.y * 0.42,
-      );
+      const position = size.times(0.42);
       s.imageAnchor = v.viewport.pointFromPixel(position, true);
       return {
         x: rect.left + rect.width * 0.58,
