@@ -11,9 +11,9 @@ test("timestamp defaults produce distinct UTC ticks with adequate spacing", () =
   const values = axis.values as (...args: unknown[]) => string[];
   const labels = values({}, [1735689600000, 1735689605000], 0, 170, 5000);
   assert.notEqual(labels[0], labels[1]);
-  assert.match(labels[0], /2025-01-01.*00:00:00/);
-  assert.match(labels[1], /2025-01-01.*00:00:05/);
-  assert.ok(Number(axis.space) >= 160);
+  assert.match(labels[0], /2025-01-01\s00:00:00/);
+  assert.match(labels[1], /2025-01-01\s00:00:05/);
+  assert.equal(axis.space, 100);
 });
 
 test("explicit advanced timestamp formatter and spacing remain configurable", () => {
@@ -30,10 +30,10 @@ test("explicit advanced timestamp formatter and spacing remain configurable", ()
   assert.match(values({}, [1735689600000], 0, 80, 5000)[0], /e\+12/);
 });
 
-test("single-line X tick gutters leave room for data and retain explicit sizing", () => {
+test("X tick gutters reserve a second UTC line and retain explicit sizing", () => {
   for (const axis of ["step", "timestamp", "relative"] as const) {
     const options = resolveOptions({ ...defaults(), axis }, 600, [{}]);
-    assert.equal(options.axes![0].size, 32);
+    assert.equal(options.axes![0].size, axis === "timestamp" ? 44 : 32);
     assert.equal(options.axes![0].labelSize, 20);
     assert.equal(options.axes![0].font, "11px ui-monospace, monospace");
   }

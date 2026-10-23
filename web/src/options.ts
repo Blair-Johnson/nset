@@ -1,5 +1,11 @@
 import uPlot from "uplot";
 import {
+  defaultLabelLayout,
+  formatNumberTick,
+  formatTimestampTick,
+  timestampTickIncrements,
+} from "./axis-labels";
+import {
   deepMerge,
   formatValue,
   validateConfig,
@@ -171,6 +177,7 @@ export function resolveOptions(
   hooks: uPlot.Hooks.Arrays = {},
 ): uPlot.Options {
   config = validateConfig(config);
+  const labelLayout = defaultLabelLayout(config);
   const { scales: scalePatches, ...presentation } = config.advanced;
   const patches = (scalePatches ?? {}) as { x?: ScalePatch; y?: ScalePatch };
   const opts: uPlot.Options = {
@@ -193,14 +200,24 @@ export function resolveOptions(
               : "Timestamp · UTC epoch milliseconds"),
         stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
-        values: xFormatter(config.axis, config.xFormat),
+        values: labelLayout.multilineTime
+          ? (_u, values) =>
+              values.map((v) => (v == null ? "" : formatTimestampTick(v)))
+          : xFormatter(config.axis, config.xFormat),
+        // End native multiline UTC labels at the tick; no moving gutters,
+        // hidden endpoint ticks, or shorter coordinate readouts.
+        ...(labelLayout.multilineTime
+          ? { align: 2 as const, incrs: timestampTickIncrements }
+          : {}),
         space:
           config.axis === "timestamp"
-            ? 170
+            ? labelLayout.multilineTime
+              ? 100
+              : 170
             : config.axis === "relative"
               ? 100
               : 50,
-        size: 32,
+        size: labelLayout.multilineTime ? 44 : 32,
         labelSize: 20,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },
         ticks: { show: config.ticks, stroke: "#737b84" },
@@ -209,7 +226,10 @@ export function resolveOptions(
         label: config.yLabel || "Metric value",
         stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
-        values: formatter(config.yFormat),
+        values: labelLayout.compactY
+          ? (_u, values) =>
+              values.map((v) => (v == null ? "" : formatNumberTick(v)))
+          : formatter(config.yFormat),
         size: 76,
         labelSize: 22,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },
