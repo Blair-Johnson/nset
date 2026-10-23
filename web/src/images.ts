@@ -346,12 +346,18 @@ export class ImagePanel {
     this.viewer.viewport.goHome();
   }
 
+  private clearFrameInfo() {
+    this.info.textContent = "No frame loaded";
+    this.info.removeAttribute("data-step");
+    this.info.removeAttribute("title");
+  }
   private reset() {
     this.stop();
     this.requests.next();
     this.frameAbort?.abort();
     this.prefetchAbort?.abort();
     this.viewer.close();
+    this.clearFrameInfo();
     this.displayed = undefined;
     this.requested = undefined;
     this.needsHome = true;
@@ -362,7 +368,6 @@ export class ImagePanel {
     this.slider.max = "0";
     this.slider.value = "0";
     this.slider.disabled = true;
-    this.info.textContent = "No frame loaded";
   }
   private async load() {
     if (this.destroyed) return;
@@ -418,6 +423,7 @@ export class ImagePanel {
     this.frameAbort?.abort();
     this.prefetchAbort?.abort();
     this.viewer.close();
+    this.clearFrameInfo();
     this.displayed = undefined;
     this.requested = undefined;
     this.needsHome = true;
@@ -426,8 +432,6 @@ export class ImagePanel {
     this.slider.disabled = !this.frames.length;
     if (this.frames.length) void this.show(0);
     else {
-      this.viewer.close();
-      this.info.textContent = "No images in this stream";
       this.status.textContent = "No images found";
     }
   }
