@@ -1,0 +1,39 @@
+/* Status belongs to the viewport, not the card's flex/grid geometry. The card
+   owns canvas sizing, including freely resized and maximized dimensions. */
+.card-image-panel .image-canvas {
+  position: relative;
+}
+.card-image-panel .image-frame-status {
+  position: absolute;
+  z-index: 5;
+  inset: auto 8px 8px;
+  padding: 6px 8px;
+  color: var(--text, #e5e7eb);
+  background: var(--surface-raised, #252a32);
+  border: 1px solid var(--control-border, #4b5563);
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  pointer-events: none;
+}
+.card-image-panel .image-frame-status:empty {
+  display: none;
+}
+.card-image-panel .camera-info {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Reserve metadata space independently of changing step/count digit widths. */
+.card-image-panel .frame-info {
+  min-width: 0;
+  width: 13em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-image-panel:not(.card-image-compact) .frame-info {
+  width: 100%;
+}

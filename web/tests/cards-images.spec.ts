@@ -127,12 +127,13 @@ test("compact image panels keep exact sources, authenticated bytes, cameras and 
     s.panels[0].cache.delete("a2");
     await s.panels[0].show(2);
   });
-  await expect(a.locator(".frame-info")).toHaveText("Frame unavailable");
+  await expect(a.locator(".frame-info")).toHaveText("Step 0 · 1 / 3");
+  await expect(a.getByRole("status")).toContainText("Image unavailable");
   expect(
     await page.evaluate(() =>
       (window as any).imageFixture.panels[0].viewer.world.getItemCount(),
     ),
-  ).toBe(0);
+  ).toBe(1);
   await page.evaluate(() => (window as any).imageFixture.panels[0].destroy());
   await expect(b.locator(".frame-info")).toHaveText("Step 0 · 1 / 3");
 });
