@@ -746,7 +746,7 @@ function renderCharts(workspace: Workspace) {
   const dashboard = $("dashboard");
   const keep = new Set<string>();
 
-  for (const section of workspace.sections) {
+  for (const [sectionIndex, section] of workspace.sections.entries()) {
     let node = sectionNodes.get(section.id);
     if (!node) {
       node = element("section", "chart-section");
@@ -852,7 +852,7 @@ function renderCharts(workspace: Workspace) {
           section.cards.push(found.card);
         });
     };
-    for (const spec of section.cards) {
+    for (const [cardIndex, spec] of section.cards.entries()) {
       const contextKey = `${catalogGeneration}:${spec.source.mode === "selected" ? workspace.selectedRunIds.join(",") : "explicit"}`;
       keep.add(spec.id);
       let entry = cards.get(spec.id);
@@ -942,7 +942,10 @@ function renderCharts(workspace: Workspace) {
       if (spec.layout)
         entry.host.style.setProperty("--card-width", `${spec.layout.width}px`);
       else entry.host.style.removeProperty("--card-width");
-      grid.append(entry.host);
+      // Keep unchanged cards connected: even appending an existing node loses
+      // focus and can dislodge the browser's scroll anchor on geometry commits.
+      if (grid.children[cardIndex] !== entry.host)
+        grid.insertBefore(entry.host, grid.children[cardIndex] ?? null);
     }
     for (const child of [...grid.children]) {
       const id = (child as HTMLElement).dataset.cardId;
@@ -959,7 +962,8 @@ function renderCharts(workspace: Workspace) {
         grid.append(empty);
       }
     } else empty?.remove();
-    dashboard.append(node);
+    if (dashboard.children[sectionIndex] !== node)
+      dashboard.insertBefore(node, dashboard.children[sectionIndex] ?? null);
   }
   for (const [id, entry] of cards)
     if (!keep.has(id)) {
