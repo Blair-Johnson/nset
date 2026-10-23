@@ -4,6 +4,10 @@
 
 Open Experiments and choose an experiment. In Runs, search names, parameters or tags, filter by status, and sort columns; the table includes latest metric values. Use checkboxes—not row highlighting—to select runs. Charts keeps that selection and provides a persistent left Runs drawer for changing it in place. Use the chevron on the drawer’s right edge to collapse or restore it, and drag the divider to adjust its width.
 
+Use Columns to search metric names or scalar configuration paths and compare parameters side by side. Metric columns show the latest logged value, not the best value. Exact parameter paths distinguish literal dotted keys from nested objects; null, false, zero and missing values remain distinct. Headers stay visible while the table scrolls; desktop run names stay pinned, while narrow layouts pin only the checkboxes.
+
+In the Charts drawer, Selected (N) limits the list to your selected runs. Text and status filters still apply, and the adjacent count identifies selected runs outside those filters. Clear filters reveals the whole selected cohort without changing what is plotted.
+
 Click a run name to open its dedicated detail page. The configuration viewer groups dotted keys and nested objects, shows typed values, and searches paths and values. Copy JSON and Export JSON preserve the logged configuration; tags remain separate. This is a viewer for parsed run parameters, not a raw YAML file or artifact browser. Click a color swatch to choose a shared run color across the table, drawer and plots. Run-color overrides are browser-local preferences, separate from saved views and their exports.
 
 The initial Overview view mixes scalar charts and image panels. Sections use the part of each key before its last slash: `train/loss` and `train/prediction` share `train`, while `train/batch/loss` belongs to `train/batch`. Keys without a slash appear in Overview. Collapse sections or search charts to focus the workspace. Refresh reloads the catalog and chart data; View actions → Add missing metric charts adds cards for newly available metric or image keys without replacing existing cards.
@@ -20,7 +24,7 @@ Use ⋯ → Edit chart for a live preview beside Data, Axes and Appearance contr
 
 Axes → X values offers Step, Wall time or Relative time (run start), alongside scales, bounds, labels and formats. Y auto range → Central 98% clips the display, not the numerical results; manual Y bounds take precedence. Appearance includes smoothing, interpolation, styles, grid and an optional compact legend; expand Show legend on the card when enabled. Individual-curve settings control colors and visibility. Image panels show image-specific settings.
 
-Save changes updates only this card; Cancel or Escape discards the draft. Invalid settings keep the editor open. Add chart uses the same editor and finishes with Add chart.
+Save changes updates only this card; Cancel or Escape discards the draft. Invalid settings keep the editor open. During source updates or invalid edits, a compatible last-valid scalar preview stays visible and is labeled Previous preview; its title and observation count update only after the new plot succeeds. Add chart uses the same editor and finishes with Add chart.
 
 Drag the corner Resize chart handle to change width and height independently; the card stays anchored while dragging, and neighboring cards rearrange only after release. Escape cancels. Arrow keys also resize, with Shift for larger steps. Dimensions persist in the view. Maximize chart fills the available space; Restore chart returns to the saved size. Opening a legend or cursor readout adds space below the plot rather than shrinking its canvas.
 
