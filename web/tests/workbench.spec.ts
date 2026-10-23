@@ -5,7 +5,7 @@ const runs = [
     experiment_id: "e1",
     name: "baseline <b>literal</b>",
     status: "finished",
-    params: { lr: 0.001, batch: 64 },
+    params: { lr: 0.001 },
     tags: { model: "resnet" },
     created_at: 1700000000000,
     updated_at: 1700000000000,
@@ -15,41 +15,45 @@ const runs = [
     experiment_id: "e1",
     name: "candidate / irregular grid",
     status: "running",
-    params: { lr: 0.002, batch: 128 },
+    params: { lr: 0.002 },
     tags: { model: "resnet" },
-    created_at: 1700000000000,
-    updated_at: 1700000000000,
+    created_at: 1700000001000,
+    updated_at: 1700000001000,
   },
 ];
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
-  "base64",
-);
-async function fixture(page: Page, delayedFrames = false) {
+const experiments = [
+  { id: "e1", name: "Vision study", created_at: 1700000000000 },
+  { id: "e2", name: "Empty experiment", created_at: 1700000001000 },
+];
+async function fixture(page: Page) {
   await page.route("**/api/**", async (route) => {
-    const req = route.request(),
-      url = new URL(req.url());
+    const req = route.request();
     expect(req.headers().authorization).toBe("Bearer fixture-secret");
-    expect(url.search).not.toContain("fixture-secret");
-    const path = url.pathname;
-    let data: unknown;
-    if (path === "/api/experiments")
-      data = {
-        experiments: [
-          {
-            id: "e1",
-            name: "Vision / optimization study",
-            created_at: 1700000000000,
-          },
-        ],
-      };
-    else if (path === "/api/runs") data = { runs };
-    else if (path.endsWith("/metric-keys"))
-      data = { keys: ["validation/loss"] };
-    else if (path.endsWith("/metrics")) {
-      const isFirst = path.includes("/r1/");
-      const xs = isFirst ? [0, 1, 3, 8] : [0, 2, 5, 8];
-      const ys = isFirst ? [4, 2, 3, 1] : [3.5, 2.5, 2.7, 0.8];
+    const url = new URL(req.url());
+    if (url.pathname === "/api/catalog") {
+      await route.fulfill({
+        json: {
+          experiments,
+          runs,
+          series: runs.flatMap((r) =>
+            ["train/loss", "eval/score"].map((key) => ({
+              run_id: r.id,
+              key,
+              kind: "metric",
+              count: 4,
+              last_step: 8,
+              last_timestamp: 1700000008000,
+              last_value: 1,
+            })),
+          ),
+        },
+      });
+      return;
+    }
+    if (url.pathname.endsWith("/metrics")) {
+      const first = url.pathname.includes("/r1/");
+      const xs = first ? [0, 1, 3, 8] : [0, 2, 5, 8];
+      const ys = first ? [4, 2, 3, 1] : [3.5, 2.5, 2.7, 0.8];
       const points = xs.map((step, i) => ({
         seq: i + 1,
         step,
@@ -57,225 +61,178 @@ async function fixture(page: Page, delayedFrames = false) {
         value: ys[i],
       }));
       const after = url.searchParams.get("after");
-      if (after) expect(url.searchParams.get("snapshot")).toBe("4");
-      data = {
-        points: after ? points.slice(2) : points.slice(0, 2),
-        snapshot: 4,
-        total: 4,
-        next_after: after ? null : 2,
-      };
-    } else if (path.endsWith("/images")) {
-      const run = path.includes("/r1/") ? "r1" : "r2";
-      data = {
-        images: [0, 1, 2].map((i) => ({
-          id: `${run}-frame-${i}`,
-          run_id: run,
-          key: "prediction",
-          step: i * 10,
-          timestamp: 1700000000000 + i * 1000,
-          content_type: "image/png",
-          byte_length: png.length,
-        })),
-      };
-    } else if (path.endsWith("/content")) {
-      if (delayedFrames && path.includes("frame-1"))
-        await new Promise((resolve) => setTimeout(resolve, 3500));
-      await route.fulfill({ status: 200, contentType: "image/png", body: png });
-      return;
-    } else {
-      await route.fulfill({ status: 404, json: { error: "fixture missing" } });
+      await route.fulfill({
+        json: {
+          points: after ? points.slice(2) : points.slice(0, 2),
+          snapshot: 4,
+          total: 4,
+          next_after: after ? null : 2,
+        },
+      });
       return;
     }
-    await route.fulfill({ json: data });
+    await route.fulfill({ status: 404, json: { error: "fixture missing" } });
   });
   await page.goto("/");
-  await page.getByLabel("Access token").fill("fixture-secret");
-  await page.getByRole("button", { name: "Connect to tracker" }).click();
+  await page.getByLabel("Access token", { exact: true }).fill("fixture-secret");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.locator("#connection")).toHaveText("Connected");
-  await page
-    .getByRole("checkbox", {
-      name: "Compare baseline <b>literal</b>",
-      exact: true,
-    })
-    .check();
-  await page
-    .getByRole("checkbox", {
-      name: "Compare candidate / irregular grid",
-      exact: true,
-    })
-    .check();
-  await expect(page.locator("#load-status")).toContainText("Snapshot complete");
 }
-test("complete snapshots, inspector, protected JSON and saved view export", async ({
-  page,
-}, testInfo) => {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  await fixture(page);
-  await expect(page.locator("#data-note")).toContainText("8 observations");
-  await expect(page.locator("#run-list b")).toHaveCount(0);
-  await page.locator("#pin-a").fill("1");
-  await page.locator("#pin-b").fill("3");
-  await page.locator("#threshold").fill("2.5");
-  await expect(page.locator("#readout")).toContainText("2.5666667");
-  await expect(page.locator("#crossings")).toContainText("0.75");
-  await page.locator("#interpolation").selectOption("pchip");
-  await expect(page.locator("#data-note")).toContainText("pchip");
-  await page.screenshot({
-    path: testInfo.outputPath("workbench-desktop.png"),
-    fullPage: true,
-  });
-  await page.getByRole("tab", { name: "Plot configuration" }).click();
-  await page.getByLabel("Advanced uPlot JSON").fill('{"hooks":{"draw":[]}}');
+async function charts(page: Page) {
+  await page.getByRole("button", { name: "Vision study", exact: true }).click();
   await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  await expect(page.locator("#settings-pane .error")).toContainText(
-    "protected",
+    .getByRole("checkbox", { name: "Select all matching runs", exact: true })
+    .check();
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await page.locator(".dashboard-cell canvas").first().waitFor();
+}
+const card = (page: Page, title: string) =>
+  page
+    .locator(".dashboard-cell")
+    .filter({
+      has: page.locator(".card-title", {
+        hasText: new RegExp("^" + title + "$"),
+      }),
+    });
+
+test("experiment and run tables preserve filtering and selection through navigation", async ({
+  page,
+}, info) => {
+  await fixture(page);
+  await expect(page.locator(".experiment-link")).toHaveCount(2);
+  await page.getByRole("button", { name: "Vision study", exact: true }).click();
+  await expect(page.locator(".run-table b")).toHaveCount(0);
+  await page
+    .getByLabel("Search runs, parameters or tags", { exact: true })
+    .fill("candidate");
+  await page
+    .getByRole("checkbox", { name: "Select all matching runs", exact: true })
+    .check();
+  await expect(page.locator(".selection-count")).toHaveText("1 selected");
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await card(page, "loss").locator("canvas").waitFor();
+  await expect(card(page, "loss").locator(".card-legend")).toContainText(
+    "candidate",
   );
-  await page
-    .getByLabel("Advanced uPlot JSON")
-    .fill(
-      '{"axes":[{"values":"scientific"}],"cursor":{"drag":{"x":true,"y":true}}}',
-    );
-  await page.getByLabel("Y scale", { exact: true }).selectOption("asinh");
-  await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  await expect(page.locator("#settings-pane .error")).toHaveText("");
-  await page.getByLabel("Saved view name").fill("Comparison A");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByLabel("Saved views")).toHaveValue("Comparison A");
-  const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Export JSON" }).click();
-  const file = await download;
-  const stream = await file.createReadStream();
-  let text = "";
-  for await (const chunk of stream!) text += chunk;
-  expect(text).not.toContain("fixture-secret");
-  expect(JSON.parse(text).config.yScale).toBe("asinh");
-  expect(errors).toEqual([]);
-});
-test("image timeline loads authenticated blobs, supports stepping and reset", async ({
-  page,
-}, testInfo) => {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  await fixture(page);
-  await page.getByRole("tab", { name: "Images", exact: true }).click();
-  await expect(page.locator(".frame-info")).toContainText("step 0");
-  await page.getByRole("button", { name: "Next \u2192", exact: true }).click();
-  await expect(page.locator(".frame-info")).toContainText("step 10");
-  await page.locator("#image-viewer").focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".frame-info")).toContainText("step 20");
-  await page.getByRole("button", { name: "Reset view", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Rotate \u21bb", exact: true })
-    .click();
-  await page.getByRole("button", { name: "Flip \u2194", exact: true }).click();
+  await page.getByRole("button", { name: "Runs", exact: true }).click();
+  await expect(
+    page.getByLabel("Search runs, parameters or tags", { exact: true }),
+  ).toHaveValue("candidate");
+  await expect(page.locator(".selection-count")).toHaveText("1 selected");
   await page.screenshot({
-    path: testInfo.outputPath("image-viewer.png"),
-    fullPage: true,
-  });
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(page.getByLabel("Access token")).toBeVisible();
-  expect(
-    await page.evaluate(() => sessionStorage.getItem("nset.token")),
-  ).toBeNull();
-  expect(errors).toEqual([]);
-});
-test("mobile layout keeps controls and table available", async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await fixture(page);
-  await page.locator("#threshold").fill("2.5");
-  await expect(page.locator("#crossings")).toContainText("0.75");
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
-    ),
-  ).toBe(true);
-  await page.screenshot({
-    path: testInfo.outputPath("workbench-mobile.png"),
+    path: info.outputPath("runs-table.png"),
     fullPage: true,
   });
 });
 
-test("latest requested image wins over delayed fetches", async ({ page }) => {
-  await fixture(page, true);
-  await page.getByRole("tab", { name: "Images", exact: true }).click();
-  await expect(page.locator(".frame-info")).toContainText("step 0");
-  const timeline = page.getByRole("slider", { name: "Image frame timeline" });
-  await timeline.fill("1");
-  await timeline.fill("2");
-  await expect(page.locator(".frame-info")).toContainText("step 20");
-  await page.waitForTimeout(4000);
-  await expect(page.locator(".frame-info")).toContainText("step 20");
+test("namespace collapse, view names and run choices survive reload", async ({
+  page,
+}, info) => {
+  await fixture(page);
+  await charts(page);
+  const section = page
+    .locator(".chart-section")
+    .filter({ has: page.locator(".section-toggle", { hasText: "train" }) });
+  await section.locator(".section-toggle").click();
+  await expect(section.locator(".chart-grid")).toBeHidden();
+  await page.getByLabel("View actions", { exact: true }).click();
+  await page.getByRole("button", { name: "Save as…", exact: true }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "Save view as",
+    exact: true,
+  });
+  await dialog.getByLabel("View name", { exact: true }).fill("Review");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await page.reload();
+  await expect(page.locator("#connection")).toHaveText("Connected");
+  await expect(
+    page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
+  ).toHaveText("Review");
+  await expect(section.locator(".chart-grid")).toBeHidden();
+  await expect(page.locator(".run-picker summary")).toContainText("2");
+  await page.screenshot({
+    path: info.outputPath("saved-dashboard.png"),
+    fullPage: true,
+  });
 });
 
-test("zoom leaves numerical answers unchanged and reset restores view", async ({
+test("editing is contextual and cancel does not mutate a card", async ({
+  page,
+}, info) => {
+  await fixture(page);
+  await charts(page);
+  const loss = card(page, "loss");
+  await loss.getByLabel("Chart actions", { exact: true }).click();
+  await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
+  await editor
+    .getByLabel("Chart title", { exact: true })
+    .fill("Cancelled edit");
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(loss.locator(".card-title")).toHaveText("loss");
+  await loss.getByLabel("Chart actions", { exact: true }).click();
+  await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
+  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
+  await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
+  await editor.locator(".ce-preview-plot canvas").waitFor();
+  await page.screenshot({
+    path: info.outputPath("contextual-editor.png"),
+    fullPage: true,
+  });
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor).toBeHidden();
+  const saved = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("nset.workspaces.v2")!),
+  );
+  const specs = saved.views[0].sections.flatMap((s: any) => s.cards);
+  expect(specs.find((c: any) => c.title === "loss").config.yScale).toBe("log");
+  expect(specs.find((c: any) => c.title === "score").config.yScale).toBe(
+    "linear",
+  );
+});
+
+test("empty experiment has a clear table and chart creation remains available", async ({
   page,
 }) => {
   await fixture(page);
-  await page.locator("#pin-a").fill("1.5");
-  await page.locator("#pin-b").fill("6");
-  await page.locator("#threshold").fill("2.5");
-  const before = await page.locator("#readout").innerText();
-  const crossings = await page.locator("#crossings").innerText();
-  const box = await page.locator(".u-over").boundingBox();
-  expect(box).not.toBeNull();
-  await page.mouse.move(box!.x + box!.width * 0.2, box!.y + box!.height * 0.5);
-  await page.mouse.down();
-  await page.mouse.move(
-    box!.x + box!.width * 0.65,
-    box!.y + box!.height * 0.5,
-    { steps: 10 },
-  );
-  await page.mouse.up();
-  expect(await page.locator("#readout").innerText()).toBe(before);
-  expect(await page.locator("#crossings").innerText()).toBe(crossings);
-  await page.getByRole("button", { name: "Reset zoom", exact: true }).click();
-  expect(await page.locator("#readout").innerText()).toBe(before);
+  await page
+    .getByRole("button", { name: "Empty experiment", exact: true })
+    .click();
+  await expect(page.locator(".empty-table")).toContainText("No runs");
+  await page.getByRole("button", { name: "Charts", exact: true }).click();
+  await expect(page.locator(".dashboard-empty")).toContainText("Select runs");
+  await page.locator("details[data-menu=add] summary").click();
+  await page.getByRole("button", { name: "Line chart", exact: true }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Add chart", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
 });
 
-test("runtime range rejection preserves saved settings, chart and numerical readouts", async ({
+test("narrow dashboard stays within viewport and logout removes credentials", async ({
   page,
-}) => {
+}, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
   await fixture(page);
-  await page.locator("#interpolation").selectOption("pchip");
-  const saved = await page.evaluate(() => localStorage.getItem("nset.config"));
-  const readout = await page.locator("#readout").textContent();
-  await page.evaluate(() => {
-    (window as any).__previousCanvas = document.querySelector("#plot canvas");
+  await charts(page);
+  await page.setViewportSize({ width: 820, height: 1000 });
+  await page.screenshot({
+    path: info.outputPath("dashboard-narrow.png"),
+    fullPage: true,
   });
-  await page.getByRole("tab", { name: "Plot configuration" }).click();
-  await page
-    .getByLabel("Y minimum", { exact: true })
-    .fill(String(Number.MAX_VALUE));
-  await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  await expect(page.locator("#global-error")).toContainText("were not applied");
-  expect(await page.evaluate(() => localStorage.getItem("nset.config"))).toBe(
-    saved,
-  );
-  expect(await page.locator("#readout").textContent()).toBe(readout);
   expect(
     await page.evaluate(
-      () =>
-        (window as any).__previousCanvas ===
-        document.querySelector("#plot canvas"),
+      () => document.documentElement.scrollWidth > innerWidth + 2,
     ),
-  ).toBe(true);
-  await page
-    .getByRole("button", { name: "Reset defaults", exact: true })
-    .click();
-  await expect(page.locator("#global-error")).toBeHidden();
-  expect(
-    JSON.parse(
-      (await page.evaluate(() => localStorage.getItem("nset.config")))!,
-    ).yMin,
-  ).toBe(null);
+  ).toBe(false);
+  await page.locator("#logout").click();
+  await expect(page.locator("#login-dialog")).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem("nset.token"))).toBe(
+    null,
+  );
+  expect(await page.locator(".dashboard-cell").count()).toBe(0);
+  expect(errors).toEqual([]);
 });

@@ -250,6 +250,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
   activeEditor?.close();
   activeEditor = openChartEditor({
     card: structuredClone(card),
+    isNew: add,
     catalog,
     selectedRunIds: workspace.selectedRunIds,
     api,

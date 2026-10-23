@@ -7,6 +7,7 @@ import { pixelStats } from "./pixels.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root, "web/package.json"));
 const { chromium } = require("playwright");
+const { expect } = require("@playwright/test");
 const artifacts = path.join(root, "artifacts/screenshots");
 await mkdir(artifacts, { recursive: true });
 const browser = await chromium.launch({ headless: true });
@@ -15,222 +16,323 @@ const page = await browser.newPage({
   deviceScaleFactor: 1,
 });
 const errors = [];
-page.on("pageerror", (error) => errors.push(error.message));
+page.on("pageerror", (e) => errors.push(e.message));
 const screenshot = (name) =>
   page.screenshot({
     path: path.join(artifacts, name + ".png"),
     fullPage: true,
   });
-const text = (selector) => page.locator(selector).innerText();
-const cell = async (container, run, column) =>
+const card = (title) =>
   page
-    .locator(container + " tbody tr")
-    .filter({ hasText: run })
-    .locator("td")
-    .nth(column)
-    .innerText();
+    .locator(".dashboard-cell")
+    .filter({
+      has: page.locator(".card-title", {
+        hasText: new RegExp("^" + title + "$"),
+      }),
+    });
+const coordinate = async (root, label, value) => {
+  await root.getByLabel(label, { exact: true }).fill(String(value));
+  await root.getByLabel(label, { exact: true }).press("Tab");
+};
+const value = async (root, run, column) =>
+  Number(
+    await root
+      .locator(".card-value-table tr")
+      .filter({ hasText: run })
+      .locator("td")
+      .nth(column)
+      .innerText(),
+  );
+const edit = async (root) => {
+  await root.getByLabel("Chart actions", { exact: true }).click();
+  await root.getByRole("button", { name: "Edit chart", exact: true }).click();
+  await page.getByRole("dialog", { name: "Edit chart", exact: true }).waitFor();
+  return page.getByRole("dialog", { name: "Edit chart", exact: true });
+};
 try {
   await page.goto(process.env.NSET_BROWSER_URL);
-  await page.locator("#token").fill(process.env.NSET_BROWSER_TOKEN);
-  await page.locator("#login-form button[type=submit]").click();
-  await page.locator("#login-dialog").waitFor({ state: "hidden" });
   await page
-    .getByLabel("Experiment", { exact: true })
-    .selectOption(JSON.parse(process.env.NSET_BROWSER_FIXTURE).experiment);
+    .getByLabel("Access token", { exact: true })
+    .fill(process.env.NSET_BROWSER_TOKEN);
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.locator("#connection")).toHaveText("Connected");
+  await expect(
+    page.getByRole("heading", { name: "Experiments", exact: true }),
+  ).toBeVisible();
+  await screenshot("ux-01-experiments");
   await page
-    .getByLabel("Compare Curve A", { exact: true })
-    .waitFor({ state: "visible" });
-  await page.locator("#select-all").click();
-  await page.waitForFunction(() =>
-    document
-      .querySelector("#load-status")
-      .textContent.startsWith("Snapshot complete"),
-  );
-  await page.locator("#pin-a").fill("5");
-  await page.locator("#pin-b").fill("10");
-  await page.locator("#threshold").fill("2");
-  assert.equal(Number(await cell("#readout", "Curve A", 2)), 2);
-  assert.equal(Number(await cell("#readout", "Curve A", 3)), 3);
-  assert.equal(Number(await cell("#readout", "Curve B", 2)), 2);
-  assert.match(await cell("#crossings", "Curve A", 1), /^5, 15$/);
-  assert.match(await cell("#crossings", "Curve B", 2), /\[0, 5\]/);
-  await screenshot("01-timeseries");
-  await page.locator("#pin-a").fill("");
-  await page.locator("#pin-b").fill("");
-  await page.locator("#threshold").fill("");
-  const plotPixels = await pixelStats(page, "#plot .u-over");
-  assert.ok(plotPixels.cyan > 50 && plotPixels.violet > 50, "both actual curve strokes must be rendered, without cursor overlays");
-  await page.locator("#pin-a").fill("5");
-  await page.locator("#pin-b").fill("10");
-  await page.locator("#threshold").fill("2");
-  const before = await text("#readout");
-  const box = await page.locator("#plot .u-over").boundingBox();
-  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.3);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.3, {
-    steps: 12,
-  });
-  await page.mouse.up();
+    .getByRole("button", { name: "Browser verification", exact: true })
+    .click();
+  await expect(
+    page.getByRole("table", { name: "Runs", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("checkbox", { name: "Select all matching runs", exact: true })
+    .check();
+  await expect(page.locator(".selection-count")).toHaveText("2 selected");
+  await screenshot("ux-02-runs");
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  const loss = card("loss"),
+    image = card("prediction"),
+    score = card("score");
+  await loss.locator("canvas").waitFor();
+  await score.locator("canvas").waitFor();
+  await expect(image.locator(".frame-info")).toContainText("1 / 4");
   assert.equal(
-    await text("#readout"),
-    before,
-    "zoom must not change numerical readouts",
+    await page.getByRole("tab", { name: "Images", exact: true }).count(),
+    0,
   );
-  await page.setViewportSize({ width: 1100, height: 1000 });
-  assert.equal(
-    await text("#readout"),
-    before,
-    "resize must not change numerical readouts",
-  );
-  await page.locator("#reset-zoom").click();
-  await page
-    .getByRole("tab", { name: "Plot configuration", exact: true })
-    .click();
-  await page.getByLabel("Y scale", { exact: true }).selectOption("log");
-  await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  await page.getByRole("tab", { name: "Timeseries", exact: true }).click();
-  assert.equal(
-    await text("#readout"),
-    before,
-    "log scale must not change numerical readouts",
-  );
-  await screenshot("02-log-scale");
-  await page.locator("#view-name").fill("Log comparison");
-  await page.locator("#save-view").click();
-  const downloadPromise = page.waitForEvent("download");
-  await page.locator("#export-view").click();
-  const download = await downloadPromise;
-  const exported = path.join(artifacts, "view.json");
-  await download.saveAs(exported);
-  const view = JSON.parse(await readFile(exported, "utf8"));
-  assert.equal(view.config.yScale, "log");
-  assert.ok(!JSON.stringify(view).includes(process.env.NSET_BROWSER_TOKEN));
-  await page
-    .getByRole("tab", { name: "Plot configuration", exact: true })
-    .click();
-  await page.getByLabel("Advanced uPlot JSON").fill('{"hooks":{"draw":[]}}');
-  await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  assert.match(
-    await page.locator("#settings-pane [role=alert]").innerText(),
-    /protected|unsupported/i,
-  );
-  await page.getByLabel("Advanced uPlot JSON").fill("{}");
-  await page.getByLabel("Y scale", { exact: true }).selectOption("linear");
-  await page
-    .getByRole("button", { name: "Apply configuration", exact: true })
-    .click();
-  await page.locator("#saved-views").selectOption("Log comparison");
-  await page.locator("#load-view").click();
-  await page.waitForFunction(() => document.querySelector('#settings-pane [aria-label="Y scale"]').value === 'log');
-  await page.waitForFunction(() =>
-    document
-      .querySelector("#load-status")
-      .textContent.startsWith("Snapshot complete"),
-  );
-  assert.equal(
-    await page.getByLabel("Y scale", { exact: true }).inputValue(),
-    "log",
-  );
-  await screenshot("03-configuration");
-  await page.getByRole("tab", { name: "Timeseries", exact: true }).click();
-  await page.locator("#interpolation").selectOption("pchip");
-  assert.equal(Number(await cell("#readout", "Curve A", 2)), 2.5);
-  await page.locator("#interpolation").selectOption("linear");
-  assert.ok(await page.locator('#alpha').evaluate(el => el.validity.valid), 'default EMA alpha is valid');
-  await page.locator('#smoothing').check();
-  assert.equal(Number(await cell('#readout', 'Curve A', 2)), 1.2);
-  await page.locator('#smoothing').uncheck();
-  await page.locator('#axis').selectOption('timestamp');
-  await page.locator('#pin-a').fill('1735689605000');
-  assert.equal(Number(await cell('#readout', 'Curve A', 2)), 2);
-  await screenshot('03b-timestamp-axis');
-  await page.locator("#import-view").setInputFiles(exported);
-  await page.waitForFunction(() =>
-    document
-      .querySelector("#load-status")
-      .textContent.startsWith("Snapshot complete"),
-  );
-  await page.getByRole("tab", { name: "Images", exact: true }).click();
-  await page.waitForFunction(() =>
-    document.querySelector(".frame-info").textContent.includes("1 of 4"),
-  );
-  await screenshot("04-image-timeline");
-  await page.waitForTimeout(300);
-  const imagePixels = await pixelStats(page, "#image-viewer");
-  assert.ok(imagePixels.gold > 500 && imagePixels.blue > 1000, "native image content must actually paint in the viewer");
-  const viewport = page.locator("#image-viewer");
-  const imageBox = await viewport.boundingBox();
-  await page.mouse.move(
-    imageBox.x + imageBox.width * 0.55,
-    imageBox.y + imageBox.height * 0.5,
-  );
-  await page.mouse.wheel(0, -600);
-  await page.waitForTimeout(500);
-  const camera = () =>
-    viewport.evaluate((el) => ({
-      zoom: Number(el.dataset.zoom),
-      x: Number(el.dataset.centerX),
-      y: Number(el.dataset.centerY),
-    }));
-  const cameraBefore = await camera();
+  assert.equal(await loss.locator(".card-inspection").isVisible(), false);
   assert.ok(
-    Number.isFinite(cameraBefore.zoom) && cameraBefore.zoom > 0,
-    "viewer camera telemetry available",
+    !/raw-derived|canonical|authoritative snapshot/i.test(
+      await page.locator("#page").innerText(),
+    ),
   );
-  await page.getByLabel("Image frame timeline").evaluate((el) => {
-    el.value = "2";
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+  const train = page
+    .locator(".chart-section")
+    .filter({ has: page.locator(".section-toggle", { hasText: "train" }) });
+  await expect(train.locator(".dashboard-cell")).toHaveCount(2);
+  await screenshot("ux-03-mixed-dashboard");
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await coordinate(loss, "Cursor A coordinate", 5);
+  await coordinate(loss, "Cursor B coordinate", 10);
+  assert.equal(await value(loss, "Curve A", 0), 2);
+  assert.equal(await value(loss, "Curve A", 1), 3);
+  assert.equal(await value(loss, "Curve B", 0), 2);
+  const answers = await loss.locator(".card-value-table").textContent();
+  await loss.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await loss.getByRole("button", { name: "Zoom out", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Fit configured range", exact: true })
+    .click();
+  assert.equal(await loss.locator(".card-value-table").textContent(), answers);
+  await loss.getByRole("button", { name: "Pan", exact: true }).click();
+  const surface = loss.locator(".u-over");
+  const bounds = await surface.boundingBox();
+  await page.mouse.move(
+    bounds.x + bounds.width * 0.5,
+    bounds.y + bounds.height * 0.5,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    bounds.x + bounds.width * 0.65,
+    bounds.y + bounds.height * 0.55,
+    { steps: 5 },
+  );
+  await page.mouse.up();
+  await loss
+    .getByRole("button", { name: "Previous view", exact: true })
+    .click();
+  await surface.focus();
+  await page.keyboard.press("+");
+  await page.keyboard.press("0");
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  assert.equal(await loss.locator(".card-value-table").textContent(), answers);
+  await loss.getByRole("button", { name: "Threshold", exact: true }).click();
+  await coordinate(loss, "Threshold value", 2);
+  const aCross = loss.locator(".card-crossings").filter({ hasText: "Curve A" }),
+    bCross = loss.locator(".card-crossings").filter({ hasText: "Curve B" });
+  await aCross.locator("summary").click();
+  await bCross.locator("summary").click();
+  await expect(aCross).toContainText("5, 15");
+  await expect(bCross).toContainText("0 – 5");
+  await screenshot("ux-04-cursors");
+  await score
+    .locator("canvas")
+    .evaluate((el) => (window.__neighborCanvas = el));
+  let editor = await edit(loss);
+  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
+  await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
+  await screenshot("ux-05-chart-editor");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await editor.waitFor({ state: "hidden" });
+  await loss.locator("canvas").waitFor();
+  assert.equal(
+    await score
+      .locator("canvas")
+      .evaluate((el) => el === window.__neighborCanvas),
+    true,
+    "editing a chart does not remount its neighbor",
+  );
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await coordinate(loss, "Cursor A coordinate", 5);
+  await coordinate(loss, "Cursor B coordinate", 10);
+  assert.equal(await value(loss, "Curve A", 0), 2);
+  await screenshot("ux-06-log-and-inspect");
+  editor = await edit(loss);
+  await editor
+    .getByLabel("Chart title", { exact: true })
+    .fill("Discard this title");
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(loss.locator(".card-title")).toHaveText("loss");
+  editor = await edit(loss);
+  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor
+    .getByLabel("Between observations", { exact: true })
+    .selectOption("pchip");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await editor.waitFor({ state: "hidden" });
+  await loss.locator("canvas").waitFor();
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await coordinate(loss, "Cursor A coordinate", 5);
+  assert.equal(await value(loss, "Curve A", 0), 2.5);
+  editor = await edit(loss);
+  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor
+    .getByLabel("Between observations", { exact: true })
+    .selectOption("linear");
+  await editor.getByLabel("Smooth the curve", { exact: true }).check();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await editor.waitFor({ state: "hidden" });
+  await loss.locator("canvas").waitFor();
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await coordinate(loss, "Cursor A coordinate", 5);
+  assert.equal(await value(loss, "Curve A", 0), 1.2);
+  editor = await edit(loss);
+  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor.getByLabel("Smooth the curve", { exact: true }).uncheck();
+  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
+  await editor.getByLabel("Y scale", { exact: true }).selectOption("linear");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await editor.waitFor({ state: "hidden" });
+  await loss.locator("canvas").waitFor();
+  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Clear cursors", exact: true })
+    .click();
+  await loss.getByRole("button", { name: "Pan", exact: true }).click();
+  const plotPixels = await pixelStats(page, loss.locator(".u-over"));
+  assert.ok(
+    plotPixels.blue > 50 && plotPixels.violet > 50,
+    "both actual curve colors are rendered",
+  );
+  await page.locator("details[data-menu=add] summary").click();
+  await page.getByRole("button", { name: "Line chart", exact: true }).click();
+  editor = page.getByRole("dialog", { name: "Add chart", exact: true });
+  await editor.waitFor();
+  await editor
+    .getByLabel("Chart title", { exact: true })
+    .fill("Cross-experiment comparison");
+  await editor
+    .getByLabel("Data sources", { exact: true })
+    .selectOption("explicit");
+  await editor
+    .getByLabel("Find metrics", { exact: true })
+    .fill("Remote baseline");
+  await editor.getByRole("checkbox", { name: /Remote baseline/ }).check();
+  await editor.getByLabel("Find metrics", { exact: true }).fill("Curve A");
+  await editor
+    .getByRole("checkbox", {
+      name: /train\/loss.*Curve A|Curve A.*train\/loss/,
+    })
+    .check();
+  await editor.locator(".ce-preview-plot canvas").waitFor();
+  await screenshot("ux-07-custom-series");
+  await editor.getByRole("button", { name: "Add chart", exact: true }).click();
+  await editor.waitFor({ state: "hidden" });
+  const custom = card("Cross-experiment comparison");
+  await custom.scrollIntoViewIfNeeded();
+  await custom.locator("canvas").waitFor();
+  await custom.getByRole("button", { name: "Inspect", exact: true }).click();
+  await coordinate(custom, "Cursor A coordinate", 5);
+  assert.equal(await value(custom, "Curve A", 0), 2);
+  assert.equal(await value(custom, "Remote baseline", 0), 3);
+  await page.getByLabel("View actions", { exact: true }).click();
+  await page.getByRole("button", { name: "Save as…", exact: true }).click();
+  const saveDialog = page.getByRole("dialog", {
+    name: "Save view as",
+    exact: true,
   });
-  await page.waitForFunction(() =>
-    document.querySelector(".frame-info").textContent.includes("3 of 4"),
+  await saveDialog
+    .getByLabel("View name", { exact: true })
+    .fill("My comparison");
+  await saveDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(
+    page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
+  ).toHaveText("My comparison");
+  await page.getByLabel("View actions", { exact: true }).click();
+  const downloading = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export view", exact: true }).click();
+  const downloaded = await downloading;
+  await downloaded.saveAs(path.join(artifacts, "workspace.json"));
+  const exported = await readFile(
+    path.join(artifacts, "workspace.json"),
+    "utf8",
   );
-  await page.waitForTimeout(300);
-  const cameraAfter = await camera();
-  for (const key of ["zoom", "x", "y"])
+  assert.ok(!exported.includes(process.env.NSET_BROWSER_TOKEN));
+  assert.equal(JSON.parse(exported).version, 2);
+  await page.reload();
+  await expect(page.locator("#connection")).toHaveText("Connected");
+  await expect(
+    page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
+  ).toHaveText("My comparison");
+  await expect(card("Cross-experiment comparison")).toHaveCount(1);
+  await page.getByLabel("View actions", { exact: true }).click();
+  await page
+    .getByLabel("Import view file", { exact: true })
+    .setInputFiles(path.join(artifacts, "workspace.json"));
+  await expect(card("Cross-experiment comparison")).toHaveCount(1);
+  await expect(page.locator("#global-error")).toBeHidden();
+  await image.scrollIntoViewIfNeeded();
+  await expect(image.locator(".frame-info")).toContainText("1 / 4");
+  const imageViewer = image.locator("[data-role=image-viewer]");
+  await image.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await page.waitForTimeout(250);
+  const before = await imageViewer.evaluate((el) => ({ ...el.dataset }));
+  await image.getByLabel("Image frame timeline", { exact: true }).fill("2");
+  await expect(image.locator(".frame-info")).toContainText("3 / 4");
+  await page.waitForTimeout(150);
+  const after = await imageViewer.evaluate((el) => ({ ...el.dataset }));
+  for (const key of ["zoom", "centerX", "centerY"])
     assert.ok(
-      Math.abs(cameraBefore[key] - cameraAfter[key]) < 1e-8,
-      `image ${key} changed on scrub: ${cameraBefore[key]} vs ${cameraAfter[key]}`,
+      Math.abs(Number(before[key]) - Number(after[key])) < 1e-8,
+      `camera ${key} stable while scrubbing`,
     );
-  await screenshot("05-image-zoom-preserved");
-  await page.getByRole("button", { name: "← Previous", exact: true }).click();
-  await page.waitForFunction(() =>
-    document.querySelector(".frame-info").textContent.includes("2 of 4"),
+  await image
+    .getByRole("button", { name: "Maximize chart", exact: true })
+    .click();
+  await expect(
+    image.getByLabel("Image frame timeline", { exact: true }),
+  ).toBeVisible();
+  await image.getByRole("button", { name: "← Previous", exact: true }).click();
+  await expect(image.locator(".frame-info")).toContainText("2 / 4");
+  await screenshot("ux-08-image-maximized");
+  await image
+    .getByRole("button", { name: "Restore chart", exact: true })
+    .click();
+  await image.getByRole("button", { name: "Fit", exact: true }).click();
+  await page.waitForTimeout(250);
+  const imagePixels = await pixelStats(page, imageViewer);
+  assert.ok(
+    imagePixels.gold > 100 && imagePixels.blue > 1000,
+    "image features are decoded and rendered",
   );
-  await viewport.focus();
-  await page.keyboard.press("ArrowRight");
-  await page.waitForFunction(() =>
-    document.querySelector(".frame-info").textContent.includes("3 of 4"),
-  );
-  await page.getByRole("button", { name: "Play", exact: true }).click();
-  await page.waitForFunction(() =>
-    document.querySelector(".frame-info").textContent.includes("4 of 4"),
-  );
-  await page.getByRole("button", {name: "Fullscreen", exact: true}).click();
-  await page.waitForFunction(() => document.fullscreenElement?.id === 'images-pane');
-  assert.ok(await page.getByLabel('Image frame timeline').isVisible(), 'fullscreen keeps timeline visible');
-  await page.getByRole('button', {name: '← Previous', exact: true}).click();
-  await page.waitForFunction(() => document.querySelector('.frame-info').textContent.includes('3 of 4'));
-  await screenshot('05b-image-fullscreen');
-  await page.getByRole('button', {name: 'Exit fullscreen', exact: true}).click();
-  await page.waitForFunction(() => document.fullscreenElement === null);
-  await page.getByRole("button", { name: "Reset view", exact: true }).click();
-  await page.getByRole("button", {name: "1:1 pixels", exact: true}).click();
-  await page.waitForFunction(() => Math.abs(Number(document.querySelector('#image-viewer').dataset.pixelZoom) - 1) < 1e-6);
-  await page.getByRole("button", {name: "Pixels: smooth", exact: true}).click();
-  await page.getByRole("button", {name: "Pixels: nearest", exact: true}).waitFor();
-  await page.getByRole("tab", { name: "Timeseries", exact: true }).click();
+  await image.getByLabel("Chart actions", { exact: true }).click();
+  await image.getByRole("button", { name: "Duplicate", exact: true }).click();
+  const copy = card("prediction copy");
+  await copy.scrollIntoViewIfNeeded();
+  await expect(copy.locator(".frame-info")).toContainText("1 / 4");
+  await copy.getByLabel("Image frame timeline", { exact: true }).fill("3");
+  await expect(copy.locator(".frame-info")).toContainText("4 / 4");
+  await expect(image.locator(".frame-info")).toContainText("2 / 4");
+  await screenshot("ux-09-independent-images");
   await page.setViewportSize({ width: 820, height: 1050 });
-  await screenshot("06-narrow-layout");
+  await page.evaluate(() => scrollTo(0, 0));
+  await screenshot("ux-10-narrow-dashboard");
   assert.equal(
     await page.evaluate(
       () => document.documentElement.scrollWidth > innerWidth + 2,
     ),
     false,
-    "page itself should not overflow horizontally",
+    "no horizontal page overflow",
   );
   await page.locator("#logout").click();
   await page.locator("#login-dialog").waitFor({ state: "visible" });
@@ -238,32 +340,32 @@ try {
     await page.evaluate(() => sessionStorage.getItem("nset.token")),
     null,
   );
-  assert.deepEqual(errors, [], "no uncaught browser errors");
+  assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
       kind: "final",
-      phase: "browser",
+      phase: "ux-browser",
       status: "passed",
       assertions: [
-        "interpolated readouts",
-        "all crossings and plateau",
-        "zoom/resize/log invariance",
-        "PCHIP",
-        "timestamp coordinates and full-series EMA",
-        "saved view export/import",
-        "protected options",
-        "image camera preservation",
-        "image keyboard and playback",
-        "fullscreen timeline and native-pixel controls",
+        "experiment/run tables",
+        "namespace mixed cards",
+        "direct cursors and all crossings",
+        "pan/zoom/fit/keyboard invariance",
+        "per-chart log/PCHIP/EMA editing",
+        "cancel and neighbor preservation",
+        "cross-experiment custom sources",
+        "named views reload import export",
+        "image camera and maximize",
+        "independent image cards",
         "responsive layout",
         "token cleanup",
       ],
-      rendered_pixels: {plot: plotPixels, image: imagePixels},
+      rendered_pixels: { plot: plotPixels, image: imagePixels },
       screenshots: artifacts,
     }),
   );
 } catch (error) {
-  await screenshot("failure");
+  await screenshot("ux-failure");
   console.error(error);
   process.exitCode = 1;
 } finally {

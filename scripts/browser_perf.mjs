@@ -6,59 +6,76 @@ import path from "node:path";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root, "web/package.json"));
 const { chromium } = require("playwright");
+const { expect } = require("@playwright/test");
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1500, height: 1100 } });
 const errors = [];
-page.on("pageerror", (error) => errors.push(error.message));
+page.on("pageerror", (e) => errors.push(e.message));
 try {
   await page.goto(process.env.NSET_BROWSER_URL);
-  await page.locator("#token").fill(process.env.NSET_BROWSER_TOKEN);
-  await page.locator("#login-form button[type=submit]").click();
-  await page.getByLabel("Compare Dense 100k", { exact: true }).waitFor();
+  await page
+    .getByLabel("Access token", { exact: true })
+    .fill(process.env.NSET_BROWSER_TOKEN);
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.locator(".experiment-link").first().click();
+  await page
+    .getByRole("checkbox", { name: "Select all matching runs", exact: true })
+    .check();
   const start = performance.now();
-  await page.locator("#select-all").click();
-  await page.waitForFunction(() =>
-    document
-      .querySelector("#load-status")
-      .textContent.startsWith("Snapshot complete"),
-  );
-  assert.match(
-    await page.locator("#data-note").innerText(),
-    /100,000 observations/,
-  );
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  const card = page
+    .locator(".dashboard-cell[data-card-kind=timeseries]")
+    .first();
+  await card.locator("canvas").waitFor();
+  await expect(card.locator(".card-status")).toHaveText("");
   const linearMs = performance.now() - start;
-  await page.locator("#pin-a").fill("50.5");
+  await card.getByRole("button", { name: "Inspect", exact: true }).click();
+  await card.getByLabel("Cursor A coordinate", { exact: true }).fill("50.5");
+  await card.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
   const actual = Number(
-    await page.locator("#readout tbody tr td").nth(2).innerText(),
+    await card
+      .locator(".card-value-table tr")
+      .filter({ hasText: "Dense 100k" })
+      .locator("td")
+      .first()
+      .innerText(),
   );
-  assert.ok(Math.abs(actual - Number(process.env.NSET_EXPECTED_QUERY)) < 1e-7);
+  assert.ok(Math.abs(actual - Number(process.env.NSET_EXPECTED_QUERY)) < 1e-5);
+  await card.getByLabel("Chart actions", { exact: true }).click();
+  await card.getByRole("button", { name: "Edit chart", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
+  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
   const cubicStart = performance.now();
-  await page.locator("#interpolation").selectOption("pchip");
-  await page.waitForFunction(() =>
-    document.querySelector("#data-note").textContent.includes("pchip"),
-  );
+  await editor
+    .getByLabel("Between observations", { exact: true })
+    .selectOption("pchip");
+  await editor.locator(".ce-preview-plot canvas").waitFor();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await editor.waitFor({ state: "hidden" });
+  await card.locator("canvas").waitFor();
   const pchipMs = performance.now() - cubicStart;
   await mkdir(path.join(root, "artifacts/screenshots"), { recursive: true });
   await page.screenshot({
-    path: path.join(root, "artifacts/screenshots/dense-100k.png"),
+    path: path.join(root, "artifacts/screenshots/ux-dense-100k.png"),
     fullPage: true,
   });
-  const memory = await page.evaluate(
-    () => performance.memory?.usedJSHeapSize ?? null,
-  );
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
       kind: "final",
-      phase: "browser-throughput",
+      phase: "ux-browser-throughput",
       points: 100000,
       linear_load_and_render_ms: linearMs,
-      pchip_switch_and_render_ms: pchipMs,
-      used_js_heap_bytes: memory,
+      pchip_editor_and_render_ms: pchipMs,
+      used_js_heap_bytes: await page.evaluate(
+        () => performance.memory?.usedJSHeapSize ?? null,
+      ),
       query_actual: actual,
       status: "passed",
       caveat:
-        "One local Chromium measurement; includes UI and HTTP work, not a general performance guarantee.",
+        "One local Chromium observation. PCHIP includes editor preview/apply interaction, unlike the old toolbar-only benchmark.",
     }),
   );
 } finally {

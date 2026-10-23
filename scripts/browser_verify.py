@@ -1,4 +1,4 @@
-"""Run real Chromium interactions against an isolated compiled server."""
+"""Exercise the redesigned workspace against an isolated embedded Rust server."""
 import json
 import os
 from pathlib import Path
@@ -19,14 +19,22 @@ def main():
         run_b = server.client.start_run(experiment, "Curve B", params={"lr": 0.003})
         for run, points in [(run_a, [(0, 1), (10, 3), (20, 1)]),
                             (run_b, [(0, 2), (5, 2), (20, 4)])]:
-            run.log_batch([{"key": "loss/test", "step": x, "value": y,
+            run.log_batch([{"key": "train/loss", "step": x, "value": y,
                             "timestamp": 1735689600000 + x * 1000} for x, y in points])
+            run.log_batch([{"key": "eval/score", "step": x, "value": y,
+                            "timestamp": 1735689600000 + x * 1000}
+                           for x, y in [(0, .1), (10, .8), (20, .9)]])
             for frame in range(4):
-                run.log_image_bytes("prediction", frame_png(frame / 3), step=frame * 10)
+                run.log_image_bytes("train/prediction", frame_png(frame / 3), step=frame * 10)
             run.finish()
+        other = server.client.experiment("Other experiment")
+        remote = server.client.start_run(other, "Remote baseline")
+        remote.log_batch([{"key": "validation/error", "step": x, "value": y}
+                          for x, y in [(0, 4), (10, 2), (20, 1)]])
+        remote.finish()
         env = dict(os.environ, NSET_BROWSER_URL=server.url, NSET_BROWSER_TOKEN=server.token,
                    NSET_BROWSER_FIXTURE=json.dumps({"experiment": experiment["id"],
-                                                    "a": run_a.id, "b": run_b.id}))
+                       "a": run_a.id, "b": run_b.id, "other": other["id"], "remote": remote.id}))
         subprocess.run(["node", str(ROOT / "scripts/browser_verify.mjs")], env=env, check=True)
     finally:
         server.close()
