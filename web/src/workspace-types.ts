@@ -94,6 +94,8 @@ export interface PlotInteraction {
   inferZoomAxes?: boolean;
   directGestures?: boolean;
   cursorAxis?: "x" | "y";
+  /** Hover-scoped C shortcut; owner cycles state and reconfigures interaction. */
+  onCursorModeCycle?: () => void;
   onHorizontalPin?: (pin: "a" | "b", value: number) => void;
   activePin: "a" | "b";
   onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
