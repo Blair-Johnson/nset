@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route("/catalog", get(catalog))
         .route("/experiments", get(experiments).post(create_experiment))
         .route("/runs", get(runs).post(create_run))
         .route("/runs/{id}", get(run).patch(patch_run))
@@ -83,6 +84,9 @@ async fn normalize_errors(request: Request, next: Next) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
     response
+}
+async fn catalog(State(state): State<AppState>) -> Result<Json<Catalog>> {
+    Ok(Json(state.db.catalog().await?))
 }
 async fn experiments(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(json!({"experiments":state.db.experiments().await?})))
