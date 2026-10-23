@@ -60,7 +60,7 @@ For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, 
 
 ## Explore runs and charts
 
-Open Experiments, choose an experiment, then search or filter its run table. Checkboxes select runs for comparison; row highlighting is not selection. Open Charts to compare them, and use the persistent, collapsible Runs drawer to adjust the selection without leaving the workspace. Click a run name for its dedicated detail page. Its configuration viewer searches dotted paths and nested values, preserves types, and offers Copy JSON / Export JSON; it is not a raw YAML or file-artifact browser.
+Open Experiments, choose an experiment, then search or filter its run table. Checkboxes select runs for comparison; row highlighting is not selection. Open Charts to compare them, and use the Runs pane to adjust the selection without leaving the workspace. Its right-edge chevron collapses or restores it; dragging the divider changes its width. Click a run name for its dedicated detail page. Its configuration viewer searches dotted paths and nested values, preserves types, and offers Copy JSON / Export JSON; it is not a raw YAML or file-artifact browser.
 
 Click a run’s color swatch to change its shared color in tables, the drawer and plots. These overrides are stored only in this browser, separately from saved views and view exports.
 
@@ -70,7 +70,7 @@ The dashboard X axis chooses Step, Wall time or Relative time (milliseconds sinc
 
 Left-drag a scalar plot to zoom, with X, Y or both inferred from the gesture. Right-button drag or Space + left-drag pans; Alt + wheel zooms. Compact icons provide fit, back and +/−, plus vertical and horizontal A/B cursors for values, deltas and all crossings. Resize each card’s width and height independently from its corner, or maximize it to fill the workspace. See `web/README.md` for controls and precision details.
 
-Named views save locally in this browser. View actions (⋯) → Save as… creates another view; Export view / Import view… transfers layout and settings, not credentials or logged data. These files are not data backups.
+View identifies the saved layout, run selection and chart settings; Overview is the initial view’s name. A single view appears as plain text, with a selector when multiple views exist. Named views save locally in this browser. View actions (⋯) → Save view as… creates another view; Export view / Import view… transfers layout and settings, not credentials or logged data. These files are not data backups.
 
 ## What the plots mean
 

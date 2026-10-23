@@ -2,7 +2,7 @@
 
 ## From experiments to Charts
 
-Open Experiments and choose an experiment. In Runs, search names, parameters or tags, filter by status, and sort columns; the table includes latest metric values. Use checkboxes—not row highlighting—to select runs. Charts keeps that selection and provides a persistent left Runs drawer for changing it in place. Collapse the drawer for more plot space.
+Open Experiments and choose an experiment. In Runs, search names, parameters or tags, filter by status, and sort columns; the table includes latest metric values. Use checkboxes—not row highlighting—to select runs. Charts keeps that selection and provides a persistent left Runs drawer for changing it in place. Use the chevron on the drawer’s right edge to collapse or restore it, and drag the divider to adjust its width.
 
 Click a run name to open its dedicated detail page. The configuration viewer groups dotted keys and nested objects, shows typed values, and searches paths and values. Copy JSON and Export JSON preserve the logged configuration; tags remain separate. This is a viewer for parsed run parameters, not a raw YAML file or artifact browser. Click a color swatch to choose a shared run color across the table, drawer and plots. Run-color overrides are browser-local preferences, separate from saved views and their exports.
 
@@ -26,7 +26,7 @@ Drag the corner Resize chart handle to change width and height independently; ar
 
 ## Keep and share views
 
-A named view remembers the selected runs, sections, card sources and chart settings. Edits save automatically in this browser’s local storage; views are not stored on the tracker server or synchronized between browsers. Switch views with **Saved view**, and use the **View actions (⋯)** menu to **Save as…**, rename, export, import or remove a view. Export before clearing browser storage if you want to keep a copy.
+View identifies a saved layout, run selection and chart settings; Overview is the initial view’s name. A single view appears as plain text, with a selector when multiple views exist. Edits save automatically in this browser’s local storage; views are not stored on the tracker server or synchronized between browsers. Use View actions (⋯) → Save view as… to create another view, or rename, export, import or remove one. Export before clearing browser storage if you want to keep a copy.
 
 **Export view** downloads a file that **Import view…** can read without manual editing. It contains layout, settings and experiment/run/key references—not tokens, metric histories, image bytes or shared run-color overrides. Saved-view files are not data backups. Import requires the original experiment to exist on the connected server; it does not copy experiments or match runs by name. Unavailable sources chosen for a fixed comparison stay listed as unavailable so you can repair the selection. Temporary zoom positions and vertical/horizontal A/B cursors are not saved in these files.
 
@@ -36,7 +36,7 @@ Left-drag to zoom: a mostly horizontal gesture selects X, a mostly vertical gest
 
 The icon controls have accessible labels: Zoom out (−), Zoom in (+), Fit configured range and Previous view (back). Double-click also fits. With the plot focused, +/− zoom, arrow keys pan, 0 fits and Backspace goes back; shortcuts do not take over text fields.
 
-Hover for interpolated values. Add vertical cursor or Add horizontal cursor starts A/B placement; select A or B, click to place it, drag its line, or enter a coordinate. Vertical cursors report each curve’s A/B values and Δ B − A. Horizontal cursors report Δ Y and expandable results containing every crossing and equal-value interval at each level. Clear cursors removes both pairs. Wall-time coordinates are UTC epoch milliseconds; relative-time coordinates are milliseconds from run creation.
+Hover for interpolated values. Activate Add vertical cursor or Add horizontal cursor once, then click to place A and B. Empty-space dragging still zooms while either cursor is waiting; right-button or Space + left-drag still pans. Drag an existing cursor line to move it or enter an exact coordinate. The primary delta is B − A between cursor positions: steps or a signed duration for vertical cursors, metric values for horizontal cursors. Per-run values, crossings and equal-value intervals remain available as secondary results. Clear cursors removes both pairs. Wall-time coordinates are UTC epoch milliseconds; relative-time coordinates are milliseconds from run creation.
 
 Each comparison uses complete histories. Duplicate coordinates use the latest inserted observation; values between observations are estimates, and out-of-range answers show an em dash rather than extrapolation. Smoothing uses the full ordered history, so moving the viewport does not change answers. Smooth interpolation is shape-preserving. Stepped and other display-only line styles do not change numerical cursor answers. Central 98% displays a clipping notice and Fit all; choose All values in the editor to disable that policy permanently.
 
