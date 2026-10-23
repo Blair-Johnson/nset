@@ -14,7 +14,7 @@ The adaptive renderer and numerical engine passed 45 combined tests in rx r13. T
 
 The hardened Rust backend passed 24 tests, formatting, compilation, and strict Clippy in rx r9. Coverage includes authentication, snapshot pagination with more than 50,000 observations, concurrent readers/writers, transaction rollback, schema-version rejection without mutation, PNG/JPEG/WebP validation and unchanged byte retrieval, failure cleanup, security headers, and graceful SIGTERM exit. An additional image-timestamp regression was added during integration.
 
-The initial frontend passed 70 combined unit tests and five Chromium API-fixture scenarios in rx r14. Those scenarios cover complete pagination, configuration validation, malicious names, saved views, image navigation, delayed-image races, mobile layout, and zoom-invariant readouts. The later expanded option surface will be verified separately.
+The initial frontend passed 70 combined unit tests and five Chromium API-fixture scenarios in rx r14. Those scenarios cover complete pagination, configuration validation, malicious names, saved views, image navigation, delayed-image races, mobile layout, and zoom-invariant readouts. The expanded configuration/matched-path component passed 194 unit tests and ten Chromium fixtures in rx r21. It covers nonlinear projections, zoom/resize rebuilding, range/marker adapters, paired legend visibility, short-drag suppression, singleton display and rejected-chart preservation. Parent integration adds distinct timestamp tick defaults and transactional application state, with regression tests.
 
 ## Real-server integration
 

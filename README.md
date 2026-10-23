@@ -31,7 +31,9 @@ Keep the database on a local filesystem. Remote training clients use HTTP, not s
 
 ## Populate example runs
 
-With the server running, in another terminal:
+For an isolated demo, run `pixi run preview` after installing the web dependencies. It builds the executable, starts a loopback server on port 8080, and seeds three runs. Enter the token stored in `artifacts/preview.token`; the synthetic database stays in ignored `artifacts/preview-data`. Stop the foreground command with Ctrl-C.
+
+For your own running server, populate examples from another terminal:
 
 ```sh
 pixi run python examples/demo.py --token-file ./access-token
@@ -62,13 +64,13 @@ Metric history is paginated, not sampled. The inspector loads the complete snaps
 
 Linear and shape-preserving cubic interpolation are selectable. EMA is defined per observation and computed on the complete ordered series, not on the current viewport. Axis transformations affect display, not the underlying numerical query. A horizontal threshold may have several crossings or an interval of equal values; neither is silently reduced to a first-hit answer.
 
-Common uPlot settings are exposed through controls and saved view configurations. Advanced JSON options provide additional customization without executing arbitrary JavaScript. Function-valued callbacks and protected inspector hooks are not equivalent to JSON configuration; see the frontend configuration documentation for exact supported options and boundaries.
+Common uPlot settings are exposed through controls and saved view configurations. Advanced JSON options provide additional customization without executing arbitrary JavaScript. Function-valued callbacks and protected inspector hooks are not equivalent to JSON configuration; see `web/README.md` for exact supported options and boundaries.
 
-Image bytes are preserved without recompression. Timeline changes preserve the viewer's camera rather than fitting each new frame. Image frame selection is discrete and labeled by its actual logged step; images are not interpolated between training steps.
+Image bytes are preserved without recompression. Timeline changes preserve the viewer's camera rather than fitting each new frame. The whole inspector can go fullscreen with its timeline still available; native 1:1 pixels, smooth/nearest resampling, rotation and flip are exposed. Image frame selection is discrete and labeled by its actual logged step; images are not interpolated between training steps.
 
 ## Verification and architecture
 
-The API and initial component boundaries are documented in `docs/contract.md`. The detailed development checklist is retained locally in ignored `.agents/plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md` once integration verification completes.
+The API and initial component boundaries are documented in `docs/contract.md`. The detailed development checklist is retained locally in ignored `.agents/plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
 
 ```sh
 pixi run check

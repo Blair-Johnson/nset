@@ -246,7 +246,7 @@ test("runtime range rejection preserves saved settings, chart and numerical read
   await fixture(page);
   await page.locator("#interpolation").selectOption("pchip");
   const saved = await page.evaluate(() => localStorage.getItem("nset.config"));
-  const readout = await page.locator("#readout").innerText();
+  const readout = await page.locator("#readout").textContent();
   await page.evaluate(() => {
     (window as any).__previousCanvas = document.querySelector("#plot canvas");
   });
@@ -261,7 +261,7 @@ test("runtime range rejection preserves saved settings, chart and numerical read
   expect(await page.evaluate(() => localStorage.getItem("nset.config"))).toBe(
     saved,
   );
-  expect(await page.locator("#readout").innerText()).toBe(readout);
+  expect(await page.locator("#readout").textContent()).toBe(readout);
   expect(
     await page.evaluate(
       () =>
