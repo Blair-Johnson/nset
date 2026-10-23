@@ -7,7 +7,6 @@ import "./run-detail.css";
 
 export interface RunDetailOptions {
   onBack: () => void;
-  onCharts: () => void;
   catalog?: Catalog;
 }
 
@@ -24,12 +23,9 @@ export function renderRunDetail(
   const name = element("h1", "", run.name || run.id);
   name.title = run.name || run.id;
   const status = element("span", `run-detail-status ${run.status}`, run.status);
-  const charts = element("button", "", "Charts");
-  charts.type = "button";
-  charts.onclick = options.onCharts;
   header.append(back);
   if (options.catalog) header.append(runSwatch(options.catalog, run.id));
-  header.append(name, status, charts);
+  header.append(name, status);
   const metadata = element("dl", "run-detail-metadata");
   const add = (label: string, value: HTMLElement) => {
     const pair = element("div");

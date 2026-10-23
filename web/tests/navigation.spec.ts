@@ -811,3 +811,40 @@ test("both horizontal pins drag in ordinary zoom and right-pan overrides pin pro
   expect((await state(page)).pins).toEqual(pins);
   expect((await state(page)).view.x[0]).toBeCloseTo(-20, 0);
 });
+
+test("selection border is absent at rest and clears after release cancel and pan", async ({
+  page,
+}, info) => {
+  await directFixture(page);
+  const selection = page.locator(".u-select");
+  await expect(selection).toHaveCSS("visibility", "hidden");
+  await page
+    .locator(".u-over")
+    .screenshot({ path: info.outputPath("idle-no-blue-box.png") });
+  const box = (await page.locator(".u-over").boundingBox())!;
+  const start = async () => {
+    await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.3);
+    await page.mouse.down();
+    await expect(selection).toHaveCSS("visibility", "hidden");
+    await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.7, {
+      steps: 5,
+    });
+    await expect(selection).toHaveCSS("visibility", "visible");
+  };
+  await start();
+  await page.mouse.up();
+  await expect(selection).toHaveCSS("visibility", "hidden");
+  await page.getByRole("button", { name: "Fit", exact: true }).click();
+  await start();
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(selection).toHaveCSS("visibility", "hidden");
+  await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.3);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5, {
+    steps: 5,
+  });
+  await expect(selection).toHaveCSS("visibility", "hidden");
+  await page.mouse.up({ button: "right" });
+  await expect(selection).toHaveCSS("visibility", "hidden");
+});

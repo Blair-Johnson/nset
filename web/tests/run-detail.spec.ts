@@ -61,9 +61,6 @@ async function fixture(page: Page, large = false, detail = false) {
             onBack: () => {
               (window as any).__back = true;
             },
-            onCharts: () => {
-              (window as any).__charts = true;
-            },
           }),
         );
       } else {
@@ -221,13 +218,10 @@ test("dedicated page has separate tags, full timestamps and routing callbacks", 
     "2023-11-14T22:13:20.000Z",
   );
   await page.getByRole("button", { name: "← Runs", exact: true }).click();
-  await page.getByRole("button", { name: "Charts", exact: true }).click();
-  expect(
-    await page.evaluate(() => [
-      (window as any).__back,
-      (window as any).__charts,
-    ]),
-  ).toEqual([true, true]);
+  await expect(
+    page.getByRole("button", { name: "Charts", exact: true }),
+  ).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__back)).toBe(true);
   await expect(page.locator("[data-run-color-id='run-1']")).toBeVisible();
   await page.evaluate(() =>
     window.addEventListener("nset:run-colors-changed", () => {

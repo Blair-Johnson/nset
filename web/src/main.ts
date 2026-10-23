@@ -277,10 +277,6 @@ function renderPage() {
           ? renderRunDetail(run, {
               catalog,
               onBack: () => navigate(experiment.id),
-              onCharts: () => {
-                updateSelection(workspace, [run.id]);
-                navigate(experiment.id, "charts");
-              },
             })
           : element("p", "", "Run not found"),
       );

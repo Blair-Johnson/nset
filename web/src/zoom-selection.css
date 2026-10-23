@@ -4,6 +4,10 @@
   border: 2px solid #75bdff;
   box-sizing: border-box;
   pointer-events: none;
+  visibility: hidden;
+}
+.plot-navigation.plot-zoom-selecting .u-select {
+  visibility: visible;
 }
 
 /* Native hover is transient; pinned comparisons are drawn separately. */

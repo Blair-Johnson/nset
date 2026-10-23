@@ -396,6 +396,7 @@ export class PlotNavigation {
     else if (g.pin) this.pinAt(g.pin, x, y);
     else if (g.mode === "zoom") {
       const axis = this.zoomAxes(g, x, y);
+      this.u.root.classList.toggle("plot-zoom-selecting", axis !== null);
       this.u.setSelect(
         axis
           ? {
@@ -415,6 +416,7 @@ export class PlotNavigation {
     if (g?.mode === "pan") this.suppressHover();
     if (g && this.u.over.hasPointerCapture(g.id))
       this.u.over.releasePointerCapture(g.id);
+    this.u.root.classList.remove("plot-zoom-selecting");
     this.u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
     this.cursor();
     return g;
