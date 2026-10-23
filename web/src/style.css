@@ -395,6 +395,9 @@ h3 {
     width: 180px;
     border-right: 0;
   }
+  .run-table th:nth-child(2) {
+    z-index: 2;
+  }
   .run-table td:nth-child(2) {
     position: static;
     background: transparent;

@@ -91,6 +91,44 @@ for (const width of [1440, 390])
       });
     const before = await measure();
     await page.screenshot({ path: info.outputPath("initial.png") });
+    if (width === 390 && !process.env.TABLE_BASELINE) {
+      await page.locator(".table-scroll").evaluate((wrap) => {
+        wrap.scrollLeft = 60;
+      });
+      const all = page.getByRole("checkbox", {
+        name: "Select all matching runs",
+        exact: true,
+      });
+      await expect
+        .poll(() =>
+          all.evaluate((node) => {
+            const bounds = node.getBoundingClientRect();
+            return (
+              document.elementFromPoint(
+                bounds.x + bounds.width / 2,
+                bounds.y + bounds.height / 2,
+              ) === node
+            );
+          }),
+        )
+        .toBe(true);
+      await page.screenshot({
+        path: info.outputPath("partial-scroll-checkbox.png"),
+      });
+      await all.click();
+      await expect(all).toBeChecked();
+      expect(
+        await page.evaluate(
+          () => (window as any).__layout.selections.at(-1).length,
+        ),
+      ).toBe(120);
+      await page.keyboard.press("Space");
+      await expect(all).toBeFocused();
+      await expect(all).not.toBeChecked();
+      expect(
+        await page.evaluate(() => (window as any).__layout.selections.at(-1)),
+      ).toEqual([]);
+    }
     await page.locator(".table-scroll").evaluate((wrap) => {
       wrap.scrollTop = wrap.scrollHeight;
       wrap.scrollLeft = wrap.scrollWidth;
