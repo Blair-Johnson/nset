@@ -1,0 +1,224 @@
+use crate::{
+    AppState, assets, auth,
+    config::MAX_BODY,
+    errors::{ApiError, Result},
+    models::*,
+};
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+pub fn router(state: AppState) -> Router {
+    let api = Router::new()
+        .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route("/experiments", get(experiments).post(create_experiment))
+        .route("/runs", get(runs).post(create_run))
+        .route("/runs/{id}", get(run).patch(patch_run))
+        .route("/runs/{id}/metrics", get(metrics).post(insert_metrics))
+        .route("/runs/{id}/metric-keys", get(metric_keys))
+        .route("/runs/{id}/images", get(images).post(insert_image))
+        .route("/images/{id}/content", get(image_content))
+        .fallback(|| async { ApiError::missing() })
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(middleware::from_fn(normalize_errors));
+    Router::new()
+        .nest("/api", api)
+        .fallback(assets::serve)
+        .with_state(state)
+}
+async fn normalize_errors(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    if (response.status().is_client_error() || response.status().is_server_error())
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            != Some("application/json")
+    {
+        let status = response.status();
+        response = ApiError(
+            status,
+            match status {
+                StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds 32 MiB",
+                StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
+                StatusCode::NOT_FOUND => "resource not found",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported content type",
+                _ => "invalid request",
+            },
+        )
+        .into_response();
+    }
+    response
+        .headers_mut()
+        .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
+    response
+}
+async fn experiments(State(state): State<AppState>) -> Result<Json<Value>> {
+    Ok(Json(json!({"experiments":state.db.experiments().await?})))
+}
+async fn create_experiment(
+    State(state): State<AppState>,
+    Json(input): Json<NewExperiment>,
+) -> Result<Response> {
+    let (experiment, created) = state.db.create_experiment(input.name).await?;
+    Ok((
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(experiment),
+    )
+        .into_response())
+}
+#[derive(Deserialize)]
+struct RunQuery {
+    experiment_id: Option<String>,
+}
+async fn runs(State(state): State<AppState>, Query(query): Query<RunQuery>) -> Result<Json<Value>> {
+    Ok(Json(
+        json!({"runs":state.db.runs(query.experiment_id).await?}),
+    ))
+}
+async fn create_run(State(state): State<AppState>, Json(input): Json<NewRun>) -> Result<Response> {
+    Ok((StatusCode::CREATED, Json(state.db.create_run(input).await?)).into_response())
+}
+async fn run(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Run>> {
+    Ok(Json(state.db.run(id).await?))
+}
+async fn patch_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<PatchRun>,
+) -> Result<Json<Run>> {
+    Ok(Json(state.db.patch_run(id, input).await?))
+}
+async fn insert_metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<MetricBatch>,
+) -> Result<Json<Value>> {
+    Ok(Json(
+        json!({"inserted":state.db.insert_metrics(id,input).await?}),
+    ))
+}
+async fn metric_keys(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    Ok(Json(json!({"keys":state.db.metric_keys(id).await?})))
+}
+async fn metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MetricQuery>,
+) -> Result<Json<MetricPage>> {
+    Ok(Json(state.db.metrics(id, query).await?))
+}
+#[derive(Deserialize)]
+struct ImageFilter {
+    key: Option<String>,
+}
+async fn images(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ImageFilter>,
+) -> Result<Json<Value>> {
+    Ok(Json(json!({"images":state.db.images(id,query.key).await?})))
+}
+async fn insert_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ImageQuery>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response> {
+    name(&query.key)?;
+    safe(query.step)?;
+    safe(query.timestamp)?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let format = match content_type {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/webp" => image::ImageFormat::WebP,
+        _ => {
+            return Err(ApiError(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "only raw PNG, JPEG, and WebP are supported",
+            ));
+        }
+    };
+    let content_type = content_type.to_owned();
+    // Avoid decoding even a valid large image for an unknown run.
+    state.db.run(id.clone()).await?;
+    let permit = state
+        .image_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::busy())?;
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let _permit = permit;
+        if image::guess_format(&bytes).ok() != Some(format) {
+            return Err(ApiError::bad("image content type does not match bytes"));
+        }
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(32768);
+        limits.max_image_height = Some(32768);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        reader.limits(limits);
+        // Full decode, not just dimensions: truncated/header-only files must fail.
+        let decoded = reader
+            .decode()
+            .map_err(|_| ApiError::bad("invalid, corrupt, or oversized image"))?;
+        if decoded.width() == 0 || decoded.height() == 0 {
+            return Err(ApiError::bad("empty image"));
+        }
+        Ok(bytes.to_vec())
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .db
+                .insert_image(id, query, content_type, bytes)
+                .await?,
+        ),
+    )
+        .into_response())
+}
+async fn image_content(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+    let (image, bytes) = state.db.image_content(id).await?;
+    let content_type = match image.content_type.as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/webp" => "image/webp",
+        _ => return Err(ApiError::internal("invalid stored content type")),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "private, no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
