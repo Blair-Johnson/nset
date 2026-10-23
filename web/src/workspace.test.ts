@@ -1,4 +1,5 @@
 import test from "node:test";
+import { palette } from "./config";
 import assert from "node:assert/strict";
 import {
   defaultSections,
@@ -114,12 +115,12 @@ test("explicit cross-experiment bindings ignore selection and preserve unavailab
   );
   assert.equal(card.source.series.length, 3);
 });
-test("new charts have unique IDs, safe light defaults and no implicit selection", () => {
+test("new charts have unique IDs, safe dark defaults and no implicit selection", () => {
   const a = newChart("timeseries", []),
     b = newChart("timeseries", []);
   assert.notEqual(a.id, b.id);
   assert.equal(a.config.height, 280);
-  assert.equal(a.config.style.color, "#2563eb");
+  assert.equal(a.config.style.color, palette[0]);
   assert.equal(a.outliers, "all");
   assert.equal(a.config.smoothing, false);
   assert.deepEqual(a.source, { mode: "selected", keys: [] });
