@@ -1878,3 +1878,38 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
     }
   }
 });
+
+test("scrolling inside the editor never scrolls the page behind it", async ({ page }) => {
+  await fixture(page, { many: true });
+  await page.evaluate(() => {
+    const filler = document.createElement("div");
+    filler.style.height = "5000px";
+    document.body.append(filler);
+    window.scrollTo(0, 0);
+  });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollHeight > innerHeight * 2),
+  ).toBe(true);
+  const settings = dialog(page).locator(".ce-settings");
+  const targets = [
+    settings,
+    dialog(page).locator(".ce-header"),
+    dialog(page).locator(".ce-preview"),
+  ];
+  for (const target of targets) {
+    for (const dy of [4000, -4000, 4000]) {
+      await target.hover();
+      await page.mouse.wheel(0, dy);
+      await page.waitForTimeout(80);
+    }
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  }
+  // The settings column itself still scrolls.
+  const [scrollH, clientH] = await settings.evaluate((n) => [n.scrollHeight, n.clientHeight]);
+  if (scrollH > clientH + 10) {
+    await settings.hover();
+    await page.mouse.wheel(0, 300);
+    await expect.poll(() => settings.evaluate((n) => n.scrollTop)).toBeGreaterThan(0);
+  }
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});

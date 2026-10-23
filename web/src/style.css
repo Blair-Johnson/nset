@@ -44,6 +44,13 @@ body {
   background: var(--bg);
   color: var(--text);
 }
+/* A modal dialog owns scrolling: the page behind it stays put. */
+html:has(dialog:modal) {
+  overflow: hidden;
+}
+dialog {
+  overscroll-behavior: contain;
+}
 button,
 input,
 select,
