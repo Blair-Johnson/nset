@@ -427,10 +427,23 @@ for (const dpr of [1, 2])
               info.outputPath("measurements.json"),
               JSON.stringify(results, null, 2),
             );
-            await page.screenshot({
-              path: info.outputPath(`${scenario.name}-${mode}.png`),
-              fullPage: true,
-            });
+            if (
+              process.env.NSET_AXIS_CAPTURE === "all" ||
+              (mode === "card" &&
+                ["large", "timestamp", "timestamp-ms"].includes(
+                  scenario.name,
+                )) ||
+              (variant !== "baseline" &&
+                (result.clipped.length ||
+                  result.textCollisions.length ||
+                  result.collisions.length ||
+                  result.escaped.length))
+            ) {
+              await page.screenshot({
+                path: info.outputPath(`${scenario.name}-${mode}.png`),
+                fullPage: true,
+              });
+            }
             expect(result.labels.length).toBe(4);
             expect(result.collisions).toEqual([]);
             expect(result.escaped).toEqual([]);
