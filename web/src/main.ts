@@ -78,6 +78,7 @@ function persist() {
   saveLibrary(library);
 }
 function commitLibrary(mutate: () => void): boolean {
+  const focused = document.activeElement?.getAttribute("aria-label");
   const before = structuredClone(library);
   try {
     mutate();
@@ -89,6 +90,10 @@ function commitLibrary(mutate: () => void): boolean {
     disposeCards();
     error(`Could not save this view in your browser: ${message(e)}`);
     renderPage();
+    if (focused)
+      [...$("page").querySelectorAll<HTMLElement>("[aria-label]")]
+        .find((node) => node.getAttribute("aria-label") === focused)
+        ?.focus({ preventScroll: true });
     return false;
   }
 }
@@ -326,7 +331,7 @@ function renderPage() {
         const layout = element("div", "workspace-layout");
         let drawerState = drawerStates.get(experiment.id);
         if (!drawerState) {
-          drawerState = runDrawerState();
+          drawerState = runDrawerState(experiment.id);
           drawerStates.set(experiment.id, drawerState);
         }
         runDrawer = new RunDrawer(
@@ -336,8 +341,9 @@ function renderPage() {
           () => navigate(experiment.id),
           openRun,
         );
-        layout.append(runDrawer.backdrop, runDrawer.root, grid);
+        layout.append(runDrawer.backdrop, runDrawer.pane, grid);
         $("page").append(tools, layout);
+        runDrawer.mount();
         currentWorkspaceId = workspace.id;
       }
       renderCharts(workspace);
@@ -567,11 +573,12 @@ function workspaceToolbar(workspace: Workspace) {
     menu.append(
       button(label, () => {
         more.open = false;
+        moreSummary.focus({ preventScroll: true });
         fn();
       }),
     );
   action(
-    "Save as…",
+    "Save view as…",
     () =>
       void (async () => {
         const name = await ask(
@@ -712,8 +719,21 @@ function workspaceToolbar(workspace: Workspace) {
   undoButton.setAttribute("aria-label", "Undo");
   undoButton.disabled = !undo.get(workspace.id)?.length;
   undoButton.title = "Undo the last view edit";
-  if (runDrawer) host.append(runDrawer.toggle);
-  host.append(views);
+  const viewControl = element("div", "workspace-view-control");
+  const viewLabel = element("label", "workspace-view-label", "View");
+  const description = "A view stores charts, run selection, and settings.";
+  if (views.options.length > 1) {
+    viewLabel.htmlFor = views.id;
+    views.setAttribute("aria-description", description);
+    viewControl.append(viewLabel, views);
+  } else {
+    const name = element("span", "workspace-view-name", workspace.name);
+    name.title = workspace.name;
+    name.setAttribute("aria-description", description);
+    viewControl.append(viewLabel, name);
+  }
+  viewControl.append(more);
+  host.append(viewControl);
   const settings = dashboardSettings(workspace);
   if (settings.count) {
     const apply = (controls: DashboardControls) =>
@@ -729,7 +749,7 @@ function workspaceToolbar(workspace: Workspace) {
       }),
     );
   }
-  host.append(search, undoButton, add, more);
+  host.append(search, undoButton, add);
   for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
     if (openMenus.includes(d.dataset.menu)) d.open = true;
   if (focused)

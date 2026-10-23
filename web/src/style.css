@@ -811,3 +811,21 @@ optgroup {
     gap: 5px;
   }
 }
+
+.workspace-view-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.workspace-view-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.workspace-view-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
