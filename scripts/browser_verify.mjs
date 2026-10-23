@@ -23,13 +23,11 @@ const screenshot = (name) =>
     fullPage: true,
   });
 const card = (title) =>
-  page
-    .locator(".dashboard-cell")
-    .filter({
-      has: page.locator(".card-title", {
-        hasText: new RegExp("^" + title + "$"),
-      }),
-    });
+  page.locator(".dashboard-cell").filter({
+    has: page.locator(".card-title", {
+      hasText: new RegExp("^" + title + "$"),
+    }),
+  });
 const coordinate = async (root, label, value) => {
   await root.getByLabel(label, { exact: true }).fill(String(value));
   await root.getByLabel(label, { exact: true }).press("Tab");
@@ -51,6 +49,15 @@ const edit = async (root) => {
 };
 try {
   await page.goto(process.env.NSET_BROWSER_URL);
+  const theme = await page.evaluate(() => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    background: getComputedStyle(document.body).backgroundColor,
+  }));
+  assert.equal(theme.scheme, "dark");
+  assert.ok(
+    Math.max(...theme.background.match(/\d+/g).map(Number)) < 65,
+    "embedded app uses charcoal surfaces",
+  );
   await page
     .getByLabel("Access token", { exact: true })
     .fill(process.env.NSET_BROWSER_TOKEN);
@@ -347,6 +354,7 @@ try {
       phase: "ux-browser",
       status: "passed",
       assertions: [
+        "bundled dark theme",
         "experiment/run tables",
         "namespace mixed cards",
         "direct cursors and all crossings",

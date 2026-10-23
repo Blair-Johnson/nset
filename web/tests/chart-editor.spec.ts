@@ -262,7 +262,9 @@ test("isolated draft, Cancel/Escape, focus return and live full-history preview"
     dialog(page).getByText("1 curve(s) · 301 observations", { exact: true }),
   ).toBeVisible();
   await expect(dialog(page).locator(".u-over")).toBeVisible();
-  expect(await dialog(page).innerText()).not.toMatch(/raw-derived|raw observations|canonical|authoritative/i);
+  expect(await dialog(page).innerText()).not.toMatch(
+    /raw-derived|raw observations|canonical|authoritative/i,
+  );
   await dialog(page)
     .getByLabel("Chart title", { exact: true })
     .fill("Draft only");

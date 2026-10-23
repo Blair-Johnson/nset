@@ -31,11 +31,14 @@ export async function pixelStats(page, selector) {
         const [r, g, b] = data.subarray(pixel * 4, pixel * 4 + 3);
         const kind = near(r, g, b, [118, 213, 255])
           ? "cyan"
-          : near(r, g, b, [181, 161, 255]) || near(r, g, b, [147, 51, 234])
+          : near(r, g, b, [181, 161, 255]) ||
+              near(r, g, b, [147, 51, 234]) ||
+              near(r, g, b, [192, 132, 252])
             ? "violet"
             : r > 210 && g > 130 && g < 230 && b < 110
               ? "gold"
               : near(r, g, b, [37, 99, 235]) ||
+                  near(r, g, b, [96, 165, 250]) ||
                   (r < 80 && g > 40 && b > 90 && b < 225)
                 ? "blue"
                 : null;

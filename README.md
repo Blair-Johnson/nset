@@ -1,6 +1,6 @@
 # Not Shitty Experiment Tracker
 
-A small experiment tracker focused on trustworthy timeseries inspection and native-resolution image timelines. A Rust executable serves the browser UI, writes scalar observations to SQLite, and stores images as immutable files. The UI uses uPlot and OpenSeadragon; Node is a build dependency, not a runtime service.
+A small experiment tracker focused on trustworthy timeseries inspection and native-resolution image timelines, with a dark experiment browser and mixed-chart dashboards. A Rust executable serves the browser UI, writes scalar observations to SQLite, and stores images as immutable files. The UI uses uPlot and OpenSeadragon; Node is a build dependency, not a runtime service.
 
 This is a new API, not an MLflow or wandb compatibility layer. It is an early implementation, not a hardened multi-tenant service.
 
