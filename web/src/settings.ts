@@ -2,6 +2,7 @@ import {
   CONFIG_HELP,
   defaults,
   parseAdvanced,
+  parseSafeJson,
   styleFor,
   validateConfig,
   type ViewConfig,
@@ -136,6 +137,13 @@ export class SettingsPanel {
     ]);
     add(axes, "height", "Plot height (px)");
     add(axes, "width", "Plot width (blank = responsive)");
+    axes.append(
+      element(
+        "p",
+        "hint field-wide",
+        "Advanced scales.x/y can set direction, log base, asinh threshold and range policies. An advanced range replaces built-in minimum/maximum as a whole, even when one advanced bound is null. auto:false needs two fixed bounds.",
+      ),
+    );
     const presentation = section("03 / Grid, legend & interaction");
     for (const [key, label] of [
       ["grid", "Grid lines"],
@@ -151,8 +159,13 @@ export class SettingsPanel {
       set: (key: keyof RunStyle, value: unknown, draft: ViewConfig) => void,
       prefix = "",
     ) => {
-      field(box, `${prefix}Color`, s.color, undefined, "color", (v, d) =>
-        set("color", v, d),
+      field(
+        box,
+        `${prefix}Color (CSS literal)`,
+        s.color,
+        undefined,
+        "text",
+        (v, d) => set("color", v, d),
       );
       field(box, `${prefix}Line width`, s.width, undefined, "number", (v, d) =>
         set("width", v, d),
@@ -193,19 +206,89 @@ export class SettingsPanel {
         JSON.stringify(s.dash),
         undefined,
         "text",
-        (v, d) => set("dash", JSON.parse(String(v)), d),
+        (v, d) => set("dash", parseSafeJson(String(v)), d),
+      );
+      field(
+        box,
+        `${prefix}Line cap`,
+        s.cap ?? "butt",
+        ["butt", "round", "square"],
+        undefined,
+        (v, d) => set("cap", v, d),
+      );
+      field(
+        box,
+        `${prefix}Series opacity`,
+        s.alpha ?? 1,
+        undefined,
+        "number",
+        (v, d) => set("alpha", v, d),
+      );
+      field(
+        box,
+        `${prefix}Pixel alignment (blank = inherit; boolean or number JSON)`,
+        s.pxAlign === undefined ? "" : JSON.stringify(s.pxAlign),
+        undefined,
+        "text",
+        (v, d) =>
+          set(
+            "pxAlign",
+            String(v).trim() ? parseSafeJson(String(v)) : undefined,
+            d,
+          ),
+      );
+      field(
+        box,
+        `${prefix}Fill color (blank = series color)`,
+        s.fillColor ?? "",
+        undefined,
+        "text",
+        (v, d) => set("fillColor", String(v).trim() || undefined, d),
+      );
+      field(
+        box,
+        `${prefix}Fill baseline (blank = automatic)`,
+        s.fillTo ?? null,
+        undefined,
+        "number",
+        (v, d) => set("fillTo", v === null ? undefined : v, d),
+      );
+      field(
+        box,
+        `${prefix}Contribute to automatic range`,
+        s.auto ?? true,
+        undefined,
+        undefined,
+        (v, d) => set("auto", v, d),
+      );
+      field(
+        box,
+        `${prefix}Marker overrides (JSON)`,
+        JSON.stringify(s.markers ?? {}),
+        undefined,
+        "text",
+        (v, d) => set("markers", parseSafeJson(String(v)), d),
+      );
+      field(
+        box,
+        `${prefix}Cosmetic path options (JSON)`,
+        JSON.stringify(s.pathOptions ?? {}),
+        undefined,
+        "text",
+        (v, d) => set("pathOptions", parseSafeJson(String(v)), d),
       );
     };
     const style = section("04 / Default series style");
     add(style, "palette", "Use comparison palette");
     styleFields(style, config.style, (k, v, d) => {
-      (d.style as unknown as Record<string, unknown>)[k] = v;
+      if (v === undefined) delete d.style[k];
+      else (d.style as unknown as Record<string, unknown>)[k] = v;
     });
     style.append(
       element(
         "p",
         "hint field-wide",
-        "The comparison palette overrides the default color when enabled. Per-run overrides take precedence. “Matched” is the honest numerical curve. Stepped and spline alternatives change appearance only; readouts do not follow cosmetic paths.",
+        "The comparison palette overrides the default color when enabled. Per-run overrides take precedence. “Matched” draws the numerical curve using adaptive screen-space tessellation (0.35 CSS-pixel target tolerance, bounded work). Other paths and path options are cosmetic; readouts never follow cosmetic paths. Marker overrides take precedence over legacy point controls. Marker show:auto uses density-based visibility; {} keeps legacy behavior. Fill color and baseline are optional. Automatic range participation never changes analysis.",
       ),
     );
     const perRun = section("05 / Per-run overrides");
@@ -237,8 +320,10 @@ export class SettingsPanel {
         },
       );
       styleFields(box, s, (k, v, d) => {
-        if ((enabled as HTMLInputElement).checked)
-          (d.runs[run.id] as Record<string, unknown>)[k] = v;
+        if ((enabled as HTMLInputElement).checked) {
+          if (v === undefined) delete d.runs[run.id][k];
+          else (d.runs[run.id] as Record<string, unknown>)[k] = v;
+        }
       });
     });
     const advanced = section("06 / Advanced safe uPlot JSON");
@@ -255,13 +340,31 @@ export class SettingsPanel {
     sample.onclick = () => {
       editor.value = JSON.stringify(
         {
-          padding: [24, 28, 8, 8],
+          padding: [24, null, 8, null],
+          pxAlign: true,
+          drawOrder: ["axes", "series"],
+          scales: {
+            x: { dir: 1 },
+            y: { range: { min: { pad: 0.1 }, max: { pad: 0.15 } } },
+          },
           axes: [
-            { grid: { dash: [3, 4] }, values: "scientific" },
-            { label: "Objective", ticks: { size: 6 } },
+            {
+              side: 2,
+              space: 60,
+              grid: { dash: [3, 4], cap: "round" },
+              values: "scientific",
+            },
+            { side: 3, label: "Objective", lineGap: 1.5, ticks: { size: 6 } },
           ],
-          cursor: { drag: { x: true, y: true, dist: 12 } },
-          legend: { live: false },
+          cursor: {
+            lock: false,
+            points: { show: true, size: 8 },
+            focus: { prox: 24 },
+            drag: { x: true, y: true, dist: 12, setScale: true, uni: 20 },
+          },
+          legend: { live: false, isolate: true, markers: { dash: "solid" } },
+          focus: { alpha: 0.3 },
+          select: { show: true, over: true },
         },
         null,
         2,
