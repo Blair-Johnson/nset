@@ -99,7 +99,7 @@ test("hovered real card cycles orientations and exits without losing positions o
   page,
 }) => {
   await fixture(page);
-  await card(page, 0).locator(".u-over").focus();
+  await card(page, 0).locator(".uplot").focus();
   await cycle(page);
   await expect(card(page).locator(".uplot")).toHaveAttribute(
     "data-cursor-placement",
@@ -177,15 +177,19 @@ test("C-armed real card still zooms, ignores coordinate typing and completes hor
   await surface.hover({ position: { x: 40, y: 40 } });
   await page.keyboard.press("c");
   expect((await states(page))[1].axis).toBe("x");
-  await surface.focus();
+  await card(page).locator(".uplot").focus();
   await cycle(page);
+  await expect(card(page).locator(".uplot")).toHaveAttribute(
+    "data-cursor-placement",
+    "horizontal",
+  );
   await pick(page, 0.45, 0.2);
   expect((await states(page))[1].active).toBe("b");
   await pick(page, 0.55, 0.8);
   const pair = (await states(page))[1];
   expect(pair.mode).toBe("zoom");
-  expect(pair.pins.yA).not.toBeNull();
-  expect(pair.pins.yB).not.toBeNull();
+  expect(Number.isFinite(pair.pins.yA)).toBe(true);
+  expect(Number.isFinite(pair.pins.yB)).toBe(true);
   await page.screenshot({
     path: info.outputPath("horizontal-pair-after-shortcut.png"),
   });
