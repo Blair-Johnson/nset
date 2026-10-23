@@ -1,4 +1,5 @@
 import type uPlot from "uplot";
+import { cursorPlacement } from "./cursor-placement";
 import type { NavigationAxis, PlotInteraction } from "./workspace-types";
 
 // Keep the pure math exports usable in Node unit tests.
@@ -136,6 +137,7 @@ export class PlotNavigation {
   private fit: Viewport;
   private gesture?: Gesture;
   private space = false;
+  private pointerButtons = 0;
   private abort = new AbortController();
   private previousTouchAction: string;
   constructor(
@@ -180,6 +182,19 @@ export class PlotNavigation {
     u.root.addEventListener("focusout", this.blur, { signal });
     window.addEventListener("blur", this.blur, { signal });
     window.addEventListener("keydown", this.spaceDown, { signal });
+    // Only this window listener cycles: a focused plot's bubbling key must not
+    // also cycle in its root handler. Abort owns every listener on teardown.
+    window.addEventListener("keydown", this.cycleCursor, { signal });
+    for (const type of [
+      "pointerdown",
+      "pointermove",
+      "pointerup",
+      "pointercancel",
+    ])
+      window.addEventListener(type, this.trackButtons, {
+        signal,
+        capture: true,
+      });
     window.addEventListener("keyup", this.keyup, { signal });
     this.cursor();
   }
@@ -245,6 +260,7 @@ export class PlotNavigation {
     }
   }
   private cursor() {
+    this.u.root.dataset.cursorPlacement = cursorPlacement(this.options);
     this.u.over.style.cursor =
       this.gesture?.mode === "pan" ||
       this.space ||
@@ -507,6 +523,34 @@ export class PlotNavigation {
     e.preventDefault();
     this.reset();
   };
+  private trackButtons = (e: Event) => {
+    this.pointerButtons =
+      e.type === "pointercancel" ? 0 : (e as PointerEvent).buttons;
+  };
+  private cycleCursor = (e: KeyboardEvent) => {
+    if (
+      e.key.toLowerCase() !== "c" ||
+      e.defaultPrevented ||
+      e.repeat ||
+      e.isComposing ||
+      e.keyCode === 229 ||
+      e.ctrlKey ||
+      e.metaKey ||
+      e.altKey ||
+      editable(e.target) ||
+      editable(document.activeElement) ||
+      this.gesture ||
+      this.pointerButtons ||
+      this.space ||
+      !this.u.over.matches(":hover") ||
+      !this.options.onCursorModeCycle
+    )
+      return;
+    e.preventDefault();
+    // The card owns placement state and UI. Do not focus, place, clear, or
+    // mutate pins here; its callback reconfigures this controller synchronously.
+    this.options.onCursorModeCycle();
+  };
   private spaceDown = (e: KeyboardEvent) => {
     if (
       !this.options.directGestures ||
@@ -556,6 +600,7 @@ export class PlotNavigation {
   };
   private blur = () => {
     this.space = false;
+    this.pointerButtons = 0;
     this.cancel();
   };
   destroy() {
@@ -564,6 +609,7 @@ export class PlotNavigation {
     this.options.onHover?.(null);
     this.u.over.style.touchAction = this.previousTouchAction;
     this.u.over.style.cursor = "";
+    delete this.u.root.dataset.cursorPlacement;
     this.u.root.classList.remove("plot-navigation", "plot-pan-hover-hidden");
   }
 }

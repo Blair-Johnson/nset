@@ -1,0 +1,22 @@
+/* uPlot 1.6.32: in .u-hz, cursor-x is vertical (border-right),
+   cursor-y is horizontal (border-bottom). These are NOT pinned A/B lines. */
+.plot-navigation.u-hz[data-cursor-placement] .u-cursor-x,
+.plot-navigation.u-hz[data-cursor-placement] .u-cursor-y {
+  /* Override the application-wide neutral crosshair color. */
+  border-color: #91a4b7 !important;
+  opacity: 0.7;
+}
+.plot-navigation.u-hz[data-cursor-placement="vertical"] .u-cursor-x {
+  border-right: 2px solid #59d8ff;
+  border-color: #59d8ff !important;
+  opacity: 1;
+}
+.plot-navigation.u-hz[data-cursor-placement="horizontal"] .u-cursor-y {
+  border-bottom: 2px solid #ffc66b;
+  border-color: #ffc66b !important;
+  opacity: 1;
+}
+.plot-navigation.u-hz[data-cursor-placement="vertical"] .u-cursor-y,
+.plot-navigation.u-hz[data-cursor-placement="horizontal"] .u-cursor-x {
+  opacity: 0.28;
+}
