@@ -459,7 +459,7 @@ test("log/log three-run folds preserve the canvas and resize persists only base 
   expect(restored.layout).toEqual(wide.layout);
 });
 
-test("Reset view preserves sources, configuration, card geometry, pins and neighbors; warnings never become native plot titles", async ({
+test("Fit configured range preserves sources, configuration, card geometry, pins and neighbors; warnings never become native plot titles", async ({
   page,
 }, info) => {
   await fixture(page);
@@ -480,8 +480,9 @@ test("Reset view preserves sources, configuration, card geometry, pins and neigh
     const c = (window as any).resizeTest.cards["resize-13"];
     return JSON.stringify(c.spec);
   });
-  await card.getByLabel("Chart actions", { exact: true }).click();
-  await card.getByRole("button", { name: "Reset view", exact: true }).click();
+  await card
+    .getByRole("button", { name: "Fit configured range", exact: true })
+    .click();
   const after = await capture(page, info, "reset-view");
   expect(after.card).toEqual(before.card);
   expect(after.pins).toEqual(before.pins);
@@ -495,7 +496,7 @@ test("Reset view preserves sources, configuration, card geometry, pins and neigh
   await expect(card.locator(".card-plot")).not.toHaveAttribute("title");
 });
 
-test("image card Reset view fits the existing frame without clearing sources or cache", async ({
+test("image card Fit fits the existing frame without clearing sources or cache", async ({
   page,
 }, info) => {
   await page.route(/^http:\/\/127\.0\.0\.1:[0-9]+\/$/, (route) =>
@@ -616,8 +617,7 @@ test("image card Reset view fits the existing frame without clearing sources or 
       ),
     };
   });
-  await card.getByLabel("Chart actions", { exact: true }).click();
-  await card.getByRole("button", { name: "Reset view", exact: true }).click();
+  await card.getByRole("button", { name: "Fit", exact: true }).click();
   await expect
     .poll(() =>
       page.evaluate(() => {

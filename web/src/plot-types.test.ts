@@ -39,4 +39,20 @@ test("scatter enables observation markers, line restores stroke, individual colo
   assert.equal(card.config.style.width, 2);
   assert.equal(card.config.style.fill, 0);
   assert.equal(card.config.style.path, "matched");
+  // Leaving scatter must actually remove its markers.
+  assert.equal(card.config.style.points, false);
+  assert.equal(card.config.style.markers?.show, false);
+});
+test("points are an overlay: line, area and step keep the chosen markers", () => {
+  const card = newChart("timeseries", ["train/loss"]);
+  card.config.style.points = true;
+  card.config.style.markers = { show: "auto" };
+  card.config.runs.r = { markers: { show: true } };
+  for (const type of ["area", "step", "line"] as const) {
+    setPlotType(card, type);
+    assert.equal(plotType(card), type);
+    assert.equal(card.config.style.markers?.show, "auto");
+    assert.equal(card.config.style.points, true);
+    assert.deepEqual(card.config.runs.r, { markers: { show: true } });
+  }
 });

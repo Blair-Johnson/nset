@@ -28,11 +28,12 @@ for (const dpr of [1, 2])
             await route.fulfill({ response, body: original });
             return;
           }
-          expect(original).toContain(
-            "const labelLayout = defaultLabelLayout(config);",
-          );
+          // The baseline disables automatic label layout. Anchor on the whole
+          // assignment, which branches for XY (metric) X axes.
+          const layoutLine = /const labelLayout = quantity === "metric"[\s\S]*?: defaultLabelLayout\(config\);/;
+          expect(original).toMatch(layoutLine);
           original = original.replace(
-            "const labelLayout = defaultLabelLayout(config);",
+            layoutLine,
             "const labelLayout = { compactY: false, multilineTime: false };",
           );
           expect(original).toContain("return resolved;");

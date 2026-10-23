@@ -49,8 +49,8 @@ try {
   await card.getByRole("button", { name: "Edit chart", exact: true }).click();
   const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
   await editor
-    .getByRole("heading", { name: "Appearance", exact: true })
-    .scrollIntoViewIfNeeded();
+    .getByRole("heading", { name: "Smoothing", exact: true })
+    .click();
   const cubicStart = performance.now();
   await editor
     .getByLabel("Between observations", { exact: true })

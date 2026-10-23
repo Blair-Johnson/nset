@@ -168,6 +168,25 @@ export function newChart(
     size: "normal",
   });
 }
+/**
+ * "Reset chart": every display setting returns to what a new chart gets
+ * (axes, scales, bounds, smoothing, style, legend, advanced options). What
+ * the chart plots — its sources and X binding — and its title, id, size and
+ * place on the dashboard stay. XY charts keep their join parameter.
+ */
+export function resetChart(card: ChartSpec): ChartSpec {
+  const fresh = newChart(card.kind, [], card.title);
+  const config = fresh.config;
+  // Size belongs to the dashboard layout, not to the chart's look.
+  config.width = card.config.width;
+  config.height = card.config.height;
+  if (card.kind === "timeseries" && card.x) config.axis = card.config.axis;
+  return validateChart({
+    ...structuredClone(card),
+    config,
+    outliers: fresh.outliers,
+  });
+}
 export function defaultSections(catalog: Catalog, runIds: string[]): Section[] {
   const selected = new Set(runIds);
   const keys = new Map<string, { key: string; kind: "metric" | "image" }>();

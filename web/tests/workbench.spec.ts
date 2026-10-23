@@ -181,6 +181,7 @@ test("editing is contextual and cancel does not mutate a card", async ({
   await expect(loss.getByLabel("Chart actions", { exact: true })).toBeFocused();
   await loss.getByLabel("Chart actions", { exact: true }).click();
   await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
+  await editor.getByText("Y axis options", { exact: true }).click();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
   await editor.locator(".ce-preview-plot canvas").waitFor();
   await page.screenshot({

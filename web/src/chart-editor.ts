@@ -430,15 +430,62 @@ export function openChartEditor(options: ChartEditorOptions): {
   const body = el("div", "ce-body");
   const settings = el("div", "ce-settings");
   settings.setAttribute("aria-label", "Chart settings");
+  // `panels` maps a name to its content body; roots carry the heading. Folds
+  // start closed and show a one-line summary of their state in the header.
   const panels = new Map<string, HTMLElement>();
+  const panelRoots = new Map<string, HTMLElement>();
+  const panelHeadings = new Map<string, HTMLElement>();
+  const foldStates = new Map<string, HTMLElement>();
   const advancedOpen = new Map<string, boolean>();
-  for (const name of ["Data", "Axes", "Appearance"]) {
-    const panel = el("section", "ce-panel");
-    panel.id = `${prefix}-panel-${name}`;
-    panel.setAttribute("aria-labelledby", `${panel.id}-heading`);
-    panels.set(name, panel);
+  for (const [name, title, fold] of [
+    ["Chart", "Chart", false],
+    ["Data", "Y axis", false],
+    ["X", "X axis", false],
+    ["Smoothing", "Smoothing", true],
+    ["Appearance", "Appearance", true],
+  ] as const) {
+    const id = `${prefix}-panel-${name}`;
+    const heading = el("h3", "", title);
+    heading.id = `${id}-heading`;
+    const body = el("div", "ce-panel-body");
+    let root: HTMLElement;
+    if (fold) {
+      root = el("details", "ce-panel ce-fold");
+      const summary = el("summary");
+      const state = el("span", "ce-fold-state");
+      summary.append(heading, state);
+      root.append(summary, body);
+      foldStates.set(name, state);
+    } else {
+      root = el("section", "ce-panel");
+      root.setAttribute("aria-labelledby", heading.id);
+      root.append(heading, body);
+    }
+    root.id = id;
+    panels.set(name, body);
+    panelRoots.set(name, root);
+    panelHeadings.set(name, heading);
   }
-  settings.append(...panels.values());
+  settings.append(...panelRoots.values());
+  // Each axis section ends with its own options fold (title, scale, bounds,
+  // ticks). It is a separate panel so it re-renders without the source list.
+  const axisPanel = { x: "XAxis", y: "YAxis" } as const;
+  const axisDetails = new Map<"x" | "y", HTMLDetailsElement>();
+  for (const [axis, host] of [
+    ["x", "X"],
+    ["y", "Data"],
+  ] as const) {
+    const details = el("details", "ce-more ce-axis-options");
+    const summary = el("summary");
+    const state = el("span", "ce-fold-state");
+    summary.append(el("span", "", `${axis.toUpperCase()} axis options`), state);
+    const body = el("div", "ce-panel-body");
+    details.append(summary, body);
+    panelRoots.get(host)!.append(details);
+    panels.set(axisPanel[axis], body);
+    foldStates.set(axisPanel[axis], state);
+    axisDetails.set(axis, details);
+  }
   const preview = el("aside", "ce-preview");
   preview.setAttribute("aria-label", "Chart preview");
   const previewTitle = el("h3", "", draft.title || "Untitled chart");
@@ -448,20 +495,23 @@ export function openChartEditor(options: ChartEditorOptions): {
   previewHost.dataset.role = "preview";
   const previewWarnings = el("p", "ce-help");
   const previewDetails = el("details", "ce-more");
-  previewDetails.append(el("summary", "", "Preview details"), previewWarnings);
+  previewDetails.append(el("summary", "", "Preview notes"), previewWarnings);
+  previewDetails.hidden = true;
+  // Only offer the fold when there is something to read in it.
+  new MutationObserver(() => {
+    previewDetails.hidden = !previewWarnings.textContent;
+  }).observe(previewWarnings, { childList: true, characterData: true, subtree: true });
   const retry = button("Retry preview", () => {
     sourceToken = "";
     schedulePreview();
   });
   retry.hidden = true;
   preview.append(
-    el("div", "ce-eyebrow", "LIVE PREVIEW"),
     previewTitle,
     previewStatus,
     previewHost,
     retry,
     previewDetails,
-    el("p", "ce-muted ce-preview-note", "Changes stay here until you save."),
   );
   body.append(settings, preview);
   const footer = el("footer", "ce-footer");
@@ -638,33 +688,49 @@ export function openChartEditor(options: ChartEditorOptions): {
     const advanced =
       panel.querySelector<HTMLDetailsElement>(":scope > details");
     if (advanced) advancedOpen.set(name, advanced.open);
-    const heading = el("h3", "", name);
-    heading.id = `${panel.id}-heading`;
-    panel.replaceChildren(heading);
+    panel.replaceChildren();
     return panel;
+  }
+  /** Show a panel only for scalar charts (image panels have no axes/styles). */
+  function scalarOnly(name: string) {
+    panelRoots.get(name)!.hidden = draft.kind === "image";
+    return draft.kind === "image";
+  }
+  function foldState(name: string, text: string) {
+    const state = foldStates.get(name);
+    if (state) state.textContent = text;
   }
 
   let pickerPage = 0;
   let pickerSearch = "";
-  let selectedOnly = false;
   let renderChoices = () => {};
-  function renderData() {
-    const panel = clearPanel("Data");
+  function renderAll() {
+    renderChart();
+    renderData();
+    renderX();
+    renderAxes();
+    renderSmoothing();
+    renderAppearance();
+  }
+  function renderChart() {
+    const panel = clearPanel("Chart");
     input(panel, "title", "Chart title", draft.title, (value) => {
       draft.title = value;
       setError("title", value.trim() ? "" : "Give this chart a title.");
       removeOverride(draft.config, ["title"]);
     });
+    const row = el("div", "ce-pair");
+    panel.append(row);
     select(
-      panel,
+      row,
       "kind",
       "Plot type",
       plotType(draft),
       [
-        ["line", "Line plot"],
-        ["scatter", "Scatter plot"],
-        ["area", "Area plot"],
-        ["step", "Step plot"],
+        ["line", "Line"],
+        ["scatter", "Scatter"],
+        ["area", "Area"],
+        ["step", "Step"],
         ["image", "Image panel"],
       ],
       (value) => {
@@ -682,25 +748,18 @@ export function openChartEditor(options: ChartEditorOptions): {
         );
         pickerPage = 0;
         pickerSearch = "";
-        renderData();
-        renderAxes();
-        renderAppearance();
+        renderAll();
         fields.get("kind")?.control.focus({ preventScroll: true });
       },
     );
     select(
-      panel,
+      row,
       "source-mode",
-      "Data sources",
+      "Runs",
       draft.source.mode,
       [
-        ["selected", `Follow selected runs (${options.selectedRunIds.length})`],
-        [
-          "explicit",
-          draft.kind === "image"
-            ? "Choose any run and image"
-            : "Choose any run and metric",
-        ],
+        ["selected", `Selected runs (${options.selectedRunIds.length})`],
+        ["explicit", "Specific series"],
       ],
       (value) => {
         sourceMemory.set(
@@ -713,19 +772,30 @@ export function openChartEditor(options: ChartEditorOptions): {
               ? { mode: "selected", keys: [] }
               : { mode: "explicit", series: [] }),
         );
+        // A per-run X key needs runs to follow; specific Y series pair with
+        // one specific X series instead, and vice versa.
+        if (draft.x) {
+          const key =
+            draft.x.mode === "key" ? draft.x.key : draft.x.series.key;
+          const next = xBindingFor(key);
+          if (next) draft.x = next;
+        }
         pickerPage = 0;
         pickerSearch = "";
-        renderData();
-        refreshAxisTitles();
-        renderAppearance();
+        renderAll();
         fields.get("source-mode")?.control.focus({ preventScroll: true });
       },
-      draft.source.mode === "selected"
-        ? "These keys follow the run selection in your saved view."
-        : "Pick exact sources across all experiments.",
     );
+  }
+  function renderData() {
+    const panel = clearPanel("Data");
+    panelHeadings.get("Data")!.textContent =
+      draft.kind === "image" ? "Images" : "Y axis";
+    // What is on the axis now, at a glance: one removable chip per choice.
+    const chips = el("div", "ce-chips");
+    chips.setAttribute("aria-label", "Chosen");
     const summary = el("p", "ce-selection-summary");
-    panel.append(summary);
+    panel.append(chips, summary);
     const search = input(
       panel,
       "source-search",
@@ -740,19 +810,14 @@ export function openChartEditor(options: ChartEditorOptions): {
     search.type = "search";
     search.placeholder =
       draft.source.mode === "explicit"
-        ? "Experiment, run, or metric…"
-        : "Metric name…";
-    toggle(
-      panel,
-      "selected-only",
-      "Show chosen sources only",
-      selectedOnly,
-      (value) => {
-        selectedOnly = value;
-        pickerPage = 0;
-        renderChoices();
-      },
-    );
+        ? draft.kind === "image"
+          ? "Add images: search experiment, run, key…"
+          : "Add metrics: search experiment, run, key…"
+        : draft.kind === "image"
+          ? "Add images…"
+          : "Add metrics…";
+    // The chips already show what is chosen; the placeholder names the box.
+    search.closest(".ce-field")!.classList.add("ce-search");
     const list = el("div", "ce-source-list");
     list.setAttribute("role", "group");
     list.setAttribute(
@@ -782,6 +847,26 @@ export function openChartEditor(options: ChartEditorOptions): {
     pageInfo.setAttribute("role", "status");
     paging.append(previous, pageInfo, next);
     panel.append(list, sourceError, paging);
+    const toggleChoice = (choice: SourceChoice, on: boolean) => {
+      if (draft.source.mode === "selected")
+        draft.source.keys = on
+          ? [...new Set([...draft.source.keys, choice.key])]
+          : draft.source.keys.filter((key) => key !== choice.key);
+      else if (choice.ref)
+        draft.source.series = on
+          ? [
+              ...draft.source.series.filter(
+                (ref) => seriesId(ref) !== choice.id,
+              ),
+              clone(choice.ref),
+            ]
+          : draft.source.series.filter((ref) => seriesId(ref) !== choice.id);
+      setError("source", "");
+      refreshAxisTitles();
+      renderX();
+      renderAppearance();
+      change();
+    };
     renderChoices = () => {
       const choices = editorSourceChoices(
         draft,
@@ -790,25 +875,41 @@ export function openChartEditor(options: ChartEditorOptions): {
       );
       const selected = choices.filter((choice) => choice.selected);
       const unavailable = selected.filter((choice) => !choice.available).length;
-      summary.textContent = `${selected.length} chosen${unavailable ? ` · ${unavailable} unavailable (kept)` : ""}`;
-      const result = choicePage(
-        choices,
-        pickerSearch,
-        pickerPage,
-        selectedOnly,
-      );
+      summary.textContent = unavailable
+        ? `${selected.length} chosen · ${unavailable} unavailable (kept)`
+        : "";
+      chips.replaceChildren();
+      for (const choice of selected) {
+        const chip = button(
+          "",
+          () => {
+            toggleChoice(choice, false);
+            renderChoices();
+            (chips.querySelector("button") ?? search).focus({
+              preventScroll: true,
+            });
+          },
+          `ce-chip${choice.available ? "" : " ce-unavailable"}`,
+        );
+        chip.setAttribute("aria-label", `Remove ${choice.label}`);
+        chip.title =
+          draft.source.mode === "explicit" ? choice.detail : choice.label;
+        chip.append(el("span", "", choice.label), el("span", "ce-chip-x", "×"));
+        chips.append(chip);
+      }
+      if (!selected.length)
+        chips.append(
+          el(
+            "span",
+            "ce-chip-empty",
+            draft.kind === "image" ? "No images chosen" : "No metrics chosen",
+          ),
+        );
+      const result = choicePage(choices, pickerSearch, pickerPage);
       pickerPage = result.page;
       list.replaceChildren();
       if (!result.rows.length)
-        list.append(
-          el(
-            "p",
-            "ce-empty",
-            selectedOnly
-              ? "No chosen sources match. Turn off this filter to add sources."
-              : "No matches. Try another search or choose runs first.",
-          ),
-        );
+        list.append(el("p", "ce-empty", "No matches."));
       for (const choice of result.rows) {
         const row = el(
           "label",
@@ -830,29 +931,10 @@ export function openChartEditor(options: ChartEditorOptions): {
         row.append(checkbox, copy);
         list.append(row);
         checkbox.onchange = () => {
-          if (draft.source.mode === "selected")
-            draft.source.keys = checkbox.checked
-              ? [...new Set([...draft.source.keys, choice.key])]
-              : draft.source.keys.filter((key) => key !== choice.key);
-          else if (choice.ref)
-            draft.source.series = checkbox.checked
-              ? [
-                  ...draft.source.series.filter(
-                    (ref) => seriesId(ref) !== choice.id,
-                  ),
-                  clone(choice.ref),
-                ]
-              : draft.source.series.filter(
-                  (ref) => seriesId(ref) !== choice.id,
-                );
-          setError("source", "");
+          toggleChoice(choice, checkbox.checked);
           const scrollTop = list.scrollTop;
           renderChoices();
           list.scrollTop = scrollTop;
-          refreshAxisTitles();
-          if (draft.x?.mode === "key") renderAxes();
-          renderAppearance();
-          change();
           (
             list.querySelector<HTMLInputElement>(
               `input[data-source-id="${CSS.escape(choice.id)}"]`,
@@ -862,6 +944,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       }
       previous.disabled = pickerPage === 0;
       next.disabled = pickerPage >= result.pages - 1;
+      paging.hidden = result.pages <= 1;
       pageInfo.textContent = `${result.total} results · ${pickerPage + 1} / ${result.pages}`;
       setError("source", errors.get("source") ?? "");
     };
@@ -869,157 +952,139 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
 
   /** Changing what X means invalidates X bounds/format/ticks, not labels. */
-  function setXBinding(binding: XBinding) {
-    const before = draft.x ? cameraAxis(draft) : null;
-    draft.x = binding;
+  function setXBinding(binding: XBinding | undefined) {
+    const before = cameraAxis(draft);
+    if (binding) draft.x = binding;
+    else delete draft.x;
     if (cameraAxis(draft) !== before) resetXAxis(draft.config);
     refreshAxisTitles();
   }
-  function renderXBinding(panel: HTMLElement, binding: XBinding) {
-    const group = el("fieldset", "ce-group");
-    group.append(el("legend", "", "X metric"));
-    panel.append(group);
-    select(
-      group,
-      "x-mode",
-      "Pair each curve with",
-      binding.mode,
-      [
-        ["key", "The same metric from each curve’s run"],
-        ["series", "One specific series (any run)"],
-      ],
-      (value) => {
-        // Keep the same metric key across the switch when it is available.
-        const key = binding.mode === "key" ? binding.key : binding.series.key;
-        const series = editorXChoices(
-          draft,
-          options.catalog,
-          options.selectedRunIds,
-          "series",
-        ).find(
-          (choice) => choice.available && JSON.parse(choice.value)[2] === key,
-        );
-        const next: XBinding | undefined =
-          value === "key"
-            ? { mode: "key", key }
-            : series
-              ? {
-                  mode: "series",
-                  series: {
-                    runId: JSON.parse(series.value)[1],
-                    key,
-                    kind: "metric",
-                  },
-                }
-              : defaultXBinding(
-                  draft,
-                  options.catalog,
-                  options.selectedRunIds,
-                  "series",
-                );
-        if (!next) {
-          setError("x-mode", "No metrics are available for this choice.");
-          return;
-        }
-        setXBinding(next);
-        renderAxes();
-        fields.get("x-mode")?.control.focus({ preventScroll: true });
-      },
-      binding.mode === "key"
-        ? "Category × category: every selected run gets its own curve."
-        : "One-off comparison: every curve uses this exact X series, joined on the parameter below.",
+  /** The natural binding for an X metric key given how Y picks runs:
+   * followed runs pair per run; specific series pair with one exact series
+   * (the first run that logged the key, preferring Y's own runs). */
+  function xBindingFor(key: string): XBinding | undefined {
+    if (draft.source.mode === "selected") return { mode: "key", key };
+    const yRuns = draft.source.series.map((ref) => ref.runId);
+    const runs = new Set(
+      options.catalog.series
+        .filter((series) => series.kind === "metric" && series.key === key)
+        .map((series) => series.run_id),
     );
-    const choices = editorXChoices(
-      draft,
-      options.catalog,
-      options.selectedRunIds,
-      binding.mode,
+    const runId = yRuns.find((id) => runs.has(id)) ?? [...runs][0];
+    return runId
+      ? { mode: "series", series: { runId, key, kind: "metric" } }
+      : undefined;
+  }
+  /** Encodes X as one select value: a parameter, a per-run key, or a series. */
+  function xValue(): string {
+    if (!draft.x) return `param:${draft.config.axis}`;
+    return draft.x.mode === "key"
+      ? `key:${draft.x.key}`
+      : `series:${seriesId(draft.x.series)}`;
+  }
+  function renderX() {
+    const panel = clearPanel("X");
+    if (scalarOnly("X")) return;
+    const control = el("select");
+    const group = (label: string, entries: [string, string][]) => {
+      if (!entries.length) return;
+      const node = el("optgroup");
+      node.label = label;
+      for (const [value, text] of entries) {
+        const option = el("option", "", text);
+        option.value = value;
+        node.append(option);
+      }
+      control.append(node);
+    };
+    group("Parameter", [
+      ["param:step", "Step"],
+      ["param:timestamp", "Wall time"],
+      ["param:relative", "Relative time"],
+    ]);
+    const yKeys = new Set(
+      draft.source.mode === "selected"
+        ? draft.source.keys
+        : draft.source.series.map((ref) => ref.key),
     );
-    select(
-      group,
-      "x-metric",
-      "X metric",
-      binding.mode === "key" ? binding.key : seriesId(binding.series),
-      choices.map((choice) => [choice.value, choice.label]),
-      (value) => {
-        if (binding.mode === "key") setXBinding({ mode: "key", key: value });
-        else {
-          const [, runId, key] = JSON.parse(value) as string[];
-          setXBinding({ mode: "series", series: { runId, key, kind: "metric" } });
-        }
-        renderAxes();
-        fields.get("x-metric")?.control.focus({ preventScroll: true });
-      },
-      binding.mode === "key"
-        ? "Runs that did not log this metric are left out of the chart."
-        : "Search the list by typing while it is focused.",
-    );
-    select(
-      group,
-      "x-join",
-      "Match X and Y at the same",
-      draft.config.axis,
-      [
-        ["step", "Step"],
-        ["timestamp", "Wall time"],
-        ["relative", "Relative time (run start)"],
-      ],
-      (value) => {
-        // The join parameter is hidden; X bounds stay meaningful.
-        draft.config.axis = value as ViewConfig["axis"];
-      },
-      "Values are interpolated between observations, never extrapolated; only the overlap of both series is drawn.",
-    );
+    if (draft.source.mode === "selected")
+      group(
+        "Metric (from each run)",
+        editorXChoices(draft, options.catalog, options.selectedRunIds, "key")
+          .filter(
+            (choice) =>
+              (choice.available && !yKeys.has(choice.value)) ||
+              xValue() === `key:${choice.value}`,
+          )
+          .map((choice) => [`key:${choice.value}`, choice.value]),
+      );
+    else
+      group(
+        "Metric (specific series)",
+        editorXChoices(draft, options.catalog, options.selectedRunIds, "series")
+          .filter((choice) => choice.available || xValue() === `series:${choice.value}`)
+          .map((choice) => [`series:${choice.value}`, choice.label]),
+      );
+    // Keep a saved binding that no longer fits the lists above selectable.
+    if (![...control.options].some((option) => option.value === xValue())) {
+      const option = el(
+        "option",
+        "",
+        `${draft.x ? xMetricLabel(draft.x) : draft.config.axis} (saved)`,
+      );
+      option.value = xValue();
+      control.append(option);
+    }
+    control.value = xValue();
+    const row = el("div", draft.x ? "ce-pair ce-x-row" : "");
+    panel.append(row);
+    field(row, "axis", "X", control);
+    control.onchange = () => {
+      setError("axis", "");
+      const [kind, ...rest] = control.value.split(":");
+      const value = rest.join(":");
+      if (kind === "param") {
+        const changed = !!draft.x || value !== draft.config.axis;
+        setXBinding(undefined);
+        draft.config = applyDashboardControls(draft.config, {
+          axis: value as ViewConfig["axis"],
+        });
+        if (changed) resetXAxis(draft.config);
+      } else if (kind === "key") setXBinding({ mode: "key", key: value });
+      else {
+        const [, runId, key] = JSON.parse(value) as string[];
+        setXBinding({ mode: "series", series: { runId, key, kind: "metric" } });
+      }
+      renderX();
+      renderAxes();
+      change();
+      fields.get("axis")?.control.focus({ preventScroll: true });
+    };
+    if (draft.x)
+      select(
+        row,
+        "x-join",
+        "Matched at",
+        draft.config.axis,
+        [
+          ["step", "Same step"],
+          ["timestamp", "Same wall time"],
+          ["relative", "Same relative time"],
+        ],
+        (value) => {
+          // The join parameter is hidden; X bounds stay meaningful.
+          draft.config.axis = value as ViewConfig["axis"];
+        },
+      );
   }
   function renderAxes() {
-    const panel = clearPanel("Axes");
-    panel.hidden = draft.kind === "image";
+    for (const axis of ["x", "y"] as const) clearPanel(axisPanel[axis]);
+    for (const details of axisDetails.values())
+      details.hidden = draft.kind === "image";
     if (draft.kind === "image") return;
-    const advanced = more(panel, "Advanced axes");
-    advanced.open = advancedOpen.get("Axes") ?? false;
-    const xMode = draft.x ? "metric" : draft.config.axis;
-    select(
-      panel,
-      "axis",
-      "X values",
-      xMode,
-      [
-        ["step", "Step"],
-        ["timestamp", "Wall time"],
-        ["relative", "Relative time (run start)"],
-        ["metric", "Another metric (XY)…"],
-      ],
-      (value) => {
-        if (value === "metric") {
-          const binding =
-            defaultXBinding(draft, options.catalog, options.selectedRunIds, "key") ??
-            defaultXBinding(draft, options.catalog, options.selectedRunIds, "series");
-          if (!binding) {
-            setError("axis", "No metrics are available to use as X.");
-            return;
-          }
-          setXBinding(binding);
-        } else {
-          const changed = !!draft.x || value !== draft.config.axis;
-          delete draft.x;
-          draft.config = applyDashboardControls(draft.config, {
-            axis: value as ViewConfig["axis"],
-          });
-          if (changed) resetXAxis(draft.config);
-        }
-        renderAxes();
-        fields.get("axis")?.control.focus({ preventScroll: true });
-      },
-      draft.x
-        ? "Oscilloscope XY mode: each curve plots its Y metric against an X metric, matched at the same step or time."
-        : "Relative time starts at each run’s creation time.",
-    );
-    if (draft.x) renderXBinding(panel, draft.x);
     for (const axis of ["x", "y"] as const) {
       const name = axis.toUpperCase();
-      const group = el("fieldset", "ce-group");
-      group.append(el("legend", "", `${name} axis`));
-      panel.append(group);
+      const group = panels.get(axisPanel[axis])!;
       const patch = axisOverride(draft.config, axis);
       input(
         group,
@@ -1105,7 +1170,6 @@ export function openChartEditor(options: ChartEditorOptions): {
         -Infinity,
         Infinity,
         true,
-        "Blank = automatic",
       );
       number(
         boundsBox,
@@ -1120,7 +1184,6 @@ export function openChartEditor(options: ChartEditorOptions): {
         -Infinity,
         Infinity,
         true,
-        "Blank = automatic",
       );
       function checkBounds() {
         const [min, max] = explicitRangeBounds(
@@ -1136,10 +1199,9 @@ export function openChartEditor(options: ChartEditorOptions): {
         )
           error = "Logarithmic bounds must be greater than zero.";
         setError(`${axis}-range`, error);
+        refreshAxesState();
       }
-      const labels = el("fieldset", "ce-group");
-      labels.append(el("legend", "", `${name} axis details`));
-      advanced.append(labels);
+      const labels = group;
       const staticValues = Array.isArray(patch.values);
       select(
         labels,
@@ -1181,7 +1243,6 @@ export function openChartEditor(options: ChartEditorOptions): {
         ],
         (value) =>
           override(draft.config, ["scales", axis, "log"], Number(value)),
-        "Used only for logarithmic axes.",
       );
       const asinh = number(
         labels,
@@ -1192,7 +1253,6 @@ export function openChartEditor(options: ChartEditorOptions): {
         Number.MIN_VALUE,
         Infinity,
         false,
-        "Used only for asinh axes; larger values widen the linear region.",
       );
       function refreshScaleOptions() {
         logBase.closest<HTMLElement>(".ce-field")!.hidden =
@@ -1209,7 +1269,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       rangeSelect.dataset.axis = axis;
     }
     select(
-      panel,
+      panels.get(axisPanel.y)!,
       "outliers",
       "Y auto range",
       draft.outliers,
@@ -1219,11 +1279,29 @@ export function openChartEditor(options: ChartEditorOptions): {
       ],
       (value) => {
         draft.outliers = value as ChartSpec["outliers"];
+        refreshAxesState();
       },
       editorAutoRangeHelp(draft.config),
     );
-    panel.append(advanced);
     refreshAxisTitles();
+    refreshAxesState();
+  }
+  /** Fold header: a glanceable summary so closed folds still say something. */
+  function refreshAxesState() {
+    const scale = { linear: "linear", log: "log", asinh: "asinh" } as const;
+    for (const axis of ["x", "y"] as const) {
+      const [lo, hi] = explicitRangeBounds(effectiveRange(draft.config, axis));
+      foldState(
+        axisPanel[axis],
+        [
+          scale[draft.config[`${axis}Scale`]],
+          lo !== null || hi !== null ? "limits" : "",
+          axis === "y" && draft.outliers === "robust" ? "98%" : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+    }
   }
 
   function refreshAutoRangeHelp() {
@@ -1245,24 +1323,13 @@ export function openChartEditor(options: ChartEditorOptions): {
       const savedEmpty = axisOverride(draft.config, axis).label === "";
       control.placeholder = savedEmpty ? "Saved empty title" : title;
       control.closest(".ce-field")!.querySelector(".ce-help")!.textContent =
-        savedEmpty
-          ? "Saved empty title is kept. Type a title to replace it."
-          : `Automatic: ${title}. Leave blank to follow the data.`;
+        savedEmpty ? "Saved empty title is kept. Type to replace it." : "";
     }
   }
 
-  function renderAppearance() {
-    const panel = clearPanel("Appearance");
-    if (draft.kind === "image") {
-      panel.append(
-        el(
-          "p",
-          "ce-help",
-          "Image zoom and frame navigation are available in the preview and on the card.",
-        ),
-      );
-      return;
-    }
+  function renderSmoothing() {
+    const panel = clearPanel("Smoothing");
+    if (scalarOnly("Smoothing")) return;
     const strengthBox = el("div", "ce-smoothing");
     panel.append(strengthBox);
     const strength = el("input");
@@ -1281,10 +1348,16 @@ export function openChartEditor(options: ChartEditorOptions): {
     const endpoints = el("div", "ce-smoothing-endpoints");
     endpoints.append(el("span", "", "None"), el("span", "", "More"));
     strengthBox.append(endpoints);
+    const refreshState = () =>
+      foldState(
+        "Smoothing",
+        `${strengthHint()} · ${draft.config.interpolation === "pchip" ? "smooth" : "linear"}`,
+      );
     strength.setAttribute("aria-valuetext", strengthHint());
     strength.oninput = () => {
       Object.assign(draft.config, strengthToSmoothing(Number(strength.value)));
       strength.setAttribute("aria-valuetext", strengthHint());
+      refreshState();
       change();
     };
     select(
@@ -1298,12 +1371,20 @@ export function openChartEditor(options: ChartEditorOptions): {
       ],
       (value) => {
         draft.config.interpolation = value as ViewConfig["interpolation"];
+        refreshState();
       },
-      "Used for the matching curve and numerical readouts. Step and spline styles are display-only.",
     );
+    refreshState();
+  }
+
+  function renderAppearance() {
+    const panel = clearPanel("Appearance");
+    if (scalarOnly("Appearance")) return;
     const legend = record(draft.config.advanced.legend).show;
+    const toggles = el("div", "ce-pair");
+    panel.append(toggles);
     toggle(
-      panel,
+      toggles,
       "legend",
       "Show legend",
       typeof legend === "boolean" ? legend : draft.config.legend,
@@ -1315,27 +1396,22 @@ export function openChartEditor(options: ChartEditorOptions): {
         draft.config.grid,
     );
     const grid = toggle(
-      panel,
+      toggles,
       "grid",
       "Show grid",
       grids.every(Boolean),
       (value) => setEditorToggle(draft.config, "grid", value),
-      grids[0] !== grids[1]
-        ? "Mixed saved settings. Changing this sets both axes."
-        : "",
     );
     grid.indeterminate = grids[0] !== grids[1];
+    foldState("Appearance", plotType(draft));
     const styleDetails = el("fieldset", "ce-group ce-default-style");
     styleDetails.append(el("legend", "", "Default curve style"));
     panel.append(styleDetails);
-    const extra = more(panel, "Advanced appearance");
+    const extra = more(panel, "More style options");
     extra.open = advancedOpen.get("Appearance") ?? false;
     const strokeDetails = el("fieldset", "ce-group");
-    strokeDetails.append(el("legend", "", "Default line & marker details"));
+    strokeDetails.append(el("legend", "", "Line & marker details"));
     extra.append(strokeDetails);
-    styleDetails.append(
-      el("p", "ce-help", "Applies unless a curve has its own style below."),
-    );
     toggle(
       styleDetails,
       "palette",
@@ -1414,7 +1490,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       rows.replaceChildren();
       if (!result.total)
         rows.append(
-          el("p", "ce-help", "Choose available sources in Data first."),
+          el("p", "ce-help", "No curves yet."),
         );
       for (const choice of result.rows) {
         const choose = button(
@@ -1485,7 +1561,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       320,
       8000,
       true,
-      "Leave blank to fit the card.",
+      "Blank fits the card.",
     );
     const ticks = ["x", "y"].map(
       (axis) =>
@@ -1520,9 +1596,12 @@ export function openChartEditor(options: ChartEditorOptions): {
     commit: (patch: Partial<RunStyle>) => void = () => {},
     extra: HTMLElement = parent,
   ) {
+    // Curve style is the line only; points are an independent overlay. "No line"
+    // forces points on (or nothing is drawn) and leaving it restores the
+    // points choice that was in effect before.
     const shapeFor = (style: RunStyle) =>
-      style.width === 0 && (style.markers?.show ?? style.points)
-        ? "points"
+      style.width === 0 && style.fill === 0
+        ? "none"
         : style.fill > 0
           ? "area"
           : style.path.startsWith("stepped-") && style.pathOptions?.align
@@ -1530,6 +1609,18 @@ export function openChartEditor(options: ChartEditorOptions): {
               ? "stepped-before"
               : "stepped-after"
             : style.path;
+    const pointsFor = (style: RunStyle) =>
+      String(style.markers?.show ?? style.points);
+    let pointsBeforeNone = shapeFor(effective) === "none" ? "false" : pointsFor(effective);
+    const pointSync: (() => void)[] = [];
+    const setPoints = (value: string) => {
+      patch.points = value !== "false";
+      patch.markers = {
+        ...effective.markers,
+        ...patch.markers,
+        show: value === "auto" ? "auto" : value === "true",
+      };
+    };
     const changed = () => {
       effective = deepMerge(effective, patch);
       commit(patch);
@@ -1544,7 +1635,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         shape: shapeFor(effective),
         width: String(effective.width),
         fill: String(effective.fill),
-        points: String(effective.markers?.show ?? effective.points),
+        points: pointsFor(effective),
         "marker-size": String(effective.markers?.size ?? effective.pointSize),
       };
       for (const [name, value] of Object.entries(values)) {
@@ -1557,6 +1648,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         )
           control.value = value;
       }
+      for (const sync of pointSync) sync();
       change();
     };
     const shape = shapeFor(effective);
@@ -1571,20 +1663,22 @@ export function openChartEditor(options: ChartEditorOptions): {
         ["stepped-after", "Step after"],
         ["stepped-before", "Step before"],
         ["spline", "Spline (display only)"],
-        ["points", "Points only"],
         ["area", "Area"],
+        ["none", "No line (points only)"],
       ],
       (value) => {
+        const wasNone = shapeFor(effective) === "none";
         patch.path =
-          value === "area" || value === "points"
+          value === "area" || value === "none"
             ? "matched"
             : (value as RunStyle["path"]);
-        patch.width = value === "points" ? 0 : effective.width || 2;
+        patch.width = value === "none" ? 0 : effective.width || 2;
         patch.fill = value === "area" ? effective.fill || 0.15 : 0;
-        if (value === "points") {
-          patch.points = true;
-          patch.markers = { ...effective.markers, show: true };
-        }
+        if (value === "none" && !wasNone) {
+          // Remember the overlay choice, then make sure something is drawn.
+          pointsBeforeNone = pointsFor(effective);
+          if (pointsBeforeNone === "false") setPoints("true");
+        } else if (value !== "none" && wasNone) setPoints(pointsBeforeNone);
         if (value.startsWith("stepped-"))
           patch.pathOptions = {
             ...effective.pathOptions,
@@ -1612,9 +1706,7 @@ export function openChartEditor(options: ChartEditorOptions): {
           changed();
         }
       },
-      palette
-        ? "Turn off shared run colors above to choose one default color."
-        : "Hex, named, rgb, or hsl color.",
+      palette ? "Uses shared run colors." : "",
     );
     color.disabled = palette;
     toggle(
@@ -1627,27 +1719,28 @@ export function openChartEditor(options: ChartEditorOptions): {
         changed();
       },
     );
-    const points = effective.markers?.show ?? effective.points;
-    select(
+    const pointsControl = select(
       parent,
       `${key}:points`,
-      "Observation points",
-      String(points),
+      "Points",
+      pointsFor(effective),
       [
-        ["false", "Hidden"],
-        ["true", "Shown"],
-        ["auto", "Automatic spacing"],
+        ["false", "Off"],
+        ["true", "On"],
+        ["auto", "Only when sparse"],
       ],
       (value) => {
-        patch.points = value !== "false";
-        patch.markers = {
-          ...effective.markers,
-          ...patch.markers,
-          show: value === "auto" ? "auto" : value === "true",
-        };
+        setPoints(value);
         changed();
       },
     );
+    // With no line, hiding points would hide the curve: use "Show this curve".
+    const syncPointsOff = () => {
+      const off = pointsControl.querySelector<HTMLOptionElement>('option[value="false"]');
+      if (off) off.disabled = shapeFor(effective) === "none";
+    };
+    syncPointsOff();
+    pointSync.push(syncPointsOff);
     const basic = el("div", "ce-pair");
     parent.append(basic);
     number(
@@ -2124,9 +2217,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     close();
   });
   dialog.addEventListener("close", close);
-  renderData();
-  renderAxes();
-  renderAppearance();
+  renderAll();
   window.addEventListener("nset:run-colors-changed", schedulePreview);
   window.addEventListener("resize", schedulePreview);
   document.body.append(dialog);

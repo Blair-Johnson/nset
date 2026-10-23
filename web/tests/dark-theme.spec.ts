@@ -251,7 +251,12 @@ for (const width of [1440, 390])
     await darkSurfaces(page);
     await card.getByRole("button", { name: "Edit chart", exact: true }).click();
     await expect(page.locator(".chart-editor")).toBeVisible();
-    for (const tab of ["Data", "Axes", "Appearance"]) {
+    await page
+      .locator(".chart-editor details.ce-fold, .chart-editor details.ce-axis-options")
+      .evaluateAll((folds) =>
+        folds.forEach((fold) => ((fold as HTMLDetailsElement).open = true)),
+      );
+    for (const tab of ["Y axis", "X axis", "Appearance"]) {
       await page
         .getByRole("heading", { name: tab, exact: true })
         .scrollIntoViewIfNeeded();

@@ -8,6 +8,7 @@ import {
   loadLibrary,
   newChart,
   newWorkspace,
+  resetChart,
   resolveSources,
   saveLibrary,
   seriesId,
@@ -276,4 +277,31 @@ test("card geometry rejects malformed dimensions instead of silently clipping sa
   ]) {
     assert.throws(() => validateChart({ ...chart, layout }));
   }
+});
+test("Reset chart restores default settings but keeps data, title, identity and size", () => {
+  const card = newChart("timeseries", ["train/loss"], "Loss");
+  card.x = { mode: "key", key: "train/learning_rate" };
+  card.config.axis = "relative";
+  card.config.yScale = "log";
+  card.config.smoothing = true;
+  card.config.style.width = 7;
+  card.config.style.markers = { show: true };
+  card.config.runs.r = { color: "#123456" };
+  card.config.height = 500;
+  card.outliers = "robust";
+  card.size = "wide";
+  card.layout = { width: 600, height: 400 };
+  const reset = resetChart(card);
+  const fresh = newChart("timeseries", [], "Loss");
+  assert.equal(reset.id, card.id);
+  assert.equal(reset.title, "Loss");
+  assert.deepEqual(reset.source, card.source);
+  assert.deepEqual(reset.x, card.x);
+  assert.equal(reset.size, "wide");
+  assert.deepEqual(reset.layout, card.layout);
+  assert.equal(reset.outliers, "all");
+  // XY keeps its join; everything else is a new chart's look.
+  assert.deepEqual(reset.config, { ...fresh.config, axis: "relative", height: 500 });
+  // The input is not mutated (Undo relies on the previous copy).
+  assert.equal(card.config.style.width, 7);
 });

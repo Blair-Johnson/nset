@@ -394,10 +394,10 @@ export class ChartCard {
           action();
         }),
       );
-    item("Reset view", () => {
-      this.plot?.reset();
-      this.images?.fit();
-    });
+    // The toolbar's home button already resets the camera; this resets the
+    // chart's settings (undoable from the dashboard's Undo).
+    if (this.actions.onReset)
+      item("Reset chart", () => this.actions.onReset!(this.spec.id));
     item("Edit chart", () => this.actions.onEdit(this.spec.id));
     item("Duplicate", () => this.actions.onDuplicate(this.spec.id));
     item("Move up", () => this.actions.onMove(this.spec.id, -1));

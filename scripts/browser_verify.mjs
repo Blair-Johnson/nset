@@ -55,8 +55,13 @@ const value = async (root, run, column) => {
 const edit = async (root) => {
   await root.getByLabel("Chart actions", { exact: true }).click();
   await root.getByRole("button", { name: "Edit chart", exact: true }).click();
-  await page.getByRole("dialog", { name: "Edit chart", exact: true }).waitFor();
-  return page.getByRole("dialog", { name: "Edit chart", exact: true });
+  const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
+  await editor.waitFor();
+  // Secondary settings start in closed folds; this script exercises them all.
+  await editor
+    .locator("details.ce-fold, details.ce-axis-options")
+    .evaluateAll((folds) => folds.forEach((fold) => (fold.open = true)));
+  return editor;
 };
 try {
   await page.goto(process.env.NSET_BROWSER_URL);
@@ -179,7 +184,7 @@ try {
     .evaluate((el) => (window.__neighborCanvas = el));
   let editor = await edit(loss);
   await editor
-    .getByRole("heading", { name: "Axes", exact: true })
+    .getByRole("heading", { name: "Y axis", exact: true })
     .scrollIntoViewIfNeeded();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
   await screenshot("ux-05-chart-editor");
@@ -253,7 +258,7 @@ try {
     .getByRole("slider", { name: "Smoothing strength", exact: true })
     .fill("0");
   await editor
-    .getByRole("heading", { name: "Axes", exact: true })
+    .getByRole("heading", { name: "Y axis", exact: true })
     .scrollIntoViewIfNeeded();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("linear");
   await editor
@@ -315,7 +320,7 @@ try {
     .getByLabel("Chart title", { exact: true })
     .fill("Cross-experiment comparison");
   await editor
-    .getByLabel("Data sources", { exact: true })
+    .getByLabel("Runs", { exact: true })
     .selectOption("explicit");
   await editor
     .getByLabel("Find metrics", { exact: true })

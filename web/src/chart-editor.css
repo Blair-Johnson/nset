@@ -76,13 +76,121 @@
   scrollbar-gutter: stable;
 }
 .chart-editor .ce-panel {
-  padding: 16px;
+  padding: 14px 16px 4px;
   border-bottom: 1px solid var(--ce-border);
   scroll-margin-block: 12px;
 }
 .chart-editor .ce-panel > h3 {
   color: var(--ce-text);
-  font-size: 15px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+  margin-bottom: 10px;
+}
+/* Folds: a full-width header row with a one-line summary of the fold's state. */
+.chart-editor .ce-fold {
+  padding: 0 16px;
+}
+.chart-editor .ce-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.chart-editor .ce-fold > summary::-webkit-details-marker,
+.chart-editor .ce-axis-options > summary::-webkit-details-marker {
+  display: none;
+}
+.chart-editor .ce-fold > summary::before,
+.chart-editor .ce-axis-options > summary::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--ce-muted);
+  border-bottom: 1.5px solid var(--ce-muted);
+  transform: translateY(-2px) rotate(-45deg);
+  transition: transform 120ms;
+}
+.chart-editor .ce-fold[open] > summary::before,
+.chart-editor .ce-axis-options[open] > summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+.chart-editor .ce-fold > summary h3 {
+  font-size: 13px;
+  font-weight: 650;
+  margin: 0;
+}
+.chart-editor .ce-fold-state {
+  margin-left: auto;
+  color: var(--ce-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.chart-editor .ce-fold > summary:hover h3 {
+  color: var(--ce-accent);
+}
+.chart-editor .ce-fold[open] > .ce-panel-body {
+  padding-bottom: 4px;
+}
+.chart-editor .ce-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.chart-editor button.ce-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 6px 3px 9px;
+  border-radius: 999px;
+  border-color: var(--accent);
+  background: var(--selected);
+  font-size: 12px;
+  font-weight: 550;
+}
+.chart-editor button.ce-chip > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-editor .ce-chip-x {
+  color: var(--ce-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.chart-editor button.ce-chip:hover .ce-chip-x {
+  color: var(--ce-text);
+}
+.chart-editor button.ce-chip.ce-unavailable {
+  border-color: var(--warning);
+}
+.chart-editor .ce-chip-empty {
+  color: var(--ce-muted);
+  font-size: 12px;
+  padding: 3px 0;
+}
+/* The search box's placeholder names it; its visible label is for AT only. */
+.chart-editor .ce-search > label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.chart-editor .ce-search {
+  margin-bottom: 8px;
+}
+.chart-editor .ce-x-row {
+  grid-template-columns: 3fr 2fr;
 }
 .chart-editor .ce-field {
   margin: 0 0 12px;
@@ -160,15 +268,19 @@
   border-color: var(--danger) !important;
 }
 .chart-editor .ce-selection-summary {
-  color: var(--ce-muted);
-  margin: 0 0 12px;
+  color: var(--warning);
+  margin: -4px 0 10px;
   font-size: 12px;
+}
+.chart-editor .ce-selection-summary:empty {
+  display: none;
 }
 .chart-editor .ce-source-list {
   border: 1px solid var(--ce-border);
   border-radius: 7px;
   overflow: auto;
-  max-height: 210px;
+  max-height: 168px;
+  margin-bottom: 12px;
 }
 .chart-editor .ce-source {
   display: flex;
@@ -215,7 +327,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 7px;
-  margin: 8px 0 16px;
+  margin: -4px 0 12px;
 }
 .chart-editor .ce-paging button {
   font-size: 11px;
@@ -243,8 +355,18 @@
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.chart-editor .ce-pair > .ce-toggle {
+  margin-bottom: 12px;
+}
+.chart-editor optgroup {
+  color: var(--ce-muted);
+  font-style: normal;
+}
+.chart-editor optgroup option {
+  color: var(--ce-text);
+}
 .chart-editor .ce-more {
-  margin: 14px 0;
+  margin: 4px 0 12px;
   border-top: 1px solid var(--ce-border);
 }
 .chart-editor .ce-more > summary {
@@ -256,6 +378,25 @@
 }
 .chart-editor .ce-more > .ce-help {
   margin-bottom: 14px;
+}
+/* Per-axis options fold: same row shape as the section folds, but nested. */
+.chart-editor .ce-axis-options {
+  margin: 4px 0 8px;
+}
+.chart-editor .ce-axis-options > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-right: 0;
+  list-style: none;
+  color: var(--ce-muted);
+}
+.chart-editor .ce-axis-options > summary:hover,
+.chart-editor .ce-axis-options[open] > summary {
+  color: var(--text);
+}
+.chart-editor .ce-axis-options > .ce-panel-body {
+  padding-top: 2px;
 }
 .chart-editor .ce-series-list {
   display: flex;

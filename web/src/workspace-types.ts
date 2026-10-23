@@ -97,6 +97,8 @@ export interface CardActions {
   onEdit(id: string): void;
   onRemove(id: string): void;
   onDuplicate(id: string): void;
+  /** Return the chart's settings to new-chart defaults, keeping its data. */
+  onReset?: (id: string) => void;
   onMove(id: string, delta: -1 | 1): void;
   onResize(id: string, size: "normal" | "wide"): void;
   onDimensions?: (id: string, layout: CardLayout) => boolean | void;

@@ -1,6 +1,7 @@
 import type { Run } from "./api";
 import { element } from "./utils";
 import { plotIcon } from "./plot-icons";
+import { attachSuggestions } from "./suggest";
 import {
   activeConditions,
   describeCondition,
@@ -30,6 +31,16 @@ const MISSING: { value: MissingPolicy; label: string; hint: string }[] = [
   },
 ];
 
+/** Example values are JSON text; show strings without their quotes. */
+function displayValue(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "string" ? parsed : text;
+  } catch {
+    return text;
+  }
+}
+
 /**
  * Filter icon + popover for building AND/OR conditions on nested run config
  * and tags. Calls onChange with a fresh filter whenever a condition changes.
@@ -41,8 +52,6 @@ export class RunFilterMenu {
   private readonly popover = element("div", "menu-popover run-filter-popover");
   private readonly list = element("div", "run-filter-conditions");
   private readonly combine = element("select");
-  private readonly datalistId = `run-filter-paths-${crypto.randomUUID()}`;
-  private readonly datalist = element("datalist");
   private fields: FilterField[] = [];
   private runs: Run[] = [];
 
@@ -55,7 +64,6 @@ export class RunFilterMenu {
     this.summary.setAttribute("aria-label", "Filter runs by config or tags");
     this.summary.title = "Filter runs by config values or tags";
     this.summary.append(plotIcon("filter"), this.badge);
-    this.datalist.id = this.datalistId;
     const head = element("div", "run-filter-head");
     head.append(element("strong", "", "Filter runs"));
     this.combine.setAttribute("aria-label", "Combine conditions");
@@ -108,7 +116,7 @@ export class RunFilterMenu {
     };
     const foot = element("div", "run-filter-foot");
     foot.append(add, clear);
-    this.popover.append(head, this.list, foot, this.datalist);
+    this.popover.append(head, this.list, foot);
     this.root.append(this.summary, this.popover);
     this.root.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.root.open) {
@@ -124,14 +132,6 @@ export class RunFilterMenu {
   setRuns(runs: Run[]) {
     this.runs = runs;
     this.fields = filterFields(runs);
-    this.datalist.replaceChildren(
-      ...this.fields.map((f) => {
-        const o = element("option");
-        o.value = f.label;
-        o.label = `${f.count}/${runs.length} runs`;
-        return o;
-      }),
-    );
     this.render();
   }
 
@@ -202,21 +202,42 @@ export class RunFilterMenu {
       const path = element("input", "run-filter-path");
       path.type = "text";
       path.placeholder = "config path or tag:key";
-      path.setAttribute("list", this.datalistId);
       path.setAttribute("aria-label", `Condition ${index + 1} path`);
       path.value = condition.path ? this.label(condition) : "";
-      path.onchange = () => {
+      const commitPath = () => {
         const field = this.fieldByLabel(path.value);
         if (field) update({ scope: field.scope, path: field.path }, true);
         else if (path.value.trim().startsWith("$"))
           update({ scope: "params", path: path.value.trim() }, true);
         else if (!path.value.trim()) update({ path: "" }, true);
         else {
-          path.setCustomValidity("Unknown path. Pick one from the list.");
+          path.setCustomValidity("Unknown path. Pick one from the suggestions.");
           path.reportValidity();
         }
       };
+      path.onchange = commitPath;
       path.oninput = () => path.setCustomValidity("");
+      // Suggest config paths and tags; the hint shows a few values seen.
+      attachSuggestions(
+        path,
+        () =>
+          this.fields.map((f) => ({
+            value: f.label,
+            detail: f.examples
+              .slice(0, 3)
+              .map(displayValue)
+              .join(", "),
+          })),
+        () => {
+          commitPath();
+          // Picking a path moves on to the value, like completing a word.
+          requestAnimationFrame(() =>
+            this.list
+              .querySelectorAll<HTMLInputElement>(".run-filter-value")
+              [index]?.focus(),
+          );
+        },
+      );
       const op = element("select", "run-filter-op");
       op.setAttribute("aria-label", `Condition ${index + 1} operator`);
       for (const o of OPS) {
@@ -234,28 +255,15 @@ export class RunFilterMenu {
       value.value = condition.value;
       value.hidden = condition.op === "exists";
       const examples = this.fieldFor(condition)?.examples ?? [];
-      if (examples.length) {
-        const id = `${this.datalistId}-${index}`;
-        const values = element("datalist");
-        values.id = id;
-        values.append(
-          ...examples.map((text) => {
-            const o = element("option");
-            o.value = (() => {
-              try {
-                const parsed = JSON.parse(text);
-                return typeof parsed === "string" ? parsed : text;
-              } catch {
-                return text;
-              }
-            })();
-            return o;
-          }),
-        );
-        value.setAttribute("list", id);
-        row.append(values);
-      }
       value.oninput = () => update({ value: value.value });
+      const line = element("div", "run-filter-line");
+      line.append(path, op, value);
+      if (examples.length)
+        attachSuggestions(
+          value,
+          () => examples.map((text) => ({ value: displayValue(text) })),
+          () => update({ value: value.value }),
+        );
       const remove = element("button", "run-filter-remove", "×");
       remove.type = "button";
       remove.setAttribute("aria-label", `Remove condition ${index + 1}`);
@@ -266,8 +274,7 @@ export class RunFilterMenu {
         this.emit();
         this.render();
       };
-      const line = element("div", "run-filter-line");
-      line.append(path, op, value, remove);
+      line.append(remove);
       const missingLine = element("div", "run-filter-line run-filter-missing");
       const missingLabel = element("label");
       missingLabel.append("If a run lacks this path: ");

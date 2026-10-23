@@ -5,6 +5,7 @@ import { fetchCatalog, MetricStore } from "./catalog";
 import {
   defaultSections,
   newChart,
+  resetChart,
   newWorkspace,
   loadLibrary,
   saveLibrary,
@@ -1145,6 +1146,12 @@ function renderCharts(workspace: Workspace) {
                 copy.title += " copy";
                 found.section.cards.splice(found.index + 1, 0, copy);
               }
+            }),
+          onReset: (id) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (found)
+                found.section.cards[found.index] = resetChart(found.card);
             }),
           onMove: (id, delta) =>
             change(workspace, () => {
