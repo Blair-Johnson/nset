@@ -1,4 +1,4 @@
-// Screenshot the editor preview for each default "Curve style".
+// Screenshot curve styles on a step chart and an XY chart, zoomed, with points.
 // Usage (from web/): node scripts/curve-styles-shot.mjs <url> <token> <outprefix>
 import { chromium } from "@playwright/test";
 
@@ -22,7 +22,7 @@ await page
 await page.getByRole("button", { name: "View charts", exact: true }).click();
 const card = page
   .locator(".dashboard-cell")
-  .filter({ has: page.locator(".card-title", { hasText: /^learning_rate$/ }) })
+  .filter({ has: page.locator(".card-title", { hasText: /^loss$/ }) })
   .first();
 await card.locator("canvas").waitFor({ timeout: 20000 });
 await card.getByLabel("Chart actions", { exact: true }).click();
@@ -31,16 +31,47 @@ const dialog = page.getByRole("dialog", { name: "Edit chart", exact: true });
 await dialog.waitFor();
 for (const fold of await dialog.locator("details").all())
   await fold.evaluate((n) => (n.open = true));
-const style = dialog.locator(".ce-default-style").getByLabel("Curve style", { exact: true });
-const values = await style.locator("option").evaluateAll((o) => o.map((x) => x.value));
-for (const value of values) {
-  await style.selectOption(value);
-  await page.waitForTimeout(900);
-  const info = await page.evaluate(() => {
-    const series = [...document.querySelectorAll(".ce-preview .u-legend .u-series")].length;
-    return { warnings: document.querySelector(".ce-preview .ce-help")?.textContent ?? "" };
-  });
-  await dialog.locator(".ce-preview-plot").screenshot({ path: `${out}-${value}.png` });
-  console.log(value, JSON.stringify(info).slice(0, 300));
+const defaults = dialog.locator(".ce-default-style");
+await defaults.getByLabel("Points", { exact: true }).selectOption("true");
+const zoom = async (from, to) => {
+  // Shift+Ctrl+wheel zooms X only; the curve stays in the Y range.
+  const box = await dialog.locator(".ce-preview-plot .u-over").boundingBox();
+  await page.mouse.move(box.x + box.width * from, box.y + box.height * 0.5);
+  await page.keyboard.down("Control");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < to; i++) {
+    await page.mouse.wheel(0, -120);
+    await page.waitForTimeout(40);
+  }
+  await page.keyboard.up("Shift");
+  for (let i = 0; i < 9; i++) {
+    await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.88);
+    await page.mouse.wheel(0, -120);
+    await page.waitForTimeout(40);
+  }
+  await page.keyboard.up("Control");
+  await page.waitForTimeout(600);
+};
+for (const [mode, x, window] of [
+  ["step", "param:step", [0.3, 14]],
+  ["xy", "key:train/learning_rate", [0.45, 10]],
+]) {
+  await dialog.getByLabel("X", { exact: true }).selectOption(x);
+  await page.waitForTimeout(1200);
+  for (const style of ["matched", "spline", "stepped-after", "area"]) {
+    await defaults.getByLabel("Curve style", { exact: true }).selectOption(style);
+    await page.waitForTimeout(800);
+    await dialog.locator(".ce-preview-plot .u-over").dblclick();
+    await page.waitForTimeout(300);
+    await zoom(...window);
+    await dialog.locator(".ce-preview-plot").screenshot({ path: `${out}-${mode}-${style}.png` });
+    console.log(mode, style);
+  }
 }
+await defaults.getByLabel("Curve style", { exact: true }).selectOption("stepped-after");
+await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
+await dialog.waitFor({ state: "hidden" });
+await page.waitForTimeout(1500);
+await card.screenshot({ path: `${out}-saved-xy-steps.png` });
+console.log("saved card");
 await browser.close();

@@ -12,7 +12,6 @@ import {
 import { extent, unionSorted } from "./utils";
 import {
   resolveOptions,
-  cosmeticPath,
   fillColor,
   rawMarkerOptions,
   pairedVisibility,
@@ -20,6 +19,7 @@ import {
   type XQuantity,
 } from "./options";
 import { matchedPath } from "./matched-path";
+import { traceRun, traceRuns, type TraceKind } from "./trace-path";
 import {
   PlotNavigation,
   readViewport,
@@ -37,29 +37,48 @@ export interface Pins {
 const xSignature = (data: Analyzed[]) =>
   JSON.stringify([...new Set(data.map((d) => d.x?.key ?? null))]);
 
-/** Draws an XY trace as straight segments in parameter order, in the current
- * viewport. Samples outside a log domain break the line rather than bridge it. */
-function parametricPath(
+/** Draws a trace through its own samples in the current viewport, honoring the
+ * curve style (straight, natural-cubic spline, steps, area). XY traces are
+ * drawn in parameter order (they may double back); time-series in x order.
+ * Invalid samples (e.g. outside a log domain) break the line. Area fills from
+ * the trace down to the baseline (fillTo, or the visible bottom on log axes). */
+function tracePath(
   points: XY[],
   valid: (x: number, y: number) => boolean,
+  style: { path: string; fill: number; fillTo?: number },
+  yLog: boolean,
+  param: "x" | "chord",
 ): uPlot.Series.PathBuilder {
+  const kind: TraceKind =
+    style.path === "spline" ||
+    style.path === "stepped-after" ||
+    style.path === "stepped-before"
+      ? style.path
+      : "linear";
+  const runs = traceRuns(points, valid);
   return (u) => {
+    const project = (run: XY[]) =>
+      run.map(([x, y]): XY => [u.valToPos(x, "x", true), u.valToPos(y, "y", true)]);
     const stroke = new Path2D();
-    let drawing = false;
-    for (const [x, y] of points) {
-      if (!valid(x, y)) {
-        drawing = false;
-        continue;
+    const fill = style.fill > 0 ? new Path2D() : null;
+    const base = u.valToPos(
+      style.fillTo ?? (yLog ? u.scales.y.min! : 0),
+      "y",
+      true,
+    );
+    for (const run of runs) {
+      const px = project(run);
+      traceRun(stroke, px, kind, param);
+      if (fill && px.length > 1) {
+        traceRun(fill, px, kind, param);
+        fill.lineTo(px[px.length - 1][0], base);
+        fill.lineTo(px[0][0], base);
+        fill.closePath();
       }
-      const px = u.valToPos(x, "x", true),
-        py = u.valToPos(y, "y", true);
-      if (drawing) stroke.lineTo(px, py);
-      else stroke.moveTo(px, py);
-      drawing = true;
     }
     const clip = new Path2D();
     clip.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
-    return { stroke, fill: null, clip };
+    return { stroke, fill, clip };
   };
 }
 export class PlotPanel {
@@ -349,21 +368,27 @@ export class PlotPanel {
         alpha: s.alpha ?? 1,
         pxAlign: alignment,
         auto: s.auto ?? true,
-        // An XY trace is a curve, not a function of x: area fill has no meaning.
-        fill: xy ? undefined : fillColor(s),
+        // Fills for trace paths are built along the trace, down to the baseline.
+        fill: fillColor(s),
         fillTo:
           s.fillTo ?? ((u) => (config.yScale === "log" ? u.scales.y.min! : 0)),
         paths:
           s.width === 0 && s.fill === 0 && rawEnabled[i]
             ? () => null
-            : xy
-              ? parametricPath(d.points, (x, y) => valid(x, y) !== null)
-              : adaptive
-                ? matchedPath(d.points, (x) => d.fn.at(x), {
-                    fillTo: s.fillTo,
-                    onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
-                  })
-                : cosmeticPath(s),
+            : adaptive
+              ? matchedPath(d.points, (x) => d.fn.at(x), {
+                  fillTo: s.fillTo,
+                  onLimited: (hit) => reportLimit(d.run.id, d.run.name, hit),
+                })
+              : // Each run's own samples, never the shared union grid: knots
+                // borrowed from other runs put spurious bends between points.
+                tracePath(
+                  d.points,
+                  (x, y) => valid(x, y) !== null,
+                  s,
+                  config.yScale === "log",
+                  xy ? "chord" : "x",
+                ),
         spanGaps: false,
         points: { ...rawMarkerOptions(s), show: d.points.length === 1 },
         value: (_u, v) => (v == null ? "—" : formatValue(v, config.yFormat)),
