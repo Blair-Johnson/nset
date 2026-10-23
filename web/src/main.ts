@@ -141,6 +141,7 @@ function invalidate() {
   $("plot-empty").hidden = false;
   $("plot-warning").hidden = true;
   $("data-note").textContent = "No authoritative snapshot loaded";
+  $("load-status").textContent = "No authoritative snapshot loaded";
   renderReadouts();
 }
 function renderAnalysis() {

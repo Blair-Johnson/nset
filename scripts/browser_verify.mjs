@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { pixelStats } from "./pixels.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root, "web/package.json"));
 const { chromium } = require("playwright");
@@ -54,6 +55,14 @@ try {
   assert.match(await cell("#crossings", "Curve A", 1), /^5, 15$/);
   assert.match(await cell("#crossings", "Curve B", 2), /\[0, 5\]/);
   await screenshot("01-timeseries");
+  await page.locator("#pin-a").fill("");
+  await page.locator("#pin-b").fill("");
+  await page.locator("#threshold").fill("");
+  const plotPixels = await pixelStats(page, "#plot .u-over");
+  assert.ok(plotPixels.cyan > 50 && plotPixels.violet > 50, "both actual curve strokes must be rendered, without cursor overlays");
+  await page.locator("#pin-a").fill("5");
+  await page.locator("#pin-b").fill("10");
+  await page.locator("#threshold").fill("2");
   const before = await text("#readout");
   const box = await page.locator("#plot .u-over").boundingBox();
   await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.3);
@@ -116,6 +125,7 @@ try {
     .click();
   await page.locator("#saved-views").selectOption("Log comparison");
   await page.locator("#load-view").click();
+  await page.waitForFunction(() => document.querySelector('#settings-pane [aria-label="Y scale"]').value === 'log');
   await page.waitForFunction(() =>
     document
       .querySelector("#load-status")
@@ -141,6 +151,9 @@ try {
     document.querySelector(".frame-info").textContent.includes("1 of 4"),
   );
   await screenshot("04-image-timeline");
+  await page.waitForTimeout(300);
+  const imagePixels = await pixelStats(page, "#image-viewer");
+  assert.ok(imagePixels.gold > 500 && imagePixels.blue > 1000, "native image content must actually paint in the viewer");
   const viewport = page.locator("#image-viewer");
   const imageBox = await viewport.boundingBox();
   await page.mouse.move(
@@ -189,6 +202,10 @@ try {
     document.querySelector(".frame-info").textContent.includes("4 of 4"),
   );
   await page.getByRole("button", { name: "Reset view", exact: true }).click();
+  await page.getByRole("button", {name: "1:1 pixels", exact: true}).click();
+  await page.waitForFunction(() => Math.abs(Number(document.querySelector('#image-viewer').dataset.pixelZoom) - 1) < 1e-6);
+  await page.getByRole("button", {name: "Pixels: smooth", exact: true}).click();
+  await page.getByRole("button", {name: "Pixels: nearest", exact: true}).waitFor();
   await page.getByRole("tab", { name: "Timeseries", exact: true }).click();
   await page.setViewportSize({ width: 820, height: 1050 });
   await screenshot("06-narrow-layout");
@@ -223,6 +240,7 @@ try {
         "responsive layout",
         "token cleanup",
       ],
+      rendered_pixels: {plot: plotPixels, image: imagePixels},
       screenshots: artifacts,
     }),
   );
