@@ -113,14 +113,14 @@ export function newChart(
   config.advanced = {
     axes: [
       {
-        stroke: "#475569",
-        grid: { stroke: "#e2e8f0" },
-        ticks: { stroke: "#cbd5e1" },
+        stroke: "#abb3bc",
+        grid: { stroke: "#363b40" },
+        ticks: { stroke: "#737b84" },
       },
       {
-        stroke: "#475569",
-        grid: { stroke: "#e2e8f0" },
-        ticks: { stroke: "#cbd5e1" },
+        stroke: "#abb3bc",
+        grid: { stroke: "#363b40" },
+        ticks: { stroke: "#737b84" },
       },
     ],
   };
