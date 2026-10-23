@@ -25,7 +25,7 @@ pixi run python -c 'import os,secrets; f=os.open("access-token",os.O_WRONLY|os.O
 ./target/release/nset --data-dir ./data --listen 127.0.0.1:8080 --token-file ./access-token
 ```
 
-Open `http://127.0.0.1:8080` and enter the token. `NSET_TOKEN` is an alternative to `--token-file`. The UI retains the token in session storage until logout; it is never placed in an image URL. All API routes require a bearer token. Treat that token as full read/write access.
+Open `http://127.0.0.1:8080` and enter the token. `NSET_TOKEN` is an alternative to `--token-file`. The UI retains the token in session storage until Disconnect; it is never placed in an image URL. All API routes require a bearer token. Treat that token as full read/write access.
 
 Keep the database on a local filesystem. Remote training clients use HTTP, not shared SQLite files. For remote access, use HTTPS through a reverse proxy or an SSH tunnel; do not expose plaintext token traffic to an untrusted network. Copy the executable to a compatible host to deploy; no Python or Node installation is required to serve it.
 
@@ -39,7 +39,7 @@ For your own running server, populate examples from another terminal:
 pixi run python examples/demo.py --token-file ./access-token
 ```
 
-The demo includes three runs with irregularly spaced loss observations, narrow spikes, oscillating threshold crossings, and native PNG sequences. Select several runs to compare their curves; choose the image tab to scrub through a prediction sequence.
+The demo includes three runs with irregularly spaced loss observations, narrow spikes, oscillating threshold crossings, and native PNG sequences. Select several runs and open Charts to compare their curves and scrub the image panels’ prediction sequences.
 
 ## Log from Python
 
@@ -58,15 +58,26 @@ with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
 
 For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, ...])` with up to 10,000 observations per request. Writes are synchronous and acknowledged after persistence; the client does not silently retry non-idempotent requests. A failed context marks the run failed. A client exception does not guarantee that an interrupted network write was not committed; automatic deduplication is not provided.
 
-## Plot semantics and configuration
+## Explore runs and charts
 
-Metric history is paginated, not sampled. The inspector loads the complete snapshot before authoritative curve/readout updates. Duplicate x coordinates remain stored, but numerical curves use the observation with the greatest sequence number at that coordinate. Interpolation is an estimate, never an additional measurement. No extrapolation is performed.
+1. Open **Experiments**, choose an experiment, then search or filter its run table. Check the runs you want to compare and open **Charts**; selection is shared between Runs and Charts.
+2. The initial **Overview** view places line charts and image panels together in collapsible sections. Keys such as `train/loss` and `train/prediction` share a `train` section; keys without a slash go in an Overview section. Use the **Runs** picker to adjust the comparison without leaving Charts.
+3. Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a line chart or image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
+4. Changes to named views are saved in this browser. Use **View actions (⋯) → Save as…** for another view and **Export view / Import view…** to transfer its layout and settings. These files contain data references, not credentials or logged observations; they are not data backups.
 
-Linear and shape-preserving cubic interpolation are selectable. EMA is defined per observation and computed on the complete ordered series, not on the current viewport. Axis transformations affect display, not the underlying numerical query. A horizontal threshold may have several crossings or an interval of equal values; neither is silently reduced to a first-hit answer.
+Line charts start in **Pan** mode. Choose **Zoom** to drag a box, **Inspect** for A/B values and deltas, or **Threshold** for all crossings. Ordinary scrolling moves the page; **Alt + wheel** zooms a chart. **Fit**, **Back** and **+/−** provide visible navigation controls. Image panels keep the camera while you scrub or play the timeline; maximize a card for more space without losing its timeline. See `web/README.md` for shortcuts and detailed controls.
 
-Common uPlot settings are exposed through controls and saved view configurations. Advanced JSON options provide additional customization without executing arbitrary JavaScript. Function-valued callbacks and protected inspector hooks are not equivalent to JSON configuration; see `web/README.md` for exact supported options and boundaries.
+## What the plots mean
 
-Image bytes are preserved without recompression. Timeline changes preserve the viewer's camera rather than fitting each new frame. The whole inspector can go fullscreen with its timeline still available; native 1:1 pixels, smooth/nearest resampling, rotation and flip are exposed. Image frame selection is discrete and labeled by its actual logged step; images are not interpolated between training steps.
+Charts load complete metric histories before showing a comparison; they do not downsample observations. At duplicate step or timestamp coordinates, the latest inserted observation supplies the curve value. Interpolation estimates values between observations and never extrapolates beyond them.
+
+Linear and smooth, shape-preserving interpolation are selectable. Smoothing gives each new observation a chosen weight and is calculated over the complete ordered history, not just the visible area. Zoom and scale changes do not alter A/B or threshold answers. **Central 98%** narrows the displayed Y range without deleting observations; **Fit all** reveals the full range again.
+
+Images retain their original bytes and resolution. Frames are selected by their logged step, not interpolated between steps. Camera controls include fit, native 1:1 pixels, smooth/nearest pixels, rotation and flip.
+
+## Catalog API
+
+Authenticated `GET /api/catalog` returns `{experiments, runs, series}` for tables and source selection, including empty experiments and runs. Each series has `run_id`, `key`, `kind` (`metric` or `image`), `count`, `last_step`, `last_timestamp` and `last_value`. Counts include duplicates; the last fields describe the latest inserted observation, not the greatest step, and image `last_value` is null. The response is a consistent metadata-only read: histories and image bytes remain on their existing endpoints.
 
 ## Verification and architecture
 
