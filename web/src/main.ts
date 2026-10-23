@@ -24,12 +24,9 @@ import { ChartCard } from "./cards";
 import { setPlotType } from "./plot-types";
 import { addMissingCharts } from "./dashboard-layout";
 import { openChartEditor } from "./chart-editor";
-import {
-  experimentTable,
-  runTable,
-  tableState,
-  showRunDetails,
-} from "./browser-tables";
+import { experimentTable, runTable, tableState } from "./browser-tables";
+import { renderRunDetail } from "./run-detail";
+import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -51,6 +48,8 @@ let currentWorkspaceId = "";
 let chartSearch = "";
 let activeEditor: { close: () => void } | undefined;
 const experimentState = tableState();
+const drawerStates = new Map<string, ReturnType<typeof runDrawerState>>();
+let runDrawer: RunDrawer | undefined;
 const runStates = new Map<string, ReturnType<typeof tableState>>();
 const undo = new Map<string, Workspace[]>();
 const cards = new Map<
@@ -61,6 +60,7 @@ const sectionNodes = new Map<string, HTMLElement>();
 const scrollPositions = new Map<string, number>();
 let previousRoute = "";
 let suspendedDashboard: DocumentFragment | undefined;
+let suspendedFocus: HTMLElement | undefined;
 const button = (label: string, fn: () => void, className = "") => {
   const b = element("button", className, label);
   b.type = "button";
@@ -90,14 +90,20 @@ function commitLibrary(mutate: () => void): boolean {
   }
 }
 function disposeCards() {
+  runDrawer?.destroy();
+  runDrawer = undefined;
   for (const card of cards.values()) card.view.destroy();
   cards.clear();
   sectionNodes.clear();
   currentWorkspaceId = "";
   suspendedDashboard = undefined;
+  suspendedFocus = undefined;
 }
 function suspendDashboard() {
   if (!currentWorkspaceId || suspendedDashboard) return;
+  suspendedFocus = $("page").contains(document.activeElement)
+    ? (document.activeElement as HTMLElement)
+    : undefined;
   suspendedDashboard = document.createDocumentFragment();
   for (const card of cards.values()) card.view.setActive(false);
   suspendedDashboard.append(...$("page").childNodes);
@@ -109,13 +115,22 @@ function currentRoute() {
       parts[0] === "experiments" && parts[1]
         ? decodeURIComponent(parts[1])
         : "",
-    view: parts[2] === "charts" ? "charts" : "runs",
+    view:
+      parts[2] === "charts"
+        ? "charts"
+        : parts[2] === "runs" && parts[3]
+          ? "detail"
+          : "runs",
+    runId: parts[2] === "runs" && parts[3] ? decodeURIComponent(parts[3]) : "",
   };
 }
 function navigate(experimentId = "", view = "runs") {
   location.hash = experimentId
     ? `/experiments/${encodeURIComponent(experimentId)}/${view}`
     : "/experiments";
+}
+function openRun(run: Run) {
+  navigate(run.experiment_id, `runs/${encodeURIComponent(run.id)}`);
 }
 function context(workspace: Workspace): CardContext {
   return { api, catalog, selectedRunIds: workspace.selectedRunIds, store };
@@ -187,7 +202,7 @@ function updateSelection(workspace: Workspace, ids: string[]) {
   const saved = change(workspace, () => {
     workspace.selectedRunIds = [...new Set(ids)];
   });
-  if (!saved && currentRoute().view === "runs") renderPage();
+  return saved;
 }
 function pageHeader(experimentId: string, view: string): HTMLElement {
   const head = element("div", "page-heading");
@@ -202,7 +217,8 @@ function pageHeader(experimentId: string, view: string): HTMLElement {
     element("span", "", "/"),
     element("span", "", experiment.name),
   );
-  head.append(crumb, element("h1", "", experiment.name));
+  crumb.lastElementChild?.setAttribute("title", experiment.name);
+  head.append(crumb);
   const tabs = element("nav", "view-tabs");
   tabs.setAttribute("aria-label", "Experiment views");
   for (const [key, label] of [
@@ -245,7 +261,27 @@ function renderPage() {
       return;
     }
     const workspace = workspaceFor(experiment.id);
-    if (route.view === "runs") {
+    if (route.view === "detail") {
+      if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
+        disposeCards();
+      else suspendDashboard();
+      const run = catalog.runs.find(
+        (r) => r.id === route.runId && r.experiment_id === experiment.id,
+      );
+      $("page").replaceChildren(
+        pageHeader(experiment.id, "runs"),
+        run
+          ? renderRunDetail(run, {
+              catalog,
+              onBack: () => navigate(experiment.id),
+              onCharts: () => {
+                updateSelection(workspace, [run.id]);
+                navigate(experiment.id, "charts");
+              },
+            })
+          : element("p", "", "Run not found"),
+      );
+    } else if (route.view === "runs") {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
       else suspendDashboard();
@@ -262,11 +298,7 @@ function renderPage() {
           workspace.selectedRunIds,
           (ids) => updateSelection(workspace, ids),
           () => navigate(experiment.id, "charts"),
-          (run) =>
-            showRunDetails(run, () => {
-              updateSelection(workspace, [run.id]);
-              navigate(experiment.id, "charts");
-            }),
+          openRun,
           state,
         ),
       );
@@ -274,6 +306,12 @@ function renderPage() {
       if (currentWorkspaceId === workspace.id && suspendedDashboard) {
         $("page").replaceChildren(suspendedDashboard);
         suspendedDashboard = undefined;
+        const focus = suspendedFocus;
+        suspendedFocus = undefined;
+        requestAnimationFrame(() => {
+          if (focus?.isConnected && focus.getClientRects().length)
+            focus.focus({ preventScroll: true });
+        });
       }
       if (currentWorkspaceId !== workspace.id) {
         disposeCards();
@@ -282,10 +320,25 @@ function renderPage() {
         tools.id = "workspace-toolbar";
         const grid = element("div", "dashboard");
         grid.id = "dashboard";
-        $("page").append(tools, grid);
+        const layout = element("div", "workspace-layout");
+        let drawerState = drawerStates.get(experiment.id);
+        if (!drawerState) {
+          drawerState = runDrawerState();
+          drawerStates.set(experiment.id, drawerState);
+        }
+        runDrawer = new RunDrawer(
+          experiment.id,
+          drawerState,
+          (ids) => updateSelection(workspace, ids),
+          () => navigate(experiment.id),
+          openRun,
+        );
+        layout.append(runDrawer.backdrop, runDrawer.root, grid);
+        $("page").append(tools, layout);
         currentWorkspaceId = workspace.id;
       }
       renderCharts(workspace);
+      runDrawer?.restoreScroll();
     }
   }
   if (routeChanged)
@@ -438,15 +491,9 @@ function workspaceToolbar(workspace: Workspace) {
   const focused = host.contains(document.activeElement)
     ? document.activeElement?.getAttribute("aria-label")
     : null;
-  const focusedRun = host.contains(document.activeElement)
-    ? (document.activeElement as HTMLElement | null)?.dataset.runId
-    : undefined;
-  const oldScroll = host.querySelector(".run-picker-options")?.scrollTop ?? 0;
   const openMenus = [
     ...host.querySelectorAll<HTMLDetailsElement>("details[open]"),
   ].map((d) => d.dataset.menu);
-  const oldQuery =
-    host.querySelector<HTMLInputElement>("[data-role=run-search]")?.value ?? "";
   host.replaceChildren();
   const views = element("select");
   views.id = "view-select";
@@ -472,67 +519,6 @@ function workspaceToolbar(workspace: Workspace) {
       window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
     );
   };
-  const chooseRuns = element("details", "menu run-picker");
-  chooseRuns.dataset.menu = "runs";
-  const runSummary = element(
-    "summary",
-    "",
-    `Runs (${workspace.selectedRunIds.length})`,
-  );
-  chooseRuns.append(runSummary);
-  const runMenu = element("div", "menu-popover");
-  const runSearch = element("input");
-  runSearch.type = "search";
-  runSearch.placeholder = "Find runs";
-  runSearch.setAttribute("aria-label", "Find runs");
-  runSearch.dataset.role = "run-search";
-  runSearch.value = oldQuery;
-  const choices = element("div", "run-picker-options");
-  runMenu.append(
-    runSearch,
-    choices,
-    button(
-      "Open run table",
-      () => navigate(workspace.experimentId),
-      "text-link",
-    ),
-  );
-  chooseRuns.append(runMenu);
-  const renderRunChoices = () => {
-    choices.replaceChildren();
-    const matches = catalog.runs.filter(
-      (r) =>
-        r.experiment_id === workspace.experimentId &&
-        r.name.toLowerCase().includes(runSearch.value.toLowerCase()),
-    );
-    for (const run of matches.slice(0, 100)) {
-      const label = element("label", "check-option");
-      const check = element("input");
-      check.type = "checkbox";
-      check.checked = workspace.selectedRunIds.includes(run.id);
-      check.setAttribute("aria-label", `Show ${run.name}`);
-      check.dataset.runId = run.id;
-      check.onchange = () =>
-        updateSelection(
-          workspace,
-          check.checked
-            ? [...workspace.selectedRunIds, run.id]
-            : workspace.selectedRunIds.filter((id) => id !== run.id),
-        );
-      label.append(check, document.createTextNode(run.name));
-      choices.append(label);
-    }
-    if (matches.length > 100)
-      choices.append(
-        element(
-          "p",
-          "muted",
-          `Showing 100 of ${matches.length}. Refine your search.`,
-        ),
-      );
-  };
-  runSearch.oninput = renderRunChoices;
-  renderRunChoices();
   const search = element("input");
   search.type = "search";
   search.id = "chart-search";
@@ -722,23 +708,20 @@ function workspaceToolbar(workspace: Workspace) {
   });
   undoButton.disabled = !undo.get(workspace.id)?.length;
   undoButton.title = "Undo the last view edit";
-  host.append(views, chooseRuns, search, undoButton, add, more);
+  if (runDrawer) host.append(runDrawer.toggle);
+  host.append(views, search, undoButton, add, more);
   for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
     if (openMenus.includes(d.dataset.menu)) d.open = true;
-  choices.scrollTop = oldScroll;
   if (focused)
     [...host.querySelectorAll<HTMLElement>("[aria-label]")]
-      .find((node) =>
-        focusedRun
-          ? node.dataset.runId === focusedRun
-          : node.getAttribute("aria-label") === focused,
-      )
+      .find((node) => node.getAttribute("aria-label") === focused)
       ?.focus({ preventScroll: true });
 }
 
 function renderCharts(workspace: Workspace) {
   if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
     return;
+  runDrawer?.update(catalog, workspace.selectedRunIds);
   workspaceToolbar(workspace);
   const dashboard = $("dashboard");
   const keep = new Set<string>();
@@ -890,6 +873,15 @@ function renderCharts(workspace: Workspace) {
                 }
               }
             }),
+          onDimensions: (id, layout) =>
+            change(workspace, () => {
+              const found = locate(workspace, id);
+              if (!found) throw new Error("Chart no longer exists.");
+              found.section.cards[found.index] = {
+                ...found.card,
+                layout: { ...layout },
+              };
+            }),
           onResize: (id, size) =>
             change(workspace, () => {
               const found = locate(workspace, id);
@@ -926,6 +918,10 @@ function renderCharts(workspace: Workspace) {
         }
       }
       entry.host.classList.toggle("wide", spec.size === "wide");
+      entry.host.toggleAttribute("data-dimensions", !!spec.layout);
+      if (spec.layout)
+        entry.host.style.setProperty("--card-width", `${spec.layout.width}px`);
+      else entry.host.style.removeProperty("--card-width");
       grid.append(entry.host);
     }
     for (const child of [...grid.children]) {
@@ -1006,7 +1002,7 @@ function applyChartFilter(workspace: Workspace) {
           ? "Try another chart name."
           : workspace.selectedRunIds.length
             ? "Add a chart, or add missing metric charts from View actions."
-            : "Choose runs above or open the run table.",
+            : "Choose runs in the left drawer or open the run table.",
       ),
       button("Open run table", () => navigate(workspace.experimentId)),
     );
@@ -1085,6 +1081,11 @@ $("logout").onclick = () => {
   $<HTMLButtonElement>("logout").disabled = true;
   $<HTMLDialogElement>("login-dialog").showModal();
 };
+window.addEventListener("nset:run-colors-changed", () => {
+  refreshRunSwatches($("page"), catalog);
+  if (suspendedDashboard) refreshRunSwatches(suspendedDashboard, catalog);
+  for (const card of cards.values()) card.view.refreshColors();
+});
 window.addEventListener("hashchange", () => {
   try {
     renderPage();

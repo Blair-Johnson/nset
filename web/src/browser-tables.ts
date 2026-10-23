@@ -1,6 +1,7 @@
 import type { Catalog, CatalogSeries } from "./workspace-types";
 import type { Experiment, Run } from "./api";
 import { element } from "./utils";
+import { runSwatch } from "./run-drawer";
 
 export interface TableState {
   query: string;
@@ -187,7 +188,7 @@ export function runTable(
   catalog: Catalog,
   experiment: Experiment,
   selectedIds: string[],
-  onSelection: (ids: string[]) => void,
+  onSelection: (ids: string[]) => boolean | void,
   onCharts: () => void,
   onDetails: (run: Run) => void,
   state = tableState(),
@@ -267,7 +268,8 @@ export function runTable(
   const pager = element("div", "table-pager");
   host.append(tools, wrap, pager);
   function changed() {
-    onSelection([...selection]);
+    if (onSelection([...selection]) === false) selection = new Set(selectedIds);
+    else selectedIds = [...selection];
     render();
   }
   function visible() {
@@ -298,7 +300,7 @@ export function runTable(
       });
   }
   function render() {
-    // Selection rebuilds the header and rows. Retain identity, not a detached
+    // Filtering/sorting rebuilds the header and rows. Retain identity, not a detached
     // element or row index (names may repeat and sorting may change).
     const active = document.activeElement;
     const focused =
@@ -370,7 +372,7 @@ export function runTable(
       (state.page + 1) * pageSize,
     )) {
       const tr = element("tr");
-      tr.classList.toggle("is-selected", selection.has(run.id));
+      tr.dataset.runId = run.id;
       const td = cell("");
       const check = element("input");
       check.type = "checkbox";
@@ -385,12 +387,11 @@ export function runTable(
       };
       td.append(check);
       const name = cell("");
-      name.append(button(run.name, () => onDetails(run), "text-link run-link"));
-      const params = Object.entries(run.params)
-        .slice(0, 3)
-        .map(([k, v]) => `${k}: ${textValue(v)}`)
-        .join(" · ");
-      if (params) name.append(element("div", "row-subtitle", params));
+      const identity = element("div", "run-identity");
+      const link = button(run.name, () => onDetails(run), "text-link run-link");
+      link.title = run.name;
+      identity.append(link, runSwatch(catalog, run.id));
+      name.append(identity);
       const stateCell = cell("");
       stateCell.append(
         element(
@@ -436,52 +437,4 @@ export function runTable(
   };
   render();
   return host;
-}
-
-export function showRunDetails(run: Run, onCharts: () => void): void {
-  const previous = document.activeElement as HTMLElement | null;
-  const dialog = element("dialog", "run-details-dialog");
-  dialog.setAttribute("aria-label", `Run ${run.name}`);
-  const header = element("div", "dialog-heading");
-  header.append(
-    element("h2", "", run.name),
-    button("Close", () => dialog.close()),
-  );
-  dialog.append(
-    header,
-    element("p", "muted", `${run.status} · ${timeLabel(run.created_at)}`),
-  );
-  for (const [title, values] of [
-    ["Parameters", run.params],
-    ["Tags", run.tags],
-  ] as const) {
-    dialog.append(element("h3", "", title));
-    const table = element("table", "data-table");
-    for (const [key, value] of Object.entries(values)) {
-      const row = element("tr");
-      row.append(cell(key), cell(textValue(value) ?? "—"));
-      table.append(row);
-    }
-    if (!Object.keys(values).length)
-      dialog.append(element("p", "muted", "None"));
-    else dialog.append(table);
-  }
-  const footer = element("div", "dialog-actions");
-  footer.append(
-    button(
-      "View charts for this run",
-      () => {
-        dialog.close();
-        onCharts();
-      },
-      "primary",
-    ),
-  );
-  dialog.append(footer);
-  dialog.onclose = () => {
-    dialog.remove();
-    previous?.focus();
-  };
-  document.body.append(dialog);
-  dialog.showModal();
 }

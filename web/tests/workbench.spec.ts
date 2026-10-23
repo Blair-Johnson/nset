@@ -150,7 +150,7 @@ test("namespace collapse, view names and run choices survive reload", async ({
     page.getByLabel("Saved view", { exact: true }).locator("option:checked"),
   ).toHaveText("Review");
   await expect(section.locator(".chart-grid")).toBeHidden();
-  await expect(page.locator(".run-picker summary")).toContainText("2");
+  await expect(page.locator(".drawer-selection-count")).toContainText("2");
   await page.screenshot({
     path: info.outputPath("saved-dashboard.png"),
     fullPage: true,
@@ -174,7 +174,6 @@ test("editing is contextual and cancel does not mutate a card", async ({
   await expect(loss.getByLabel("Chart actions", { exact: true })).toBeFocused();
   await loss.getByLabel("Chart actions", { exact: true }).click();
   await loss.getByRole("button", { name: "Edit chart", exact: true }).click();
-  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
   await editor.locator(".ce-preview-plot canvas").waitFor();
   await page.screenshot({
@@ -239,13 +238,15 @@ test("narrow dashboard stays within viewport and logout removes credentials", as
   expect(errors).toEqual([]);
 });
 
-test("chart state survives run-table navigation and run picker keeps keyboard focus", async ({
+test("chart state survives run-table navigation and run drawer keeps keyboard focus", async ({
   page,
 }) => {
   await fixture(page);
   await charts(page);
   const loss = card(page, "loss");
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await loss.getByLabel("Cursor A coordinate", { exact: true }).fill("2.5");
   await loss.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
   await loss.getByRole("button", { name: "Zoom in", exact: true }).click();
@@ -261,7 +262,6 @@ test("chart state survives run-table navigation and run picker keeps keyboard fo
   await expect(
     loss.getByRole("button", { name: "Previous view", exact: true }),
   ).toBeEnabled();
-  await page.locator(".run-picker summary").click();
   const choice = page.getByRole("checkbox", {
     name: `Show ${runs[0].name}`,
     exact: true,
@@ -353,7 +353,6 @@ test("explicit custom series stay independent of selected-run changes", async ({
   await loss.locator("canvas").waitFor();
   await loss.getByRole("button", { name: "Zoom in", exact: true }).click();
   const canvas = await loss.locator("canvas").elementHandle();
-  await page.locator(".run-picker summary").click();
   await page
     .getByRole("checkbox", { name: `Show ${runs[1].name}`, exact: true })
     .uncheck();

@@ -1,0 +1,139 @@
+.workspace-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.workspace-layout > .dashboard {
+  flex: 1;
+  min-width: 0;
+}
+.run-drawer {
+  position: sticky;
+  top: 46px;
+  flex: 0 0 260px;
+  width: 260px;
+  max-height: calc(100dvh - 58px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.run-drawer-heading,
+.run-drawer-actions,
+.run-drawer-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.run-drawer-heading {
+  min-height: 26px;
+}
+.run-drawer-heading > button {
+  margin-left: auto;
+  font-size: 18px;
+  line-height: 18px;
+  padding: 2px 6px;
+}
+.drawer-selection-count {
+  color: var(--muted);
+}
+.run-drawer input[type="search"],
+.run-drawer select {
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.run-drawer-actions button,
+.run-drawer-footer button {
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.run-drawer-list {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+}
+.run-drawer-row {
+  display: grid;
+  grid-template-columns: 18px 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.run-drawer-row:hover {
+  background: var(--surface-hover);
+}
+.run-drawer-row:focus-within {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.run-drawer-row input {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+}
+.drawer-run-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.drawer-run-status {
+  font-size: 9px;
+  background: transparent;
+}
+.run-drawer-footer {
+  justify-content: space-between;
+  padding-top: 4px;
+}
+.run-swatch {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+.run-swatch > button {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border-radius: 3px;
+}
+.run-drawer-backdrop {
+  display: none;
+}
+@media (max-width: 760px) {
+  .run-drawer {
+    position: fixed;
+    z-index: 101;
+    top: 40px;
+    left: 0;
+    bottom: 0;
+    width: min(300px, calc(100vw - 36px));
+    max-height: none;
+    border-radius: 0;
+    box-shadow: 8px 0 24px var(--shadow);
+  }
+  .run-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 40px 0 0;
+    z-index: 100;
+    background: var(--backdrop);
+  }
+}
