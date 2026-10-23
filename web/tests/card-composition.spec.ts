@@ -701,3 +701,49 @@ test("first cursor results and live pin dragging never resize the canvas or canc
   await page.mouse.up();
   expect((await geometry(page)).viewport).toEqual(before.viewport);
 });
+
+test("maximized folds retain both canvas dimensions with an allocated scrollbar gutter", async ({
+  page,
+}, info) => {
+  await fixture(page);
+  await page.addStyleTag({
+    content: ".card-content::-webkit-scrollbar { width: 16px; height: 16px; }",
+  });
+  const card = page.locator(target);
+  await card
+    .getByRole("button", { name: "Maximize chart", exact: true })
+    .click();
+  const before = await geometry(page);
+  const gutter = await card.locator(".card-content").evaluate((node) => ({
+    policy: getComputedStyle(node).scrollbarGutter,
+    width: node.getBoundingClientRect().width - node.clientWidth,
+  }));
+  expect(gutter.policy).toBe("stable");
+  expect(gutter.width).toBeGreaterThanOrEqual(16);
+  for (let i = 0; i < 3; i++) {
+    await card.getByText("Show legend", { exact: true }).click();
+    await card
+      .getByRole("button", { name: "Add vertical cursor", exact: true })
+      .click();
+    const open = await geometry(page);
+    expect(open.plot.width).toBe(before.plot.width);
+    expect(open.plot.height).toBe(before.plot.height);
+    expect(open.viewport).toEqual(before.viewport);
+    await card.getByText("Edit positions", { exact: true }).click();
+    await card
+      .getByRole("button", { name: "Place vertical cursor A", exact: true })
+      .click();
+    await expect(card.locator(".card-position-editor")).toHaveAttribute(
+      "open",
+      "",
+    );
+    await card
+      .getByRole("button", { name: "Hide cursor details", exact: true })
+      .click();
+    await card.getByText("Show legend", { exact: true }).click();
+    const closed = await geometry(page);
+    expect(closed.plot.width).toBe(before.plot.width);
+    expect(closed.plot.height).toBe(before.plot.height);
+  }
+  await capture(page, info, "fullscreen-stable-scrollbar");
+});

@@ -32,8 +32,10 @@ try {
   await card
     .getByRole("button", { name: "Add vertical cursor", exact: true })
     .click();
+  await card.locator(".card-position-editor > summary").click();
   await card.getByLabel("Cursor A coordinate", { exact: true }).fill("50.5");
   await card.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
+  await card.locator(".card-series-details > summary").click();
   const actual = Number(
     await card
       .locator(".card-value-table tr")

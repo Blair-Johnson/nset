@@ -659,6 +659,7 @@
 }
 .card-maximized .card-content {
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 .card-maximized .card-plot {
   flex: none;

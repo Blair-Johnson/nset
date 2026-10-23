@@ -28,12 +28,22 @@ const card = (title) =>
       hasText: new RegExp("^" + title + "$"),
     }),
   });
+const positions = async (root) => {
+  const editor = root.locator(".card-position-editor");
+  if (!(await editor.evaluate((node) => node.open)))
+    await editor.locator("summary").click();
+};
 const coordinate = async (root, label, value) => {
+  await positions(root);
   await root.getByLabel(label, { exact: true }).fill(String(value));
   await root.getByLabel(label, { exact: true }).press("Tab");
+  await root.locator(".card-position-editor > summary").click();
 };
-const value = async (root, run, column) =>
-  Number(
+const value = async (root, run, column) => {
+  const details = root.locator(".card-series-details");
+  if (!(await details.evaluate((node) => node.open)))
+    await details.locator(":scope > summary").click();
+  return Number(
     await root
       .locator(".card-value-table tr")
       .filter({ hasText: run })
@@ -41,6 +51,7 @@ const value = async (root, run, column) =>
       .nth(column)
       .innerText(),
   );
+};
 const edit = async (root) => {
   await root.getByLabel("Chart actions", { exact: true }).click();
   await root.getByRole("button", { name: "Edit chart", exact: true }).click();
@@ -100,9 +111,12 @@ try {
     .filter({ has: page.locator(".section-toggle", { hasText: "train" }) });
   await expect(train.locator(".dashboard-cell")).toHaveCount(2);
   await screenshot("ux-03-mixed-dashboard");
-  await loss
-    .getByRole("button", { name: "Add vertical cursor", exact: true })
-    .click();
+  await loss.locator(".u-over").hover();
+  await page.keyboard.press("c");
+  await expect(loss.locator(".uplot")).toHaveAttribute(
+    "data-cursor-placement",
+    "vertical",
+  );
   await coordinate(loss, "Cursor A coordinate", 5);
   await coordinate(loss, "Cursor B coordinate", 10);
   assert.equal(await value(loss, "Curve A", 0), 2);
@@ -139,9 +153,12 @@ try {
     .getByRole("button", { name: "Add vertical cursor", exact: true })
     .click();
   assert.equal(await loss.locator(".card-value-table").textContent(), answers);
-  await loss
-    .getByRole("button", { name: "Add horizontal cursor", exact: true })
-    .click();
+  await loss.locator(".u-over").hover();
+  await page.keyboard.press("c");
+  await expect(loss.locator(".uplot")).toHaveAttribute(
+    "data-cursor-placement",
+    "horizontal",
+  );
   await coordinate(loss, "Cursor A level", 2);
   const aCross = loss.locator(".card-crossings").filter({ hasText: "Curve A" }),
     bCross = loss.locator(".card-crossings").filter({ hasText: "Curve B" });
@@ -150,7 +167,9 @@ try {
   await expect(aCross).toContainText("5, 15");
   await expect(bCross).toContainText("0 – 5");
   await coordinate(loss, "Cursor B level", 3);
-  await expect(loss.locator(".card-position-readout output").last()).toHaveText("1");
+  await expect(loss.locator(".card-position-readout output").last()).toHaveText(
+    "1",
+  );
   await screenshot("ux-04-cursors");
   await score
     .locator("canvas")
@@ -242,6 +261,7 @@ try {
   await loss
     .getByRole("button", { name: "Add vertical cursor", exact: true })
     .click();
+  await positions(loss);
   await loss
     .getByRole("button", { name: "Clear cursors", exact: true })
     .click();
@@ -318,7 +338,9 @@ try {
   assert.equal(await value(custom, "Curve A", 0), 2);
   assert.equal(await value(custom, "Remote baseline", 0), 3);
   await page.getByLabel("View actions", { exact: true }).click();
-  await page.getByRole("button", { name: "Save view as…", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save view as…", exact: true })
+    .click();
   const saveDialog = page.getByRole("dialog", {
     name: "Save view as",
     exact: true,

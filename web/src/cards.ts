@@ -511,6 +511,9 @@ export class ChartCard {
         ),
       );
     if (!rebuild) return;
+    const positionsOpen =
+      this.inspection.querySelector<HTMLDetailsElement>(".card-position-editor")
+        ?.open ?? false;
     this.inspection.replaceChildren();
     this.inputs.clear();
     this.inspection.hidden = !this.inspectOpen && this.mode !== "threshold";
@@ -578,6 +581,7 @@ export class ChartCard {
       }),
     );
     const editor = element("details", "card-position-editor");
+    editor.open = positionsOpen;
     editor.append(element("summary", "", "Edit positions"), fields);
     this.inspection.append(this.results, editor);
     this.renderResults();

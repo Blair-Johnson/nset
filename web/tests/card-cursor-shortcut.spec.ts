@@ -105,6 +105,7 @@ test("hovered real card cycles orientations and exits without losing positions o
     "data-cursor-placement",
     "vertical",
   );
+  await card(page).getByText("Edit positions", { exact: true }).click();
   await expect(
     card(page).getByLabel("Cursor A coordinate", { exact: true }),
   ).toBeVisible();
@@ -173,6 +174,7 @@ test("C-armed real card still zooms, ignores coordinate typing and completes hor
   expect(zoomed.active).toBe("a");
   expect(zoomed.pins).toEqual(before.pins);
   expect(zoomed.viewport).not.toEqual(before.viewport);
+  await card(page).getByText("Edit positions", { exact: true }).click();
   await card(page).getByLabel("Cursor A coordinate", { exact: true }).focus();
   await surface.hover({ position: { x: 40, y: 40 } });
   await page.keyboard.press("c");
