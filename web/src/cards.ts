@@ -6,6 +6,7 @@ import {
   type PlotRun,
 } from "./plot";
 import { ImagePanel } from "./images";
+import type { EditorCamera } from "./chart-editor";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
@@ -102,6 +103,8 @@ export class ChartCard {
   private data: Analyzed[] = [];
   /** Last fetched raw histories, kept so transform-only edits need no refetch. */
   private raw: PlotRun[] = [];
+  /** Camera handed back by the editor; applied on the next data render. */
+  private pendingCamera?: EditorCamera;
   private mode: InteractionMode = "zoom";
   private cursorAxis: "x" | "y" = "x";
   private inspectOpen = false;
@@ -882,6 +885,8 @@ export class ChartCard {
         : "";
     if (this.images) {
       this.status.textContent = "";
+      this.images.setCamera(this.pendingCamera?.image);
+      this.pendingCamera = undefined;
       this.images.setSources(sources);
       this.abort = undefined;
       return;
@@ -929,7 +934,17 @@ export class ChartCard {
       this.status.textContent = this.data.some((series) => series.points.length)
         ? ""
         : "No measurements yet";
-      this.plot?.render(this.data, config, this.pins);
+      const handed = this.pendingCamera?.scalar;
+      this.pendingCamera = undefined;
+      this.plot?.render(this.data, config, this.pins, {
+        initialView:
+          handed &&
+          handed.axis === config.axis &&
+          handed.xScale === config.xScale &&
+          handed.yScale === config.yScale
+            ? handed.view
+            : null,
+      });
       this.renderResults();
     } catch (error) {
       if (this.destroyed || generation !== this.generation || isAbort(error))
@@ -955,6 +970,47 @@ export class ChartCard {
       this.build();
     }
     this.refresh();
+  }
+  /** Current camera, for handing to the editor preview. */
+  camera(): EditorCamera | undefined {
+    if (this.images) {
+      const image = this.images.camera();
+      return image ? { image } : undefined;
+    }
+    const view = this.plot?.zoomed() ? this.plot.viewport() : null;
+    return view
+      ? {
+          scalar: {
+            view,
+            axis: this.spec.config.axis,
+            xScale: this.spec.config.xScale,
+            yScale: this.spec.config.yScale,
+          },
+        }
+      : undefined;
+  }
+  /** Adopt a camera (from the editor) on the next render of this card. */
+  setCamera(camera: EditorCamera | undefined): void {
+    if (!camera) return;
+    if (camera.image && this.images && this.loaded && !this.abort) {
+      this.images.setCamera(camera.image);
+      return;
+    }
+    if (
+      camera.scalar &&
+      this.plot &&
+      this.loaded &&
+      !this.abort &&
+      this.raw.length
+    ) {
+      const s = camera.scalar;
+      const c = this.spec.config;
+      if (s.axis === c.axis && s.xScale === c.xScale && s.yScale === c.yScale) {
+        this.plot.showView(s.view);
+        return;
+      }
+    }
+    this.pendingCamera = camera;
   }
   setSpec(spec: ChartSpec): void {
     if (this.destroyed) return;

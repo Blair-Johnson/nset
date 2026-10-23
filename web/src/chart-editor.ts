@@ -27,7 +27,7 @@ import type {
 } from "./workspace-types";
 import { resolveSources, seriesId, validateChart } from "./workspace";
 import type { PlotPanel, PlotRun } from "./plot";
-import type { ImagePanel } from "./images";
+import type { ImageCamera, ImagePanel } from "./images";
 
 type RecordValue = Record<string, unknown>;
 const clone = <T>(value: T): T => structuredClone(value);
@@ -239,17 +239,30 @@ export function choicePage(
   };
 }
 
+export interface EditorCamera {
+  /** Scalar camera in data coordinates, with the axis config it was taken in. */
+  scalar?: {
+    view: { x: [number, number]; y: [number, number] };
+    axis: string;
+    xScale: string;
+    yScale: string;
+  };
+  image?: ImageCamera;
+}
 export interface ChartEditorOptions {
   card: ChartSpec;
   catalog: Catalog;
   selectedRunIds: string[];
-  onSave: (card: ChartSpec) => void | Promise<void>;
+  /** The second argument is the preview camera to hand back to the card. */
+  onSave: (card: ChartSpec, camera?: EditorCamera) => void | Promise<void>;
   /** Called once after removal and fallback focus restoration; hosts may focus rebuilt controls. */
   onClose?: () => void;
   api?: Api;
   store?: MetricLoader;
   /** Optional host copy for new cards; existing callers need only the contract fields. */
   isNew?: boolean;
+  /** The card's current camera; the preview opens on it instead of "home". */
+  camera?: EditorCamera;
 }
 let editorSequence = 0;
 export function openChartEditor(options: ChartEditorOptions): {
@@ -272,10 +285,15 @@ export function openChartEditor(options: ChartEditorOptions): {
   let pendingLoad: Promise<PlotRun[]> | undefined;
   let loadAbort: AbortController | undefined;
   let plot: PlotPanel | undefined;
+  let previewInteractive = false;
   let renderedScalarKind: ChartSpec["kind"] | undefined;
   let renderedUnavailable = 0;
   let images: ImagePanel | undefined;
   let imageToken = "";
+  // Camera handoff: the first preview opens on the card's view; later renders
+  // keep whatever view the preview is on (unless the axes themselves change).
+  let pendingScalarView = options.camera?.scalar;
+  let pendingImageCamera = options.camera?.image;
   const errors = new Map<string, string>();
   const fields = new Map<
     string,
@@ -1533,6 +1551,25 @@ export function openChartEditor(options: ChartEditorOptions): {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(() => void updatePreview(previewVersion), 100);
   }
+  function previewCamera(card: ChartSpec): EditorCamera | undefined {
+    if (card.kind === "image") {
+      const image = images?.camera?.() ?? pendingImageCamera;
+      return image ? { image } : undefined;
+    }
+    // Only a zoomed preview is handed back; an un-zoomed one lets the card fit
+    // its own (possibly differently sized) data.
+    const view = plot?.zoomed() ? plot.viewport() : null;
+    if (view)
+      return {
+        scalar: {
+          view,
+          axis: card.config.axis,
+          xScale: card.config.xScale,
+          yScale: card.config.yScale,
+        },
+      };
+    return pendingScalarView ? { scalar: pendingScalarView } : undefined;
+  }
   function hasPreviousScalarPreview() {
     return (
       !!plot && draft.kind !== "image" && renderedScalarKind === draft.kind
@@ -1541,6 +1578,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   function clearPreview() {
     plot?.destroy();
     plot = undefined;
+    previewInteractive = false;
     renderedScalarKind = undefined;
     images?.destroy();
     images = undefined;
@@ -1612,6 +1650,9 @@ export function openChartEditor(options: ChartEditorOptions): {
         previewStatus.textContent = "Loading image preview…";
         const { ImagePanel } = await import("./images");
         if (closed || version !== previewVersion) return;
+        // Changing image sources keeps the region being inspected.
+        const carriedCamera = images?.camera() ?? pendingImageCamera;
+        pendingImageCamera = undefined;
         clearPreview();
         // Legacy ImagePanel metadata is filtered, so preview never includes unchosen keys.
         const api = Object.create(options.api) as Api;
@@ -1656,6 +1697,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         previewHost.querySelectorAll("[id]").forEach((node) => {
           node.id = `${prefix}-preview-${node.id}`;
         });
+        images.setCamera?.(carriedCamera);
         images.setActive(true);
         imageToken = token;
         previewStatus.textContent = `${sources.length} image source(s) · preview only`;
@@ -1744,7 +1786,32 @@ export function openChartEditor(options: ChartEditorOptions): {
         },
       );
       renderedUnavailable = unavailable;
-      plot.render(analyzed, config, { a: null, b: null, threshold: null });
+      // The preview navigates like a dashboard card (drag-zoom, right/Space
+      // pan, Ctrl+wheel), so it can show and keep the card's camera.
+      if (!previewInteractive) {
+        plot.configureInteraction({
+          mode: "zoom",
+          axis: "both",
+          inferZoomAxes: true,
+          directGestures: true,
+          activePin: "a",
+        });
+        previewInteractive = true;
+      }
+      const initial =
+        pendingScalarView &&
+        pendingScalarView.axis === config.axis &&
+        pendingScalarView.xScale === config.xScale &&
+        pendingScalarView.yScale === config.yScale
+          ? pendingScalarView.view
+          : null;
+      plot.render(
+        analyzed,
+        config,
+        { a: null, b: null, threshold: null },
+        { preserveView: true, initialView: initial },
+      );
+      pendingScalarView = undefined;
       renderedScalarKind = valid.kind;
       previewTitle.textContent = valid.title || "Untitled chart";
       const count = data.reduce((sum, series) => sum + series.raw.length, 0);
@@ -1809,7 +1876,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     save.disabled = true;
     save.textContent = "Saving…";
     try {
-      await options.onSave(result);
+      await options.onSave(result, previewCamera(result));
       close();
     } catch (error) {
       if (!closed)

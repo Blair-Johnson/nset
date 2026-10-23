@@ -357,6 +357,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
   activeEditor = openChartEditor({
     card: structuredClone(card),
     isNew: add,
+    camera: add ? undefined : cards.get(card.id)?.view.camera(),
     onClose: () => {
       const trigger = add
         ? document.querySelector<HTMLElement>(
@@ -371,7 +372,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
     selectedRunIds: workspace.selectedRunIds,
     api,
     store,
-    onSave: (next) => {
+    onSave: (next, camera) => {
       const current = library.views.find((v) => v.id === workspace.id);
       if (!current) throw new Error("This view is no longer available.");
       change(
@@ -397,6 +398,8 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
         },
         true,
       );
+      // The card (rebuilt or updated in place) adopts the preview's camera.
+      if (!add) cards.get(next.id)?.view.setCamera(camera);
     },
   });
 }

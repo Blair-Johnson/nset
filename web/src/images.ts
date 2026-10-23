@@ -9,6 +9,20 @@ interface Cached {
   url: string;
   bytes: number;
 }
+/** Visible region in viewport coordinates (image width = 1), plus orientation. */
+export interface ImageCamera {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  flip: boolean;
+}
+const editableTarget = (target: EventTarget | null) =>
+  target instanceof Element &&
+  !!target.closest(
+    'input, select, textarea, button, [contenteditable]:not([contenteditable="false"])',
+  );
 export class ImagePanel {
   private viewer: OpenSeadragon.Viewer;
   private sources?: ResolvedSeries[];
@@ -42,6 +56,10 @@ export class ImagePanel {
   private play = element("button", "", "Play");
   private speed = element("select");
   private cameraInfo = element("div", "muted camera-info");
+  /** Camera to apply instead of "home" when the first frame lands. */
+  private pendingCamera?: ImageCamera;
+  private space = false;
+  private crop = element("div", "image-crop-selection");
   constructor(
     private host: HTMLElement,
     private api: Api,
@@ -169,7 +187,8 @@ export class ImagePanel {
     );
     const canvas = element("div", "image-canvas");
     canvas.dataset.role = "image-viewer";
-    canvas.title = "Drag to pan · Alt + scroll to zoom";
+    canvas.title =
+      "Drag to zoom to a region · right-drag or Space+drag to pan · Ctrl+scroll to zoom · double-click to fit";
     canvas.setAttribute("aria-label", "Native resolution image viewport");
     canvas.tabIndex = 0;
     this.slider.type = "range";
@@ -196,9 +215,19 @@ export class ImagePanel {
       animationTime: 0.15,
       blendTime: 0,
       crossOriginPolicy: false,
-      gestureSettingsMouse: { clickToZoom: false, scrollToZoom: false },
+      gestureSettingsMouse: {
+        clickToZoom: false,
+        scrollToZoom: false,
+        dblClickToZoom: false,
+        // Mouse drags are handled below (crop-zoom / right or Space pan).
+        dragToPan: false,
+        flickEnabled: false,
+      },
     });
     canvas.append(this.status);
+    this.crop.hidden = true;
+    canvas.append(this.crop);
+    this.installPointerNavigation(canvas);
     this.viewer.addHandler("canvas-scroll", (event) => {
       // OpenSeadragon must not consume ordinary dashboard scrolling.
       (event as unknown as { preventDefault: boolean }).preventDefault = false;
@@ -206,7 +235,7 @@ export class ImagePanel {
     canvas.addEventListener(
       "wheel",
       (event) => {
-        if (!event.altKey || !this.active) return;
+        if (!(event.altKey || event.ctrlKey) || !this.active) return;
         if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
         const viewport = this.viewer.viewport;
         const rect = this.viewer.container.getBoundingClientRect();
@@ -322,7 +351,7 @@ export class ImagePanel {
             ),
             true,
           );
-          this.viewer.viewport.goHome(true);
+          this.home();
           this.needsHome = false;
         }
       });
@@ -365,6 +394,259 @@ export class ImagePanel {
   /** Fit the current image without clearing its source, frame, or cache. */
   fit(): void {
     this.viewer.viewport.goHome();
+  }
+  /** Current visible region, or null before a frame is shown. */
+  camera(): ImageCamera | null {
+    if (!this.displayed || !this.viewer.world.getItemCount()) return null;
+    const viewport = this.viewer.viewport;
+    const b = viewport.getBounds(true);
+    if (![b.x, b.y, b.width, b.height].every(Number.isFinite)) return null;
+    return {
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      rotation: viewport.getRotation(true),
+      flip: viewport.getFlip(),
+    };
+  }
+  /** Show a region handed over from another panel (fit to this viewport's aspect). */
+  setCamera(camera: ImageCamera | null | undefined): void {
+    if (!camera) return;
+    if (this.displayed && this.active && !this.needsHome)
+      this.applyCamera(camera);
+    else this.pendingCamera = camera;
+  }
+  private applyCamera(camera: ImageCamera) {
+    const viewport = this.viewer.viewport;
+    viewport.setRotation(camera.rotation, true);
+    viewport.setFlip(camera.flip);
+    // getBounds() reports the rotated region; fitBounds() undoes that rotation,
+    // then fits the limiting dimension without distorting the image.
+    viewport.fitBounds(
+      new OpenSeadragon.Rect(
+        camera.x,
+        camera.y,
+        camera.width,
+        camera.height,
+        -camera.rotation,
+      ),
+      true,
+    );
+  }
+  private home() {
+    const camera = this.pendingCamera;
+    this.pendingCamera = undefined;
+    if (camera) this.applyCamera(camera);
+    else this.viewer.viewport.goHome(true);
+  }
+  /**
+   * Mouse/pen use the same scheme as scalar plots: drag selects a region to
+   * zoom into, right-drag or Space+drag pans, double-click fits. Touch keeps
+   * OpenSeadragon's native pan/pinch.
+   */
+  private installPointerNavigation(canvas: HTMLElement) {
+    const signal = this.lifetime.signal;
+    const MIN_DRAG = 3;
+    let drag:
+      | {
+          id: number;
+          x: number;
+          y: number;
+          mode: "zoom" | "pan";
+          center: OpenSeadragon.Point;
+          moved: boolean;
+        }
+      | undefined;
+    const local = (e: PointerEvent | MouseEvent) => {
+      const r = canvas.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(r.width, e.clientX - r.left)),
+        y: Math.max(0, Math.min(r.height, e.clientY - r.top)),
+        w: r.width,
+        h: r.height,
+      };
+    };
+    const hovered = () => canvas.matches(":hover");
+    const cursor = () => {
+      canvas.style.cursor =
+        drag?.mode === "pan" ? "grabbing" : this.space ? "grab" : "crosshair";
+    };
+    const finish = (e: PointerEvent | null, commit: boolean) => {
+      const g = drag;
+      if (!g || (e && e.pointerId !== g.id)) return;
+      drag = undefined;
+      this.crop.hidden = true;
+      canvas.classList.remove("image-selecting");
+      try {
+        if (canvas.hasPointerCapture(g.id)) canvas.releasePointerCapture(g.id);
+      } catch {
+        /* capture already gone */
+      }
+      cursor();
+      const viewport = this.viewer.viewport;
+      if (g.mode === "pan") {
+        if (!commit) viewport.panTo(g.center, true);
+        viewport.applyConstraints();
+        return;
+      }
+      if (!commit || !e || !g.moved) return;
+      const p = local(e);
+      const sw = Math.abs(p.x - g.x),
+        sh = Math.abs(p.y - g.y);
+      if (sw < MIN_DRAG || sh < MIN_DRAG || !p.w || !p.h) return;
+      // Fit the selected screen rectangle to this viewport, limited by
+      // whichever dimension runs out first; the image is never stretched.
+      const size = viewport.getContainerSize();
+      const scaleX = size.x / p.w,
+        scaleY = size.y / p.h;
+      const centerPixel = new OpenSeadragon.Point(
+        ((p.x + g.x) / 2) * scaleX,
+        ((p.y + g.y) / 2) * scaleY,
+      );
+      if (viewport.getFlip()) centerPixel.x = size.x - centerPixel.x;
+      const center = viewport.pointFromPixel(centerPixel, true);
+      const factor = Math.min(p.w / sw, p.h / sh);
+      viewport.panTo(center, false);
+      viewport.zoomTo(viewport.getZoom(true) * factor, undefined, false);
+      viewport.applyConstraints();
+    };
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault(), {
+      signal,
+    });
+    canvas.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (
+          e.pointerType === "touch" ||
+          !this.active ||
+          drag ||
+          (e.button !== 0 && e.button !== 2) ||
+          editableTarget(e.target) ||
+          !this.viewer.world.getItemCount()
+        )
+          return;
+        const p = local(e);
+        drag = {
+          id: e.pointerId,
+          x: p.x,
+          y: p.y,
+          mode: e.button === 2 || this.space ? "pan" : "zoom",
+          center: this.viewer.viewport.getCenter(true),
+          moved: false,
+        };
+        // Keep OpenSeadragon's tracker out of mouse gestures we own.
+        e.preventDefault();
+        e.stopPropagation();
+        canvas.focus({ preventScroll: true });
+        try {
+          canvas.setPointerCapture(e.pointerId);
+        } catch {
+          /* synthetic events may not support capture */
+        }
+        cursor();
+      },
+      { signal, capture: true },
+    );
+    canvas.addEventListener(
+      "pointermove",
+      (e) => {
+        const g = drag;
+        if (!g || e.pointerId !== g.id) return;
+        e.stopPropagation();
+        const p = local(e);
+        g.moved ||= Math.hypot(p.x - g.x, p.y - g.y) >= MIN_DRAG;
+        if (!g.moved) return;
+        if (g.mode === "pan") {
+          const viewport = this.viewer.viewport;
+          const size = viewport.getContainerSize();
+          let dx = ((p.x - g.x) * size.x) / (p.w || 1);
+          const dy = ((p.y - g.y) * size.y) / (p.h || 1);
+          if (viewport.getFlip()) dx = -dx;
+          const delta = viewport.deltaPointsFromPixels(
+            new OpenSeadragon.Point(-dx, -dy),
+            true,
+          );
+          viewport.panTo(g.center.plus(delta), true);
+        } else {
+          canvas.classList.add("image-selecting");
+          this.crop.hidden = false;
+          Object.assign(this.crop.style, {
+            left: `${Math.min(p.x, g.x)}px`,
+            top: `${Math.min(p.y, g.y)}px`,
+            width: `${Math.abs(p.x - g.x)}px`,
+            height: `${Math.abs(p.y - g.y)}px`,
+          });
+        }
+      },
+      { signal, capture: true },
+    );
+    canvas.addEventListener(
+      "pointerup",
+      (e) => {
+        if (!drag || e.pointerId !== drag.id) return;
+        e.stopPropagation();
+        finish(e, true);
+      },
+      { signal, capture: true },
+    );
+    for (const type of ["pointercancel", "lostpointercapture"] as const)
+      canvas.addEventListener(type, (e) => finish(e, false), { signal });
+    canvas.addEventListener(
+      "dblclick",
+      (e) => {
+        if (editableTarget(e.target)) return;
+        e.preventDefault();
+        this.viewer.viewport.goHome();
+      },
+      { signal },
+    );
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key === "Escape" && drag) {
+          finish(null, false);
+          return;
+        }
+        if (
+          e.code !== "Space" ||
+          !this.active ||
+          e.ctrlKey ||
+          e.metaKey ||
+          e.altKey ||
+          editableTarget(e.target)
+        )
+          return;
+        if (!hovered() && !drag) return;
+        e.preventDefault();
+        if (!this.space) {
+          this.space = true;
+          cursor();
+        }
+      },
+      { signal },
+    );
+    const releaseSpace = () => {
+      if (!this.space) return;
+      this.space = false;
+      cursor();
+    };
+    window.addEventListener(
+      "keyup",
+      (e) => {
+        if (e.code === "Space") releaseSpace();
+      },
+      { signal },
+    );
+    window.addEventListener(
+      "blur",
+      () => {
+        releaseSpace();
+        finish(null, false);
+      },
+      { signal },
+    );
+    cursor();
   }
 
   private clearFrameInfo() {
@@ -535,7 +817,7 @@ export class ImagePanel {
             ),
             true,
           );
-          this.viewer.viewport.goHome(true);
+          this.home();
           this.needsHome = false;
         } else this.needsHome = true;
       } else this.viewer.viewport.fitBounds(bounds, true);

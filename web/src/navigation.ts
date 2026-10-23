@@ -168,7 +168,7 @@ export class PlotNavigation {
     u.root.setAttribute("role", "group");
     u.root.setAttribute(
       "aria-label",
-      "Interactive plot. Plus and minus zoom, arrows pan, 0 fits, Backspace goes back.",
+      "Interactive plot. Drag to zoom, right-drag or Space-drag to pan, Ctrl+scroll zooms. Plus and minus zoom, arrows pan, 0 fits, Backspace goes back.",
     );
     this.previousTouchAction = u.over.style.touchAction;
     u.over.style.touchAction = "none";
@@ -207,6 +207,7 @@ export class PlotNavigation {
       });
     window.addEventListener("keyup", this.keyup, { signal });
     this.cursor();
+    this.publishView();
   }
   configure(options: PlotInteraction) {
     this.cancel();
@@ -235,6 +236,11 @@ export class PlotNavigation {
     for (const view of snapshot.history) this.history.push(view);
     this.apply(copyView(snapshot.view), false);
   }
+  /** Display a view exactly (e.g. a camera handed over from another panel). */
+  show(view: Viewport) {
+    this.cancel();
+    this.apply(copyView(view), false);
+  }
   private apply(next: Viewport, remember = true) {
     const before = this.viewport();
     if (!before || sameView(before, next)) return;
@@ -243,7 +249,13 @@ export class PlotNavigation {
       this.u.setScale("x", { min: next.x[0], max: next.x[1] });
       this.u.setScale("y", { min: next.y[0], max: next.y[1] });
     });
+    this.publishView();
     this.options.onViewChange?.();
+  }
+  /** Inspectable camera (tests, probes); not used for app state. */
+  private publishView() {
+    const v = this.viewport();
+    if (v) this.u.root.dataset.view = JSON.stringify(v);
   }
   zoom(
     factor: number,
@@ -529,7 +541,9 @@ export class PlotNavigation {
     // the last published value so the visible line and external readout agree.
   };
   private wheel = (e: WheelEvent) => {
-    if (!e.altKey || e.ctrlKey || e.metaKey || this.gesture) return;
+    // Ctrl+wheel (and trackpad pinch, which browsers report as ctrl+wheel) or
+    // Alt+wheel zooms the hovered plot; a plain wheel keeps scrolling the page.
+    if (!(e.altKey || e.ctrlKey) || e.metaKey || this.gesture) return;
     const { x, y, w, h } = this.xy(e);
     if (!w || !h) return;
     e.preventDefault();

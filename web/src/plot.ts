@@ -28,6 +28,7 @@ import {
   PlotNavigation,
   readViewport,
   type NavigationSnapshot,
+  type Viewport,
 } from "./navigation";
 import type { NavigationAxis, PlotInteraction } from "./workspace-types";
 export interface PlotRun {
@@ -175,6 +176,14 @@ export class PlotPanel {
   viewport(): { x: [number, number]; y: [number, number] } | null {
     return this.chart ? readViewport(this.chart) : null;
   }
+  /** True when the camera differs from the data/config fit. */
+  zoomed(): boolean {
+    return this.navigation?.snapshot()?.zoomed ?? false;
+  }
+  /** Move the camera to an exact view (no back-history entry). */
+  showView(view: Viewport): void {
+    this.navigation?.show(view);
+  }
   reset() {
     if (this.navigation) {
       this.navigation.reset();
@@ -186,16 +195,17 @@ export class PlotPanel {
     data: Analyzed[],
     config: ViewConfig,
     pins: Pins,
-    options: { preserveView?: boolean } = {},
+    options: { preserveView?: boolean; initialView?: Viewport | null } = {},
   ) {
-    // Same axes, different data transform (smoothing/interpolation): keep the user's camera.
-    const carried =
-      options.preserveView &&
-      this.chart &&
-      this.config &&
+    // Same axes, different settings: keep the user's camera (and back-history).
+    const sameAxes =
+      !!this.chart &&
+      !!this.config &&
       this.config.axis === config.axis &&
       this.config.xScale === config.xScale &&
-      this.config.yScale === config.yScale
+      this.config.yScale === config.yScale;
+    const carried =
+      options.preserveView && sameAxes
         ? (this.navigation?.snapshot() ?? null)
         : null;
     config = validateConfig(config);
@@ -472,6 +482,10 @@ export class PlotPanel {
     this.generation = generation;
     this.attachNavigation();
     if (carried) this.restoreNavigation(carried);
+    else if (options.initialView)
+      (this.navigation as PlotNavigation | undefined)?.show(
+        options.initialView,
+      );
     this.interaction?.onViewChange?.();
     publishWarnings();
   }

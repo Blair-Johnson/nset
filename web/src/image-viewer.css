@@ -37,3 +37,19 @@
 .card-image-panel:not(.card-image-compact) .frame-info {
   width: 100%;
 }
+
+/* Drag-to-zoom selection uses the same look as the scalar plots' selection. */
+.image-canvas .image-crop-selection {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  background: rgba(115, 190, 255, 0.22);
+  border: 2px solid #75bdff;
+  box-sizing: border-box;
+}
+.image-canvas .image-crop-selection[hidden] {
+  display: none;
+}
+.image-canvas.image-selecting {
+  user-select: none;
+}
