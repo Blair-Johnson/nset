@@ -91,9 +91,22 @@ export class ImagePanel {
     button("Flip ↔", () =>
       this.viewer.viewport.setFlip(!this.viewer.viewport.getFlip()),
     );
-    button("Fullscreen", () =>
-      this.viewer.setFullScreen(!this.viewer.isFullPage()),
-    );
+    const fullscreen = button("Fullscreen", () => {
+      const transition =
+        document.fullscreenElement === this.host
+          ? document.exitFullscreen()
+          : this.host.requestFullscreen();
+      void transition.catch((error) => {
+        this.status.textContent = `Fullscreen unavailable: ${message(error)}`;
+      });
+    });
+    this.host.addEventListener("fullscreenchange", () => {
+      fullscreen.textContent =
+        document.fullscreenElement === this.host
+          ? "Exit fullscreen"
+          : "Fullscreen";
+      this.viewer.forceResize();
+    });
     const canvas = element("div", "image-canvas");
     canvas.id = "image-viewer";
     canvas.setAttribute("aria-label", "Native resolution image viewport");

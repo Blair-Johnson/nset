@@ -1067,3 +1067,24 @@ dialog .error {
     transition: none !important;
   }
 }
+
+/* Fullscreen the inspector, not just the canvas: the timeline must stay usable. */
+#images-pane:fullscreen {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100vw;
+  height: 100vh;
+  padding: 16px;
+  overflow: auto;
+  background: #0d1420;
+}
+#images-pane:fullscreen .image-canvas {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 200px;
+  max-height: none;
+}
+#images-pane:fullscreen > :not(.image-canvas) {
+  flex: 0 0 auto;
+}

@@ -140,6 +140,14 @@ try {
   await page.locator("#interpolation").selectOption("pchip");
   assert.equal(Number(await cell("#readout", "Curve A", 2)), 2.5);
   await page.locator("#interpolation").selectOption("linear");
+  assert.ok(await page.locator('#alpha').evaluate(el => el.validity.valid), 'default EMA alpha is valid');
+  await page.locator('#smoothing').check();
+  assert.equal(Number(await cell('#readout', 'Curve A', 2)), 1.2);
+  await page.locator('#smoothing').uncheck();
+  await page.locator('#axis').selectOption('timestamp');
+  await page.locator('#pin-a').fill('1735689605000');
+  assert.equal(Number(await cell('#readout', 'Curve A', 2)), 2);
+  await screenshot('03b-timestamp-axis');
   await page.locator("#import-view").setInputFiles(exported);
   await page.waitForFunction(() =>
     document
@@ -201,6 +209,14 @@ try {
   await page.waitForFunction(() =>
     document.querySelector(".frame-info").textContent.includes("4 of 4"),
   );
+  await page.getByRole("button", {name: "Fullscreen", exact: true}).click();
+  await page.waitForFunction(() => document.fullscreenElement?.id === 'images-pane');
+  assert.ok(await page.getByLabel('Image frame timeline').isVisible(), 'fullscreen keeps timeline visible');
+  await page.getByRole('button', {name: '← Previous', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('.frame-info').textContent.includes('3 of 4'));
+  await screenshot('05b-image-fullscreen');
+  await page.getByRole('button', {name: 'Exit fullscreen', exact: true}).click();
+  await page.waitForFunction(() => document.fullscreenElement === null);
   await page.getByRole("button", { name: "Reset view", exact: true }).click();
   await page.getByRole("button", {name: "1:1 pixels", exact: true}).click();
   await page.waitForFunction(() => Math.abs(Number(document.querySelector('#image-viewer').dataset.pixelZoom) - 1) < 1e-6);
@@ -233,10 +249,12 @@ try {
         "all crossings and plateau",
         "zoom/resize/log invariance",
         "PCHIP",
+        "timestamp coordinates and full-series EMA",
         "saved view export/import",
         "protected options",
         "image camera preservation",
         "image keyboard and playback",
+        "fullscreen timeline and native-pixel controls",
         "responsive layout",
         "token cleanup",
       ],
