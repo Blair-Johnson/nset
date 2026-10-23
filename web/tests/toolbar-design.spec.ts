@@ -56,7 +56,7 @@ async function fixture(page: Page, width: number) {
       },
       store: {
         clear() {},
-        async load(runId: string) {
+        async load({ runId }: { runId: string }) {
           return Array.from({ length: 301 }, (_, step) => ({
             seq: step + 1,
             step,
