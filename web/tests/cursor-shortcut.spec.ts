@@ -245,13 +245,7 @@ test("typing, modifiers, IME, repeat, and prevented events are not intercepted",
   page,
 }) => {
   await fixture(page);
-  for (const selector of [
-    "input",
-    "textarea",
-    "select",
-    "[contenteditable]",
-    "button",
-  ]) {
+  for (const selector of ["input", "textarea", "select", "[contenteditable]"]) {
     await page.locator(selector).first().focus();
     await pointer(page);
     await page.keyboard.press("c");

@@ -115,10 +115,11 @@ export function readViewport(u: uPlot): Viewport | null {
     ? { x, y }
     : null;
 }
-const editable = (target: EventTarget | null) =>
+const editable = (target: EventTarget | null, includeButtons = true) =>
   target instanceof Element &&
   !!target.closest(
-    'input, select, textarea, button, [contenteditable]:not([contenteditable="false"])',
+    'input, select, textarea, [contenteditable]:not([contenteditable="false"])' +
+      (includeButtons ? ", button" : ""),
   );
 interface Gesture {
   id: number;
@@ -537,8 +538,8 @@ export class PlotNavigation {
       e.ctrlKey ||
       e.metaKey ||
       e.altKey ||
-      editable(e.target) ||
-      editable(document.activeElement) ||
+      editable(e.target, false) ||
+      editable(document.activeElement, false) ||
       this.gesture ||
       this.pointerButtons ||
       this.space ||
