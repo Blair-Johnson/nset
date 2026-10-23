@@ -177,7 +177,7 @@ export class RunDrawer {
     this.clearFilters.className = "drawer-clear-filters";
     this.clearFilters.title =
       "Clear text and status filters; keep Selected mode";
-    searchTools.append(this.search, this.clearFilters);
+    searchTools.append(this.search, this.status, this.clearFilters);
     this.list.append(this.empty);
     this.root.addEventListener("focusin", (event) => {
       this.previousFocus = event.target as HTMLElement;
@@ -196,7 +196,7 @@ export class RunDrawer {
         "option",
         "",
         value === "all"
-          ? "All statuses"
+          ? "Any status"
           : value[0].toUpperCase() + value.slice(1),
       );
       option.value = value;
@@ -222,14 +222,7 @@ export class RunDrawer {
     };
     const footer = element("div", "run-drawer-footer");
     footer.append(this.matching, this.button("Open run table", onTable));
-    this.root.append(
-      heading,
-      searchTools,
-      this.status,
-      actions,
-      this.list,
-      footer,
-    );
+    this.root.append(heading, searchTools, actions, this.list, footer);
     this.backdrop.onclick = () => this.setOpen(false);
     this.pane.onkeydown = (event) => {
       if (event.key === "Escape") {

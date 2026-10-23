@@ -1,7 +1,7 @@
 import uPlot from "uplot";
 import {
   defaultLabelLayout,
-  formatNumberTick,
+  formatNumberTicks,
   formatTimestampTick,
   timestampTickIncrements,
 } from "./axis-labels";
@@ -227,9 +227,10 @@ export function resolveOptions(
         stroke: "#abb3bc",
         font: "11px ui-monospace, monospace",
         values: labelLayout.compactY
-          ? (_u, values) =>
-              values.map((v) => (v == null ? "" : formatNumberTick(v)))
+          ? (_u, values) => formatNumberTicks(values)
           : formatter(config.yFormat),
+        // Tall (maximized) plots get breathing room rather than a tick every 50px.
+        space: 40,
         size: 76,
         labelSize: 22,
         grid: { show: config.grid, stroke: "#363b40", width: 1 },

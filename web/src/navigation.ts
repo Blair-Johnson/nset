@@ -104,9 +104,18 @@ export class ViewHistory {
   pop() {
     return this.views.pop();
   }
+  entries(): Viewport[] {
+    return this.views.map(copyView);
+  }
   get length() {
     return this.views.length;
   }
+}
+/** Camera state that can be moved onto a freshly built chart of the same axes. */
+export interface NavigationSnapshot {
+  view: Viewport;
+  history: Viewport[];
+  zoomed: boolean;
 }
 export function readViewport(u: uPlot): Viewport | null {
   const x: Bounds = [u.scales.x.min!, u.scales.x.max!],
@@ -210,6 +219,21 @@ export class PlotNavigation {
   }
   canGoBack() {
     return this.history.length > 0;
+  }
+  snapshot(): NavigationSnapshot | null {
+    const view = this.viewport();
+    if (!view) return null;
+    return {
+      view: copyView(view),
+      history: this.history.entries(),
+      zoomed: !sameView(view, this.fit),
+    };
+  }
+  /** Re-apply a zoomed camera and its back-history; an un-zoomed plot keeps its new fit. */
+  restore(snapshot: NavigationSnapshot) {
+    if (!snapshot.zoomed) return;
+    for (const view of snapshot.history) this.history.push(view);
+    this.apply(copyView(snapshot.view), false);
   }
   private apply(next: Viewport, remember = true) {
     const before = this.viewport();
@@ -370,11 +394,13 @@ export class PlotNavigation {
             : "yB"
           : this.options.activePin;
     if (direct && mode !== "pan") {
-      // Existing lines always win. Empty space is a zoom gesture until a
-      // genuine click is confirmed, even while either placement is armed.
-      pin = this.nearestPin(x, y);
+      // Dragging an existing line moves it. While placement is armed, only lines
+      // of the armed axis are grabbable (a vertical cursor never blocks placing a
+      // horizontal one), and a click without movement still places the next
+      // cursor even right beside an existing line, for tight A/B spacing.
+      pin = this.nearestPin(x, y, pending ? axis : undefined);
       mode = pin ? "inspect" : "zoom";
-      if (!pin && pending) placement = nextPin;
+      if (pending) placement = nextPin;
     } else if (mode === "inspect") {
       pin = this.nearestPin(x, y, axis) ?? nextPin;
     } else if (mode === "threshold") pin = "threshold";
@@ -450,7 +476,8 @@ export class PlotNavigation {
     if (!g || g.id !== e.pointerId) return;
     this.move(e);
     const { x, y } = this.xy(e);
-    if (g.pin) this.pinAt(g.pin, x, y);
+    // A grabbed line only moves on a real drag; a click must not nudge it.
+    if (g.pin && (g.moved || !g.placement)) this.pinAt(g.pin, x, y);
     if (g.mode === "zoom" && g.moved) {
       const axis = this.zoomAxes(g, x, y);
       if (

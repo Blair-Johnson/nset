@@ -3,8 +3,24 @@ import { configPath, type ConfigPath } from "./run-config";
 export type ScalarParameter = string | number | boolean | null;
 export interface ParameterField {
   sourcePath: string;
+  /** Human-readable dotted path for display; sourcePath stays the exact identity. */
+  label: string;
   search: string;
   value: ScalarParameter;
+}
+
+/** Dotted display path: `a.b[0]`. Ambiguous only for keys containing dots, which
+ * is why it is never used for lookup. */
+export function displayPath(path: ConfigPath): string {
+  return path
+    .map((part, index) =>
+      typeof part === "number"
+        ? `[${part}]`
+        : index === 0
+          ? String(part)
+          : `.${String(part)}`,
+    )
+    .join("");
 }
 
 /** Exact scalar leaves only; never interpret literal dots as object traversal. */
@@ -24,6 +40,7 @@ export function scalarParameters(
       const sourcePath = configPath(path);
       fields.push({
         sourcePath,
+        label: displayPath(path),
         search: `${sourcePath}\n${path.join(".")}`.toLowerCase(),
         value: value as ScalarParameter,
       });

@@ -20,10 +20,15 @@ import {
   fillColor,
   rawMarkerOptions,
   pairedVisibility,
+  formatDuration,
 } from "./options";
 import { matchedPath } from "./matched-path";
 import type { Run } from "./api";
-import { PlotNavigation, readViewport } from "./navigation";
+import {
+  PlotNavigation,
+  readViewport,
+  type NavigationSnapshot,
+} from "./navigation";
 import type { NavigationAxis, PlotInteraction } from "./workspace-types";
 export interface PlotRun {
   run: Run;
@@ -152,6 +157,9 @@ export class PlotPanel {
       (pin, value) => this.setPins({ ...this.pins, [pin]: value }),
     );
   }
+  private restoreNavigation(snapshot: NavigationSnapshot) {
+    this.navigation?.restore(snapshot);
+  }
   zoom(factor: number, axis?: NavigationAxis): void {
     this.navigation?.zoom(factor, axis);
   }
@@ -174,7 +182,22 @@ export class PlotPanel {
     }
     if (this.config) this.render(this.analyzed, this.config, this.pins);
   }
-  render(data: Analyzed[], config: ViewConfig, pins: Pins) {
+  render(
+    data: Analyzed[],
+    config: ViewConfig,
+    pins: Pins,
+    options: { preserveView?: boolean } = {},
+  ) {
+    // Same axes, different data transform (smoothing/interpolation): keep the user's camera.
+    const carried =
+      options.preserveView &&
+      this.chart &&
+      this.config &&
+      this.config.axis === config.axis &&
+      this.config.xScale === config.xScale &&
+      this.config.yScale === config.yScale
+        ? (this.navigation?.snapshot() ?? null)
+        : null;
     config = validateConfig(config);
     if (!data.some((d) => d.points.length)) {
       this.clear();
@@ -448,6 +471,7 @@ export class PlotPanel {
     this.pins = pins;
     this.generation = generation;
     this.attachNavigation();
+    if (carried) this.restoreNavigation(carried);
     this.interaction?.onViewChange?.();
     publishWarnings();
   }
@@ -529,8 +553,94 @@ export class PlotPanel {
       ctx.fillStyle = label.color;
       ctx.fillText(label.text, label.x + 3 * ratio, label.y + 11 * ratio);
     }
+    this.drawDeltas(u, pins, config, ratio);
     ctx.restore();
   }
+  /** Oscilloscope-style Δ: a bracket between each complete A/B pair with its separation. */
+  private drawDeltas(
+    u: uPlot,
+    pins: Pins,
+    config: ViewConfig | undefined,
+    ratio: number,
+  ) {
+    const ctx = u.ctx;
+    const { left, top, width, height } = u.bbox;
+    const pairs = [
+      ["x", pins.a, pins.b],
+      ["y", pins.yA, pins.yB],
+    ] as const;
+    ctx.font = `600 ${11 * ratio}px ui-monospace, monospace`;
+    ctx.textBaseline = "middle";
+    for (const [axis, a, b] of pairs) {
+      if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b))
+        continue;
+      const pa = u.valToPos(a, axis, true),
+        pb = u.valToPos(b, axis, true);
+      if (![pa, pb].every(Number.isFinite)) continue;
+      const lo = axis === "x" ? left : top,
+        hi = axis === "x" ? left + width : top + height;
+      const p0 = Math.max(lo, Math.min(pa, pb)),
+        p1 = Math.min(hi, Math.max(pa, pb));
+      if (p1 - p0 < 1) continue;
+      const text = `Δ${axis === "x" ? "X" : "Y"} ${deltaText(b - a, axis, config)}`;
+      const tw = ctx.measureText(text).width + 8 * ratio,
+        th = 16 * ratio;
+      // Bracket sits along the bottom (ΔX) or left (ΔY) edge, clear of the A/B badges.
+      const along =
+        axis === "x" ? top + height - 12 * ratio : left + 12 * ratio;
+      ctx.strokeStyle = "#e5e7eb";
+      ctx.lineWidth = 1 * ratio;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      const tick = 4 * ratio;
+      if (axis === "x") {
+        ctx.moveTo(p0, along - tick);
+        ctx.lineTo(p0, along + tick);
+        ctx.moveTo(p0, along);
+        ctx.lineTo(p1, along);
+        ctx.moveTo(p1, along - tick);
+        ctx.lineTo(p1, along + tick);
+      } else {
+        ctx.moveTo(along - tick, p0);
+        ctx.lineTo(along + tick, p0);
+        ctx.moveTo(along, p0);
+        ctx.lineTo(along, p1);
+        ctx.moveTo(along - tick, p1);
+        ctx.lineTo(along + tick, p1);
+      }
+      ctx.stroke();
+      // Badge centered on the bracket, clamped inside the plot.
+      const mid = (p0 + p1) / 2;
+      let bx = axis === "x" ? mid - tw / 2 : along + 6 * ratio;
+      let by = axis === "x" ? along - th - 4 * ratio : mid - th / 2;
+      bx = Math.max(
+        left + 2 * ratio,
+        Math.min(left + width - tw - 2 * ratio, bx),
+      );
+      by = Math.max(
+        top + 2 * ratio,
+        Math.min(top + height - th - 2 * ratio, by),
+      );
+      ctx.fillStyle = "rgba(21, 22, 23, 0.88)";
+      ctx.fillRect(bx, by, tw, th);
+      ctx.strokeStyle = "#5b636b";
+      ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, th - 1);
+      ctx.fillStyle = "#f3f4f6";
+      ctx.textAlign = "left";
+      ctx.fillText(text, bx + 4 * ratio, by + th / 2 + 0.5 * ratio);
+    }
+    ctx.textBaseline = "alphabetic";
+  }
+}
+function deltaText(
+  delta: number,
+  axis: "x" | "y",
+  config: ViewConfig | undefined,
+): string {
+  if (axis === "y" || !config)
+    return formatValue(delta, config?.yFormat ?? "number");
+  if (config.axis === "step") return formatValue(delta, "number");
+  return formatDuration(delta);
 }
 export interface PinLabel {
   text: string;

@@ -1,4 +1,10 @@
-import { analyze, PlotPanel, type Analyzed, type Pins } from "./plot";
+import {
+  analyze,
+  PlotPanel,
+  type Analyzed,
+  type Pins,
+  type PlotRun,
+} from "./plot";
 import { ImagePanel } from "./images";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
@@ -94,6 +100,8 @@ export class ChartCard {
   private visible = typeof IntersectionObserver === "undefined";
   private loaded = false;
   private data: Analyzed[] = [];
+  /** Last fetched raw histories, kept so transform-only edits need no refetch. */
+  private raw: PlotRun[] = [];
   private mode: InteractionMode = "zoom";
   private cursorAxis: "x" | "y" = "x";
   private inspectOpen = false;
@@ -681,59 +689,72 @@ export class ChartCard {
     const body = element("div", "card-series-results");
     secondary.append(body);
     if (this.inspectOpen && this.mode !== "threshold") {
-      const vertical = this.cursorAxis === "x";
-      const a = vertical ? this.pins.a : this.pins.yA;
-      const b = vertical ? this.pins.b : this.pins.yB;
-      const delta = a == null || b == null ? null : b - a;
-      const position = (value: number | null | undefined) =>
-        value == null
-          ? "—"
-          : vertical
-            ? formatXValue(
-                value,
-                this.spec.config.axis,
-                this.spec.config.xFormat,
-              )
-            : this.number(value);
-      const difference =
-        delta === null
-          ? "—"
-          : vertical && this.spec.config.axis !== "step"
-            ? formatDuration(delta)
-            : vertical
-              ? formatValue(
-                  delta,
-                  this.spec.config.xFormat === "iso-time"
-                    ? "number"
-                    : this.spec.config.xFormat,
-                )
-              : this.number(delta);
+      // Primary row follows the armed axis; the other axis's pair is appended
+      // inline when it also has cursors, so ΔX and ΔY read together like a scope.
       const readout = element("div", "card-position-readout");
+      const primaryVertical = this.cursorAxis === "x";
       readout.setAttribute(
         "aria-label",
-        `Cursor ${vertical ? "positions" : "levels"}`,
+        `Cursor ${primaryVertical ? "positions" : "levels"}`,
       );
-      readout.append(
-        element(
-          "strong",
-          "",
-          vertical
-            ? this.spec.config.axis === "step"
-              ? "Step"
-              : this.spec.config.axis === "timestamp"
-                ? "Time (UTC)"
-                : "Elapsed time"
-            : "Value",
-        ),
-      );
-      for (const [label, value] of [
-        ["A", position(a)],
-        ["B", position(b)],
-        ["B − A", difference],
-      ]) {
-        const cell = element("span", "card-position-value");
-        cell.append(element("span", "", label), element("output", "", value));
-        readout.append(cell);
+      const otherA = primaryVertical ? this.pins.yA : this.pins.a;
+      const otherB = primaryVertical ? this.pins.yB : this.pins.b;
+      const axes =
+        otherA != null || otherB != null
+          ? [primaryVertical, !primaryVertical]
+          : [primaryVertical];
+      for (const vertical of axes) {
+        const a = vertical ? this.pins.a : this.pins.yA;
+        const b = vertical ? this.pins.b : this.pins.yB;
+        const delta = a == null || b == null ? null : b - a;
+        const position = (value: number | null | undefined) =>
+          value == null
+            ? "—"
+            : vertical
+              ? formatXValue(
+                  value,
+                  this.spec.config.axis,
+                  this.spec.config.xFormat,
+                )
+              : this.number(value);
+        const difference =
+          delta === null
+            ? "—"
+            : vertical && this.spec.config.axis !== "step"
+              ? formatDuration(delta)
+              : vertical
+                ? formatValue(
+                    delta,
+                    this.spec.config.xFormat === "iso-time"
+                      ? "number"
+                      : this.spec.config.xFormat,
+                  )
+                : this.number(delta);
+        const group = element("span", "card-position-group");
+        if (vertical !== primaryVertical) group.dataset.secondary = "true";
+        group.append(
+          element(
+            "strong",
+            "",
+            vertical
+              ? this.spec.config.axis === "step"
+                ? "Step"
+                : this.spec.config.axis === "timestamp"
+                  ? "Time (UTC)"
+                  : "Elapsed time"
+              : "Value",
+          ),
+        );
+        for (const [label, value] of [
+          ["A", position(a)],
+          ["B", position(b)],
+          [vertical ? "ΔX" : "ΔY", difference],
+        ]) {
+          const cell = element("span", "card-position-value");
+          cell.append(element("span", "", label), element("output", "", value));
+          group.append(cell);
+        }
+        readout.append(group);
       }
       readout.append(
         button("Hide", "Hide cursor details", () => {
@@ -834,6 +855,7 @@ export class ChartCard {
     this.abort = controller;
     this.loaded = true;
     this.data = [];
+    this.raw = [];
     this.legend.replaceChildren();
     this.plot?.clear();
     this.hover.textContent = "";
@@ -884,6 +906,7 @@ export class ChartCard {
         controller.signal.aborted
       )
         return;
+      this.raw = data;
       this.data = analyze(data, this.spec.config);
       const display = this.displayConfig();
       const config =
@@ -913,6 +936,7 @@ export class ChartCard {
         return;
       controller.abort();
       this.data = [];
+      this.raw = [];
       this.legend.replaceChildren();
       this.plot?.clear();
       this.renderResults();
@@ -959,6 +983,41 @@ export class ChartCard {
       return;
     }
     this.cancelResize();
+    // Data-transform-only edits (smoothing, interpolation): re-analyze cached raw
+    // observations in place so zoom, back-history, cursors and scroll survive.
+    const transformKey = (s: ChartSpec) =>
+      contentKey({
+        ...s,
+        config: {
+          ...s.config,
+          smoothing: false,
+          alpha: 0,
+          interpolation: "linear",
+        },
+      });
+    if (
+      this.plot &&
+      this.loaded &&
+      !this.abort &&
+      this.raw.length &&
+      spec.kind === this.spec.kind &&
+      transformKey(spec) === transformKey(this.spec)
+    ) {
+      this.spec = spec;
+      this.title.textContent = spec.title;
+      this.applyDimensions();
+      this.data = analyze(this.raw, spec.config);
+      this.renderLegend();
+      const display = this.displayConfig();
+      this.plot.render(
+        this.data,
+        spec.outliers === "robust" ? robustConfig(this.data, display) : display,
+        this.pins,
+        { preserveView: true },
+      );
+      this.renderResults();
+      return;
+    }
     if (spec.config.axis !== this.spec.config.axis)
       this.pins = { a: null, b: null, threshold: null };
     this.cancel();
@@ -968,6 +1027,7 @@ export class ChartCard {
     this.images = undefined;
     this.spec = spec;
     this.data = [];
+    this.raw = [];
     this.build();
     this.refresh();
   }
@@ -980,6 +1040,7 @@ export class ChartCard {
     this.cancel();
     this.loaded = false;
     this.data = [];
+    this.raw = [];
     this.legend.replaceChildren();
     this.plot?.clear();
     this.images?.clear();

@@ -690,6 +690,73 @@
 }
 /* Editing exposes the same coordinates, not a second simultaneous A/B readout. */
 .card-inspection:has(.card-position-editor[open])
-  .card-position-value:nth-of-type(-n + 2) {
+  .card-position-value:nth-of-type(-n + 2),
+.card-inspection:has(.card-position-editor[open])
+  .card-position-group[data-secondary] {
   display: none;
+}
+
+/* Compact image controls share the scalar card's square ghost-icon vocabulary. */
+.card-image-panel .card-image-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.card-image-panel .card-image-icon:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.card-image-panel .card-image-icon[aria-pressed="true"] {
+  color: var(--accent);
+}
+.card-image-compact .card-image-toolbar {
+  gap: 2px;
+  flex-wrap: nowrap;
+  margin-bottom: 6px;
+}
+.card-image-compact .card-image-toolbar select {
+  flex: 0 1 auto;
+  min-height: 28px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  margin-right: 4px;
+  font-size: 12px;
+}
+.card-image-compact .card-image-more > summary.card-image-icon {
+  border: 1px solid transparent;
+}
+.card-image-compact .card-image-timeline {
+  gap: 2px;
+  margin-top: 6px;
+  flex-wrap: nowrap;
+}
+.card-image-compact .card-image-timeline input[type="range"] {
+  margin: 0 6px;
+}
+.card-image-compact .frame-info {
+  width: 12ch;
+  flex: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.card-position-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+.card-position-readout {
+  column-gap: 14px;
+}
+.card-position-readout > button {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 12px;
 }

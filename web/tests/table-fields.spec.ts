@@ -119,11 +119,10 @@ for (const width of [1440, 390])
       await page.locator(".column-choices").evaluate((node) => node.scrollTop),
     ).toBe(0);
     await page.screenshot({ path: info.outputPath("searched-picker.png") });
+    // Unambiguous keys read as plain dotted names; colliding ones keep JSONPath.
     for (const name of ["nullable", "augment", "optional", "empty"]) {
       await search.fill(name);
-      await page
-        .getByRole("checkbox", { name: `$["${name}"]`, exact: true })
-        .check();
+      await page.getByRole("checkbox", { name, exact: true }).check();
     }
     await search.fill("not-a-field");
     await expect(page.getByRole("status")).toHaveText("No matching columns");

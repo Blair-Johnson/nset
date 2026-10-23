@@ -10,6 +10,32 @@ export function formatNumberTick(value: number): string {
   return exponential.length < plain.length ? exponential : plain;
 }
 
+/** Format one axis's ticks in a single shared notation, so labels never mix
+ * `2e-3` with `0.0015`. Exponential is used for the whole axis only when it is
+ * shorter for the majority of finite ticks. Values are unchanged either way. */
+export function formatNumberTicks(values: (number | null)[]): string[] {
+  const finite = values.filter(
+    (v): v is number => v != null && Number.isFinite(v),
+  );
+  const plain = (v: number) => formatValue(v, "number");
+  const exp = (v: number) =>
+    Number(plain(v)).toExponential().replace("e+", "e");
+  const preferExp =
+    finite.filter((v) => v !== 0 && exp(v).length < plain(v).length).length >
+    finite.filter((v) => v !== 0).length / 2;
+  return values.map((v) =>
+    v == null
+      ? ""
+      : !Number.isFinite(v)
+        ? plain(v)
+        : v === 0
+          ? "0"
+          : preferExp
+            ? exp(v)
+            : plain(v),
+  );
+}
+
 /** Native multiline labels retain the entire UTC date/time (including ms). */
 export function formatTimestampTick(value: number): string {
   return formatValue(value, "iso-time").replace(" ", "\n");

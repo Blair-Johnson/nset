@@ -214,8 +214,25 @@
 }
 .run-detail .run-config-actions button {
   min-height: 22px;
-  padding: 1px 5px;
+  padding: 1px 6px;
   font-size: 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.run-detail .run-config-actions button:hover:not(:disabled) {
+  border-color: var(--control-border);
+  color: var(--text);
+}
+/* Copy affordances appear with the row, not as a permanent column of buttons. */
+@media (hover: hover) {
+  .run-config-row .run-config-actions {
+    opacity: 0;
+  }
+  .run-config-row:hover .run-config-actions,
+  .run-config-row:focus-within .run-config-actions {
+    opacity: 1;
+  }
 }
 .run-config-more {
   margin-top: 8px;

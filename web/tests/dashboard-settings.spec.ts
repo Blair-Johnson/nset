@@ -71,12 +71,19 @@ const scalar = (view: any) =>
     .filter((c: any) => c.kind === "timeseries");
 async function cursor(page: Page, x: number) {
   const card = page.locator('[data-card-kind="timeseries"]').first();
-  await card
-    .getByRole("button", { name: "Add vertical cursor", exact: true })
-    .click();
-  await card.getByText("Edit positions", { exact: true }).click();
-  await card.getByLabel("Cursor A coordinate", { exact: true }).fill(String(x));
-  await card.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
+  // Cards may survive a setting change in place (cursors/zoom preserved), so
+  // only arm the cursor and open the editor when they are not already active.
+  const input = card.getByLabel("Cursor A coordinate", { exact: true });
+  if (!(await input.isVisible())) {
+    const add = card.getByRole("button", {
+      name: "Add vertical cursor",
+      exact: true,
+    });
+    if ((await add.getAttribute("aria-pressed")) !== "true") await add.click();
+    await card.getByText("Edit positions", { exact: true }).click();
+  }
+  await input.fill(String(x));
+  await input.press("Tab");
   return card
     .locator(".card-value-table tr")
     .filter({ hasText: "Run 0" })

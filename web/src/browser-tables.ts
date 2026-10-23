@@ -243,6 +243,15 @@ export function runTable(
   const parameterFields = new Map(
     [...parameters.values()].flatMap((fields) => [...fields]),
   );
+  // Friendly dotted labels, except where a literal-dot key would make two fields
+  // read identically; those keep their exact JSONPath so they stay distinguishable.
+  const labelCounts = new Map<string, number>();
+  for (const field of parameterFields.values())
+    labelCounts.set(field.label, (labelCounts.get(field.label) ?? 0) + 1);
+  const parameterName = (key: string) => {
+    const label = parameterFields.get(key)?.label;
+    return label && labelCounts.get(label) === 1 ? label : key;
+  };
   const tools = element("div", "table-toolbar");
   const search = input("Search runs, parameters or tags", state.query);
   const status = element("select");
@@ -298,7 +307,10 @@ export function runTable(
           : state[kind]!.filter((k) => k !== key);
         render();
       };
-      label.append(check, element("span", "", key));
+      label.append(
+        check,
+        element("span", "", kind === "parameters" ? parameterName(key) : key),
+      );
       label.title = kind === "metrics" ? `${key} · latest logged value` : key;
       group.append(label);
       options.push({ label, search: searchable });
@@ -442,7 +454,7 @@ export function runTable(
       ["status", "Status"],
       ["created_at", "Created"],
       ...state.metrics!.map((k) => [`metric:${k}`, `${k} · latest`]),
-      ...state.parameters!.map((k) => [`parameter:${k}`, k]),
+      ...state.parameters!.map((k) => [`parameter:${k}`, parameterName(k)]),
     ]) {
       const th = element("th");
       th.setAttribute(
@@ -465,6 +477,7 @@ export function runTable(
       control.dataset.sortKey = key;
       if (focusedSort === key) restoreFocus = control;
       control.title = key.startsWith("metric:") ? "Latest logged value" : label;
+      if (key.startsWith("metric:")) th.classList.add("number-header");
       if (key.startsWith("parameter:")) {
         th.classList.add("parameter-header");
         control.title = `Parameter ${label}`;
@@ -517,7 +530,7 @@ export function runTable(
       for (const key of state.parameters!) {
         const value = parameters.get(run.id)?.get(key)?.value;
         const parameter = cell(parameterLabel(value), "parameter-cell");
-        parameter.title = `${key}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
+        parameter.title = `${parameterName(key)}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
         tr.append(parameter);
       }
       body.append(tr);

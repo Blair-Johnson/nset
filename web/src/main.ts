@@ -34,7 +34,7 @@ import type { DashboardControls } from "./dashboard-controls";
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
-app.innerHTML = `<header class="app-header"><a class="brand" href="#/experiments"><img src="/favicon.svg" alt="" width="24" height="24">NSET</a><a class="top-nav" href="#/experiments">Experiments</a><div class="header-spacer"></div><span id="connection" class="connection">Disconnected</span><button id="refresh" title="Refresh runs and charts">Refresh</button><button id="logout">Disconnect</button></header><main id="main"><div id="global-error" class="alert" role="alert" hidden></div><div id="page"></div></main><dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="connect-form"><h2 id="login-title">Connect to your tracker</h2><label>Access token<input id="token" name="token" type="password" required autocomplete="off"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>`;
+app.innerHTML = `<header class="app-header"><a class="brand" href="#/experiments"><img src="/favicon.svg" alt="" width="24" height="24">NSET</a><nav id="header-context" class="header-context" aria-label="Location"></nav><div class="header-spacer"></div><span id="connection" class="connection">Disconnected</span><button id="refresh" title="Refresh runs and charts">Refresh</button><button id="logout">Disconnect</button></header><main id="main"><div id="global-error" class="alert" role="alert" hidden></div><div id="page"></div></main><dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="connect-form"><h2 id="login-title">Connect to your tracker</h2><label>Access token<input id="token" name="token" type="password" required autocomplete="off"></label><p id="login-error" class="error" role="alert"></p><button class="primary" type="submit">Connect</button></form></dialog>`;
 let token = sessionStorage.getItem("nset.token") ?? "";
 const api = new Api(() => token);
 const store = new MetricStore(api);
@@ -212,21 +212,21 @@ function updateSelection(workspace: Workspace, ids: string[]) {
   });
   return saved;
 }
-function pageHeader(experimentId: string, view: string): HTMLElement {
-  const head = element("div", "page-heading");
+/** Location (breadcrumb + view tabs) lives in the app header so the page body is all content. */
+function pageHeader(experimentId: string, view: string): void {
+  const head = $("header-context");
   const experiment = catalog.experiments.find((e) => e.id === experimentId);
   if (!experiment) {
-    head.append(element("h1", "", "Experiments"));
-    return head;
+    head.replaceChildren(element("h1", "header-title", "Experiments"));
+    return;
   }
   const crumb = element("div", "breadcrumb");
   crumb.append(
     button("Experiments", () => navigate(), "text-link"),
-    element("span", "", "/"),
-    element("span", "", experiment.name),
+    element("span", "breadcrumb-separator", "/"),
+    element("span", "breadcrumb-current", experiment.name),
   );
   crumb.lastElementChild?.setAttribute("title", experiment.name);
-  head.append(crumb);
   const tabs = element("nav", "view-tabs");
   tabs.setAttribute("aria-label", "Experiment views");
   for (const [key, label] of [
@@ -238,8 +238,7 @@ function pageHeader(experimentId: string, view: string): HTMLElement {
     if (view === key) tab.setAttribute("aria-current", "page");
     tabs.append(tab);
   }
-  head.append(tabs);
-  return head;
+  head.replaceChildren(crumb, tabs);
 }
 function renderPage() {
   if (!connected) return;
@@ -252,8 +251,8 @@ function renderPage() {
   previousRoute = key;
   if (!route.experimentId) {
     suspendDashboard();
+    pageHeader("", "");
     $("page").replaceChildren(
-      pageHeader("", ""),
       experimentTable(catalog, (id) => navigate(id), experimentState),
     );
   } else {
@@ -262,6 +261,7 @@ function renderPage() {
     );
     if (!experiment) {
       disposeCards();
+      pageHeader("", "");
       $("page").replaceChildren(
         element("h1", "", "Experiment not found"),
         button("Back to experiments", () => navigate()),
@@ -276,8 +276,8 @@ function renderPage() {
       const run = catalog.runs.find(
         (r) => r.id === route.runId && r.experiment_id === experiment.id,
       );
+      pageHeader(experiment.id, "runs");
       $("page").replaceChildren(
-        pageHeader(experiment.id, "runs"),
         run
           ? renderRunDetail(run, {
               catalog,
@@ -294,8 +294,8 @@ function renderPage() {
         state = tableState();
         runStates.set(experiment.id, state);
       }
+      pageHeader(experiment.id, "runs");
       $("page").replaceChildren(
-        pageHeader(experiment.id, "runs"),
         runTable(
           catalog,
           experiment,
@@ -307,6 +307,7 @@ function renderPage() {
         ),
       );
     } else {
+      pageHeader(experiment.id, "charts");
       if (currentWorkspaceId === workspace.id && suspendedDashboard) {
         $("page").replaceChildren(suspendedDashboard);
         suspendedDashboard = undefined;
@@ -319,7 +320,7 @@ function renderPage() {
       }
       if (currentWorkspaceId !== workspace.id) {
         disposeCards();
-        $("page").replaceChildren(pageHeader(experiment.id, "charts"));
+        $("page").replaceChildren();
         const tools = element("div", "workspace-toolbar");
         tools.id = "workspace-toolbar";
         const grid = element("div", "dashboard");
@@ -1251,6 +1252,7 @@ $("logout").onclick = () => {
   $("connection").textContent = "Disconnected";
   $("connection").classList.remove("connected");
   $("page").replaceChildren();
+  $("header-context").replaceChildren();
   error();
   $<HTMLInputElement>("token").value = "";
   $<HTMLButtonElement>("refresh").disabled = true;
@@ -1275,6 +1277,22 @@ document.addEventListener("pointerdown", (event) => {
   ))
     if (!menu.contains(event.target as Node)) menu.open = false;
 });
+// Popovers default to right-anchored; flip to left-anchored when that would leave the viewport.
+document.addEventListener(
+  "toggle",
+  (event) => {
+    const menu = event.target;
+    if (!(menu instanceof HTMLDetailsElement) || !menu.open) return;
+    const popover = menu.querySelector<HTMLElement>(
+      ":scope > .menu-popover, :scope > .card-menu-items",
+    );
+    if (!popover) return;
+    popover.classList.remove("align-start");
+    if (popover.getBoundingClientRect().left < 8)
+      popover.classList.add("align-start");
+  },
+  true,
+);
 window.addEventListener("beforeunload", () => {
   request?.abort();
   disposeCards();

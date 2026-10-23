@@ -1,6 +1,7 @@
 import OpenSeadragon from "openseadragon";
 import { Api, type Run, type ImageFrame } from "./api";
 import { boundedIndex, element, isAbort, message, Latest } from "./utils";
+import { plotIcon, type PlotIconName } from "./plot-icons";
 import type { ResolvedSeries } from "./workspace-types";
 import "./cards.css";
 import "./image-viewer.css";
@@ -52,26 +53,37 @@ export class ImagePanel {
     const toolbar = element("div", "card-image-toolbar");
     const timeline = element("div", "card-image-timeline");
     const extras = element("details", "card-image-more");
-    extras.append(element("summary", "", "More"));
+    const extrasSummary = element("summary", "", "More");
+    extrasSummary.setAttribute("aria-label", "More image controls");
+    extrasSummary.title = "More image controls";
+    extras.append(extrasSummary);
     const extraControls = element("div", "card-image-menu");
     extras.append(extraControls);
     this.runSelect.setAttribute("aria-label", "Image run");
     this.keySelect.setAttribute("aria-label", "Image key");
     toolbar.append(this.runSelect, this.keySelect);
-    const button = (label: string, fn: () => void) => {
+    const button = (label: string, fn: () => void, icon?: PlotIconName) => {
       const b = element("button", "", label);
       b.type = "button";
       b.title = label;
       b.setAttribute("aria-label", label);
       b.onclick = fn;
+      // Compact cards use the same SVG icon vocabulary as scalar cards.
+      if (icon && this.compact) {
+        b.replaceChildren(plotIcon(icon));
+        b.classList.add("card-image-icon");
+      }
       toolbar.append(b);
       return b;
     };
-    const previous = button("← Previous", () => void this.step(-1));
-    const next = button("Next →", () => void this.step(1));
+    const previous = button("← Previous", () => void this.step(-1), "previous");
+    const next = button("Next →", () => void this.step(1), "next");
     if (this.compact) {
-      previous.textContent = "‹";
-      next.textContent = "›";
+      extrasSummary.replaceChildren(plotIcon("more"));
+      extrasSummary.classList.add("card-image-icon");
+      this.play.classList.add("card-image-icon");
+      this.play.title = "Play";
+      this.play.replaceChildren(plotIcon("play"));
     }
     timeline.append(previous, this.play, next);
     this.play.onclick = () => this.togglePlay();
@@ -89,21 +101,30 @@ export class ImagePanel {
     }
     extraControls.append(this.speed);
     this.speed.setAttribute("aria-label", "Playback rate");
-    button("Zoom out", () => this.viewer.viewport.zoomBy(1 / 1.5)).textContent =
-      "−";
-    button("Zoom in", () => this.viewer.viewport.zoomBy(1.5)).textContent = "+";
-    button(this.compact ? "Fit" : "Reset view", () =>
-      this.viewer.viewport.goHome(),
+    button("Zoom out", () => this.viewer.viewport.zoomBy(1 / 1.5), "zoom-out");
+    button("Zoom in", () => this.viewer.viewport.zoomBy(1.5), "zoom-in");
+    if (!this.compact) {
+      toolbar.lastElementChild!.textContent = "+";
+      toolbar.lastElementChild!.previousElementSibling!.textContent = "−";
+    }
+    button(
+      this.compact ? "Fit" : "Reset view",
+      () => this.viewer.viewport.goHome(),
+      "fit-image",
     );
-    button("1:1 pixels", () => {
-      const item = this.viewer.world.getItemAt(0);
-      if (item)
-        this.viewer.viewport.zoomTo(
-          item.imageToViewportZoom(1),
-          undefined,
-          true,
-        );
-    });
+    button(
+      "1:1 pixels",
+      () => {
+        const item = this.viewer.world.getItemAt(0);
+        if (item)
+          this.viewer.viewport.zoomTo(
+            item.imageToViewportZoom(1),
+            undefined,
+            true,
+          );
+      },
+      "actual-size",
+    );
     let smoothPixels = true;
     const sampling = button("Pixels: smooth", () => {
       smoothPixels = !smoothPixels;
@@ -622,7 +643,10 @@ export class ImagePanel {
   private stop() {
     this.playing = false;
     clearTimeout(this.timer);
-    this.play.textContent = "Play";
+    if (this.compact) {
+      this.play.replaceChildren(plotIcon("play"));
+      this.play.title = "Play";
+    } else this.play.textContent = "Play";
     this.play.setAttribute("aria-pressed", "false");
   }
   private togglePlay() {
@@ -632,7 +656,10 @@ export class ImagePanel {
     }
     if (!this.frames.length) return;
     this.playing = true;
-    this.play.textContent = "Pause";
+    if (this.compact) {
+      this.play.replaceChildren(plotIcon("pause"));
+      this.play.title = "Pause";
+    } else this.play.textContent = "Pause";
     this.play.setAttribute("aria-pressed", "true");
     const advance = async () => {
       if (!this.playing) return;

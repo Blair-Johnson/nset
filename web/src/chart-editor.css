@@ -384,7 +384,46 @@
 }
 .chart-editor .ce-close {
   border-color: transparent;
-  font-size: 12px;
+  background: transparent;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 0;
+  color: var(--ce-muted, var(--muted));
+  position: relative;
+}
+.chart-editor .ce-close::before,
+.chart-editor .ce-close::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 1.6px;
+  background: currentColor;
+  border-radius: 1px;
+}
+.chart-editor .ce-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.chart-editor .ce-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.chart-editor .ce-close:hover:not(:disabled) {
+  color: var(--ce-text, var(--text));
+}
+/* uPlot lists each run twice (curve + raw observations, toggled as a pair).
+   Show one legend entry per run; the observation row is redundant here. */
+.chart-editor .ce-preview .u-legend .u-series:nth-child(even) {
+  display: none;
+}
+.chart-editor .ce-preview .u-legend {
+  text-align: left;
+  padding: 4px 8px 0;
+}
+.chart-editor .ce-preview .u-legend .u-series {
+  display: inline-flex;
+  margin-right: 12px;
 }
 .chart-editor button:disabled,
 .chart-editor input:disabled,
@@ -466,5 +505,6 @@
   display: flex;
   justify-content: space-between;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
+  margin: -10px 0 12px;
 }
