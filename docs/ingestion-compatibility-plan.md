@@ -1,6 +1,6 @@
 # Concurrent ingestion and client compatibility
 
-Status: planning and baseline audit. Branch `feat/ingestion-compat`, based on `cea8ccd`. Production behavior is unchanged at this milestone.
+Status: initial audit, concurrent-load harness and native write-admission hardening implemented on `feat/ingestion-compat`, based on `cea8ccd`; main and the running preview remain unchanged. MLflow, W&B and TensorBoard adapters are still planned, not implemented. Detailed protocol scope is in `docs/client-compatibility.md`; benchmark usage and limits are in `docs/concurrent-benchmark.md`.
 
 ## Goal and acceptance contract
 
@@ -43,3 +43,11 @@ MLflow's official REST API reference defines tracking endpoints under `/api/2.0/
 W&B's upstream `wandb/env.py` defines `WANDB_BASE_URL` and `WANDB_API_KEY`; its `core/internal/filestream/filestream.go` defines separate history, summary, event and output streams with resume offsets. Further initialization/GraphQL behavior needs SDK-level verification.
 
 TensorBoard's upstream README documents append-only `tfevents` files read from a log directory and per-directory run discovery. Treat ingestion of these files as a separate path, not a shared HTTP tracking protocol.
+
+## Initial implementation and remaining risk
+
+The feature branch limits authenticated native POST/PATCH handlers to eight simultaneous in-flight requests, acquired before body extraction and without waiting. This is not a limit on total runs or experiments. Saturation returns the existing JSON busy error with `Retry-After: 1`; reads and health remain outside this write limit. Authentication still precedes admission and unsupported methods retain their normal errors. Rejected bodies are not polled. The native client still does not automatically retry writes.
+
+This is active-request admission, not a total RSS or queued-byte bound. Already-queued DB jobs can outlive HTTP cancellation, readers are not globally admitted, and authenticated slow uploads have no new total request deadline. Image I/O still shares the writer, catalog queries still aggregate stored history, and history pagination still recomputes snapshot counts. Those remain profiling/hardening targets; no storage architecture or durability changes were made.
+
+The first corrected validation (`rx r236`) passed Rust, web unit and Python tests, including six deterministic admission tests and the existing 2,000-observation concurrency integrity test. The latter now retains 20 producers while bounding in-flight requests to the admission limit; overload behavior is tested separately. An earlier run (`r235`) caught and preserved a method-routing bug before the correction. Benchmark helper tests passed independently (`r234`).
