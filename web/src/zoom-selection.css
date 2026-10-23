@@ -5,6 +5,10 @@
   box-sizing: border-box;
   pointer-events: none;
   visibility: hidden;
+  /* Own compositing layer: when a Y band turns into a box mid-drag, the old
+     band's pixels live only in this layer, never stuck on the plot beneath. */
+  will-change: transform;
+  transform: translateZ(0);
 }
 .plot-navigation.plot-zoom-selecting .u-select {
   visibility: visible;

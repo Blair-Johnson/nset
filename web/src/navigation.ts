@@ -462,13 +462,16 @@ export class PlotNavigation {
     else if (g.mode === "zoom") {
       const axis = this.zoomAxes(g, x, y);
       this.u.root.classList.toggle("plot-zoom-selecting", axis !== null);
+      // Whole CSS pixels: fractional edges leave partially repainted slivers.
+      const left = Math.round(axis === "y" ? 0 : Math.min(x, g.x)),
+        top = Math.round(axis === "x" ? 0 : Math.min(y, g.y));
       this.u.setSelect(
         axis
           ? {
-              left: axis === "y" ? 0 : Math.min(x, g.x),
-              top: axis === "x" ? 0 : Math.min(y, g.y),
-              width: axis === "y" ? w : Math.abs(x - g.x),
-              height: axis === "x" ? h : Math.abs(y - g.y),
+              left,
+              top,
+              width: Math.round(axis === "y" ? w : Math.max(x, g.x)) - left,
+              height: Math.round(axis === "x" ? h : Math.max(y, g.y)) - top,
             }
           : { left: 0, top: 0, width: 0, height: 0 },
         false,
