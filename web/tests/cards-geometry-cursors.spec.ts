@@ -533,6 +533,9 @@ test("cursor creation returns to zoom and existing horizontal/vertical pins drag
     .poll(() => page.evaluate(() => (window as any).geometry.card.mode))
     .toBe("zoom");
   expect((await snapshot(page)).pins.yA).toBeCloseTo(0.8, 1);
+  await expect(
+    page.getByRole("button", { name: "Place horizontal cursor A" }),
+  ).toHaveAttribute("aria-pressed", "false");
   const before = await snapshot(page);
   await drag(3, 0.8, 3, 1.3);
   expect((await snapshot(page)).pins.yA).toBeCloseTo(1.3, 1);

@@ -403,6 +403,15 @@ export class ChartCard {
         String(this.mode === "inspect" && axis === this.cursorAxis),
       );
     if (this.backButton) this.backButton.disabled = !this.plot.canGoBack();
+    for (const control of this.inspection.querySelectorAll<HTMLButtonElement>(
+      "[data-pin]",
+    ))
+      control.setAttribute(
+        "aria-pressed",
+        String(
+          this.mode === "inspect" && control.dataset.pin === this.activePin,
+        ),
+      );
     if (!rebuild) return;
     this.inspection.replaceChildren();
     this.inputs.clear();
@@ -428,6 +437,7 @@ export class ChartCard {
             this.configure();
           },
         );
+        choice.dataset.pin = letter.toLowerCase();
         choice.setAttribute(
           "aria-pressed",
           String(
