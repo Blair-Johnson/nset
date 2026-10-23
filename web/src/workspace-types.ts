@@ -25,7 +25,10 @@ export interface SeriesRef {
 export type ChartSource =
   | { mode: "selected"; keys: string[] }
   | { mode: "explicit"; series: SeriesRef[] };
-export interface CardLayout { width: number; height: number }
+export interface CardLayout {
+  width: number;
+  height: number;
+}
 export interface ChartSpec {
   id: string;
   title: string;

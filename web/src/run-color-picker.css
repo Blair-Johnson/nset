@@ -1,0 +1,75 @@
+.run-color-button {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 5px;
+  border: 0;
+  background: transparent;
+  border-radius: 5px;
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+  cursor: pointer;
+}
+.run-color-button::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--run-color);
+  border: 1px solid #ffffff40;
+}
+.run-color-button:hover {
+  background: #ffffff12;
+}
+.run-color-button:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+.run-color-button[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 1px #94a3b8;
+}
+.run-color-dialog {
+  width: min(280px, calc(100vw - 32px));
+  padding: 16px;
+  border-radius: 8px;
+  background: #25282d;
+  color: #e7e9ee;
+  border: 1px solid #525762;
+  box-shadow: 0 12px 48px #0008;
+}
+.run-color-dialog::backdrop {
+  background: #0005;
+}
+.run-color-presets {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.run-color-dialog label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.run-color-dialog input[type="color"] {
+  width: 48px;
+  height: 30px;
+  padding: 2px;
+}
+.run-color-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.run-color-error {
+  color: #fca5a5;
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+.run-color-error:empty {
+  display: none;
+}

@@ -242,3 +242,38 @@ test("unavailable/corrupt storage loads safely; write failures and invalid libra
     /quota/,
   );
 });
+
+test("card geometry round trips without changing legacy views", () => {
+  const legacy = newChart("timeseries", ["loss"]);
+  assert.equal(Object.hasOwn(validateChart(legacy), "layout"), false);
+  for (const layout of [
+    { width: 300, height: 240 },
+    { width: 713, height: 507 },
+    { width: 4096, height: 2160 },
+  ]) {
+    const chart = { ...legacy, layout };
+    assert.deepEqual(validateChart(chart), chart);
+    const view = newWorkspace("e1", "Sized", ["r1"], catalog());
+    view.sections[0].cards[0] = chart;
+    assert.deepEqual(importWorkspace(exportWorkspace(view)), view);
+  }
+});
+test("card geometry rejects malformed dimensions instead of silently clipping saved intent", () => {
+  const chart = newChart("timeseries", []);
+  for (const layout of [
+    null,
+    {},
+    { width: 300 },
+    { width: 299, height: 300 },
+    { width: 500, height: 239 },
+    { width: 4097, height: 500 },
+    { width: 500, height: 2161 },
+    { width: 400.5, height: 500 },
+    { width: "400", height: 500 },
+    { width: Infinity, height: 500 },
+    { width: 400, height: NaN },
+    { width: 400, height: 500, extra: 1 },
+  ]) {
+    assert.throws(() => validateChart({ ...chart, layout }));
+  }
+});

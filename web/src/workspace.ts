@@ -203,6 +203,7 @@ export function validateChart(value: unknown): ChartSpec {
     "config",
     "outliers",
     "size",
+    "layout",
   ]);
   const kind = enumValue(v.kind, ["timeseries", "image"]);
   const source = object(v.source);
@@ -226,6 +227,26 @@ export function validateChart(value: unknown): ChartSpec {
     distinct(series.map(seriesId), "series identity");
     binding = { mode: "explicit", series };
   } else throw new Error("Unknown source mode.");
+  let layout: ChartSpec["layout"];
+  if (v.layout !== undefined) {
+    const dimensions = object(v.layout, ["width", "height"]);
+    const width = dimensions.width,
+      height = dimensions.height;
+    if (
+      typeof width !== "number" ||
+      !Number.isInteger(width) ||
+      width < 300 ||
+      width > 4096 ||
+      typeof height !== "number" ||
+      !Number.isInteger(height) ||
+      height < 240 ||
+      height > 2160
+    )
+      throw new Error(
+        "Card dimensions must be whole CSS pixels: width 300–4096, height 240–2160.",
+      );
+    layout = { width, height };
+  }
   return {
     id: id(v.id),
     title: text(v.title, "chart title", 256),
@@ -234,6 +255,7 @@ export function validateChart(value: unknown): ChartSpec {
     config: validateConfig(v.config),
     outliers: enumValue(v.outliers, ["all", "robust"]),
     size: enumValue(v.size, ["normal", "wide"]),
+    ...(layout ? { layout } : {}),
   };
 }
 export function validateWorkspace(value: unknown): Workspace {
