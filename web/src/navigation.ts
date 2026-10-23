@@ -1,6 +1,9 @@
 import type uPlot from "uplot";
 import type { NavigationAxis, PlotInteraction } from "./workspace-types";
 
+// Keep the pure math exports usable in Node unit tests.
+if (typeof document !== "undefined") void import("./zoom-selection.css");
+
 export type Bounds = [number, number];
 export interface Viewport {
   x: Bounds;
@@ -11,8 +14,22 @@ export interface NavigationScale {
   asinh?: number;
   dir?: number;
 }
-type Pin = "a" | "b" | "threshold";
-type Pins = Record<Pin, number | null>;
+type Pin = "a" | "b" | "threshold" | "yA" | "yB";
+type Pins = Record<"a" | "b" | "threshold", number | null> & {
+  yA?: number | null;
+  yB?: number | null;
+};
+export const AXIS_TOLERANCE = 12;
+export const MIN_DRAG = 3;
+/** CSS-pixel tolerance, shared by both the preview and committed viewport. */
+export function inferZoomAxes(dx: number, dy: number): NavigationAxis | null {
+  const x = Math.abs(dx),
+    y = Math.abs(dy);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (x < MIN_DRAG && y < MIN_DRAG) return null;
+  if (x > AXIS_TOLERANCE && y > AXIS_TOLERANCE) return "both";
+  return x >= y ? "x" : "y";
+}
 export const HISTORY_LIMIT = 64;
 
 export function transform(value: number, scale: NavigationScale): number {
@@ -110,6 +127,7 @@ interface Gesture {
   mode: PlotInteraction["mode"];
   pin?: Pin;
   moved: boolean;
+  placing: boolean;
 }
 
 /** Opt-in DOM controller. One instance belongs to exactly one rendered uPlot. */
@@ -142,8 +160,10 @@ export class PlotNavigation {
     );
     this.previousTouchAction = u.over.style.touchAction;
     u.over.style.touchAction = "none";
+    u.root.classList.add("plot-navigation");
     const signal = this.abort.signal;
     u.over.addEventListener("pointerdown", this.down, { signal });
+    u.over.addEventListener("contextmenu", this.contextmenu, { signal });
     u.over.addEventListener("pointermove", this.move, { signal });
     u.over.addEventListener("pointerup", this.up, { signal });
     u.over.addEventListener("pointercancel", this.cancel, { signal });
@@ -159,6 +179,8 @@ export class PlotNavigation {
     u.root.addEventListener("keyup", this.keyup, { signal });
     u.root.addEventListener("focusout", this.blur, { signal });
     window.addEventListener("blur", this.blur, { signal });
+    window.addEventListener("keydown", this.spaceDown, { signal });
+    window.addEventListener("keyup", this.keyup, { signal });
     this.cursor();
   }
   configure(options: PlotInteraction) {
@@ -224,7 +246,9 @@ export class PlotNavigation {
   }
   private cursor() {
     this.u.over.style.cursor =
-      this.space || this.options.mode === "pan"
+      this.gesture?.mode === "pan" ||
+      this.space ||
+      (!this.options.directGestures && this.options.mode === "pan")
         ? this.gesture
           ? "grabbing"
           : "grab"
@@ -244,38 +268,92 @@ export class PlotNavigation {
         e.clientY <= r.bottom,
     };
   }
+  private suppressHover() {
+    this.u.root.classList.add("plot-pan-hover-hidden");
+    this.u.setCursor({ left: -10, top: -10 }, false);
+    this.options.onHover?.(null);
+  }
+  private zoomAxes(g: Gesture, x: number, y: number) {
+    return this.options.inferZoomAxes
+      ? inferZoomAxes(x - g.x, y - g.y)
+      : this.options.axis;
+  }
+  private nearestPin(x: number, y: number, axis?: "x" | "y"): Pin | undefined {
+    const pins = this.getPins();
+    const candidates: Pin[] =
+      axis === "x"
+        ? ["a", "b"]
+        : axis === "y"
+          ? ["yA", "yB"]
+          : ["a", "b", "yA", "yB"];
+    let closest: Pin | undefined,
+      distance = 8;
+    for (const pin of candidates) {
+      const value = pins[pin];
+      if (value == null || !Number.isFinite(value)) continue;
+      const horizontal = pin === "yA" || pin === "yB";
+      const d = Math.abs(
+        this.u.valToPos(value, horizontal ? "y" : "x") - (horizontal ? y : x),
+      );
+      if (d <= distance) {
+        closest = pin;
+        distance = d;
+      }
+    }
+    return closest;
+  }
   private pinAt(pin: Pin, x: number, y: number) {
-    const value = this.u.posToVal(
-      pin === "threshold" ? y : x,
-      pin === "threshold" ? "y" : "x",
-    );
+    const horizontal = pin === "threshold" || pin === "yA" || pin === "yB";
+    const value = this.u.posToVal(horizontal ? y : x, horizontal ? "y" : "x");
     if (Number.isFinite(value)) {
       this.putPin(pin, value);
-      this.options.onPin?.(pin, value);
+      if (pin === "yA" || pin === "yB")
+        this.options.onHorizontalPin?.(pin === "yA" ? "a" : "b", value);
+      else this.options.onPin?.(pin, value);
     }
   }
+  private contextmenu = (e: MouseEvent) => {
+    if (this.options.directGestures) e.preventDefault();
+  };
   private down = (e: PointerEvent) => {
-    if (e.button !== 0 || !e.isPrimary || this.gesture) return;
+    const direct = this.options.directGestures;
+    if (
+      (e.button !== 0 && !(direct && e.button === 2)) ||
+      !e.isPrimary ||
+      this.gesture
+    )
+      return;
     const view = this.viewport();
     if (!view) return;
     e.preventDefault();
     this.u.root.focus({ preventScroll: true });
-    const { x, y } = this.xy(e),
-      mode = this.space ? "pan" : this.options.mode;
+    const { x, y } = this.xy(e);
+    let mode =
+      this.space || (direct && e.button === 2) ? "pan" : this.options.mode;
+    if (
+      direct &&
+      mode !== "inspect" &&
+      mode !== "threshold" &&
+      !this.space &&
+      e.button !== 2
+    )
+      mode = "zoom";
     let pin: Pin | undefined;
+    const placing = mode === "inspect" || mode === "threshold";
     if (mode === "inspect") {
-      const pins = this.getPins();
-      const near = (["a", "b"] as const)
-        .map((p) => ({
-          p,
-          distance:
-            pins[p] === null
-              ? Infinity
-              : Math.abs(this.u.valToPos(pins[p]!, "x") - x),
-        }))
-        .sort((a, b) => a.distance - b.distance);
-      pin = near[0].distance <= 8 ? near[0].p : this.options.activePin;
+      const axis = this.options.cursorAxis ?? "x";
+      pin =
+        this.nearestPin(x, y, axis) ??
+        (axis === "y"
+          ? this.options.activePin === "a"
+            ? "yA"
+            : "yB"
+          : this.options.activePin);
     } else if (mode === "threshold") pin = "threshold";
+    else if (direct && mode === "zoom") {
+      pin = this.nearestPin(x, y);
+      if (pin) mode = "inspect";
+    }
     this.gesture = {
       id: e.pointerId,
       x,
@@ -284,21 +362,29 @@ export class PlotNavigation {
       mode,
       pin,
       moved: false,
+      placing,
     };
     try {
       this.u.over.setPointerCapture(e.pointerId);
     } catch {
       this.gesture = undefined;
     }
+    if (this.gesture?.mode === "pan") this.suppressHover();
     this.cursor();
   };
   private move = (e: PointerEvent) => {
     const { x, y, w, h, inside } = this.xy(e);
-    const value = this.u.posToVal(x, "x");
-    this.options.onHover?.(inside && Number.isFinite(value) ? value : null);
     const g = this.gesture;
+    if (g?.mode === "pan") this.suppressHover();
+    else {
+      // Only fresh pointer movement may re-enable hover, never pan release/cancel.
+      if (e.type === "pointermove")
+        this.u.root.classList.remove("plot-pan-hover-hidden");
+      const value = this.u.posToVal(x, "x");
+      this.options.onHover?.(inside && Number.isFinite(value) ? value : null);
+    }
     if (!g || e.pointerId !== g.id || !w || !h) return;
-    g.moved ||= Math.hypot(x - g.x, y - g.y) >= 3;
+    g.moved ||= Math.hypot(x - g.x, y - g.y) >= MIN_DRAG;
     if (!g.moved) return;
     if (g.mode === "pan")
       this.panFrom(
@@ -308,20 +394,25 @@ export class PlotNavigation {
         false,
       );
     else if (g.pin) this.pinAt(g.pin, x, y);
-    else if (g.mode === "zoom")
+    else if (g.mode === "zoom") {
+      const axis = this.zoomAxes(g, x, y);
       this.u.setSelect(
-        {
-          left: this.options.axis === "y" ? 0 : Math.min(x, g.x),
-          top: this.options.axis === "x" ? 0 : Math.min(y, g.y),
-          width: this.options.axis === "y" ? w : Math.abs(x - g.x),
-          height: this.options.axis === "x" ? h : Math.abs(y - g.y),
-        },
+        axis
+          ? {
+              left: axis === "y" ? 0 : Math.min(x, g.x),
+              top: axis === "x" ? 0 : Math.min(y, g.y),
+              width: axis === "y" ? w : Math.abs(x - g.x),
+              height: axis === "x" ? h : Math.abs(y - g.y),
+            }
+          : { left: 0, top: 0, width: 0, height: 0 },
         false,
       );
+    }
   };
   private release() {
     const g = this.gesture;
     this.gesture = undefined;
+    if (g?.mode === "pan") this.suppressHover();
     if (g && this.u.over.hasPointerCapture(g.id))
       this.u.over.releasePointerCapture(g.id);
     this.u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
@@ -335,10 +426,11 @@ export class PlotNavigation {
     const { x, y } = this.xy(e);
     if (g.pin) this.pinAt(g.pin, x, y);
     if (g.mode === "zoom" && g.moved) {
-      const axis = this.options.axis;
+      const axis = this.zoomAxes(g, x, y);
       if (
-        (axis === "y" || Math.abs(x - g.x) >= 3) &&
-        (axis === "x" || Math.abs(y - g.y) >= 3)
+        axis &&
+        (axis === "y" || Math.abs(x - g.x) >= MIN_DRAG) &&
+        (axis === "x" || Math.abs(y - g.y) >= MIN_DRAG)
       ) {
         const xs = [this.u.posToVal(x, "x"), this.u.posToVal(g.x, "x")].sort(
           (a, b) => a - b,
@@ -356,11 +448,16 @@ export class PlotNavigation {
       this.options.onViewChange?.();
     }
     this.release();
+    if (g.placing && this.options.directGestures) {
+      this.options = { ...this.options, mode: "zoom" };
+      this.cursor();
+    }
   };
   cancelGesture() {
     this.cancel();
   }
-  private cancel = () => {
+  private cancel = (event?: PointerEvent) => {
+    if (event && this.gesture && event.pointerId !== this.gesture.id) return;
     const g = this.release();
     if (g?.mode === "pan") this.apply(g.view, false);
     // Pin movements are already published in data coordinates; cancellation keeps
@@ -388,6 +485,22 @@ export class PlotNavigation {
   private doubleClick = (e: MouseEvent) => {
     e.preventDefault();
     this.reset();
+  };
+  private spaceDown = (e: KeyboardEvent) => {
+    if (
+      !this.options.directGestures ||
+      e.code !== "Space" ||
+      editable(e.target) ||
+      e.ctrlKey ||
+      e.metaKey ||
+      e.altKey
+    )
+      return;
+    this.space = true;
+    // Holding Space before the initial plot click should work, without taking
+    // keyboard scrolling away from the rest of the workspace.
+    if (this.u.over.matches(":hover")) e.preventDefault();
+    this.cursor();
   };
   private keydown = (e: KeyboardEvent) => {
     if (editable(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -430,5 +543,6 @@ export class PlotNavigation {
     this.options.onHover?.(null);
     this.u.over.style.touchAction = this.previousTouchAction;
     this.u.over.style.cursor = "";
+    this.u.root.classList.remove("plot-navigation", "plot-pan-hover-hidden");
   }
 }

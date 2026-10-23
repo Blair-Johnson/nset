@@ -1,0 +1,14 @@
+/* A visible selection in CSS pixels, independent of device pixel ratio. */
+.plot-navigation .u-select {
+  background: rgba(115, 190, 255, 0.22);
+  border: 2px solid #75bdff;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+/* Native hover is transient; pinned comparisons are drawn separately. */
+.plot-navigation.plot-pan-hover-hidden .u-cursor-x,
+.plot-navigation.plot-pan-hover-hidden .u-cursor-y,
+.plot-navigation.plot-pan-hover-hidden .u-cursor-pt {
+  visibility: hidden !important;
+}
