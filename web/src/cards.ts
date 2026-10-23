@@ -220,7 +220,7 @@ export class ChartCard {
         next: start,
       };
       handle.setPointerCapture(event.pointerId);
-      handle.focus();
+      handle.focus({ preventScroll: true });
     };
     handle.onpointermove = (event) => {
       const g = this.resizeGesture;
