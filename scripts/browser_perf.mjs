@@ -29,7 +29,9 @@ try {
   await card.locator("canvas").waitFor();
   await expect(card.locator(".card-status")).toHaveText("");
   const linearMs = performance.now() - start;
-  await card.getByRole("button", { name: "Inspect", exact: true }).click();
+  await card
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await card.getByLabel("Cursor A coordinate", { exact: true }).fill("50.5");
   await card.getByLabel("Cursor A coordinate", { exact: true }).press("Tab");
   const actual = Number(
@@ -44,7 +46,9 @@ try {
   await card.getByLabel("Chart actions", { exact: true }).click();
   await card.getByRole("button", { name: "Edit chart", exact: true }).click();
   const editor = page.getByRole("dialog", { name: "Edit chart", exact: true });
-  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor
+    .getByRole("heading", { name: "Appearance", exact: true })
+    .scrollIntoViewIfNeeded();
   const cubicStart = performance.now();
   await editor
     .getByLabel("Between observations", { exact: true })

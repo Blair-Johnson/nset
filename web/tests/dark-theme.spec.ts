@@ -236,7 +236,9 @@ for (const width of [1440, 390])
     ).toBeLessThanOrEqual(width);
     await capture(page, info, "mixed-dashboard");
     const card = page.locator('[data-card-kind="timeseries"]').first();
-    await card.getByRole("button", { name: "Inspect", exact: true }).click();
+    await card
+      .getByRole("button", { name: "Add vertical cursor", exact: true })
+      .click();
     await readable(
       page,
       ".card-pin-label, .card-coordinate, .card-value-table",
@@ -247,7 +249,9 @@ for (const width of [1440, 390])
     await card.getByRole("button", { name: "Edit chart", exact: true }).click();
     await expect(page.locator(".chart-editor")).toBeVisible();
     for (const tab of ["Data", "Axes", "Appearance"]) {
-      await page.getByRole("tab", { name: tab, exact: true }).click();
+      await page
+        .getByRole("heading", { name: tab, exact: true })
+        .scrollIntoViewIfNeeded();
       await readable(
         page,
         ".ce-tabs button, .ce-panel:not([hidden]) label, .ce-help:not(:empty), .ce-muted, .ce-primary",

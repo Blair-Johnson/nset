@@ -30,8 +30,11 @@ def main():
     ids = []
     for index, name in enumerate(["baseline · Adam", "cosine schedule", "high-rate stress test"]):
         rng = random.Random(42 + index)
-        with client.start_run(experiment, name, params={"lr": [0.001, 0.003, 0.01][index],
-                              "seed": 42 + index, "optimizer": "AdamW"},
+        with client.start_run(experiment, name, params={"train.optim.lr": [0.001, 0.003, 0.01][index],
+                              "train.optim.batch_size": 64, "train.optim.name": "AdamW",
+                              "train.seed": 42 + index, "data.source.root_path": "/datasets/vision",
+                              "data.augmentation": {"flip": True, "crop_size": [224, 224]},
+                              "model": {"architecture": "resnet18", "pretrained": False}},
                               tags={"purpose": "visual verification"}) as run:
             ids.append(run.id)
             batch = []
@@ -45,7 +48,7 @@ def main():
                 for key, value in [("validation/loss", loss), ("train/loss", loss * 0.83),
                                    ("train/learning_rate", 0.001 * (1 + math.cos(min(t, 1) * math.pi)) + 1e-6)]:
                     batch.append({"key": key, "step": step, "value": value,
-                                  "timestamp": 1735689600000 + step * 25})
+                                  "timestamp": run.data["created_at"] + step * 25})
                 if len(batch) >= 9000:
                     run.log_batch(batch)
                     batch = []
@@ -55,7 +58,7 @@ def main():
                 fraction = frame / (args.frames - 1)
                 step = round(fraction * (args.points - 1) * (7 + index))
                 run.log_image_bytes("validation/prediction", frame_png(fraction, index), step=step,
-                                    timestamp=1735689600000 + step * 25)
+                                    timestamp=run.data["created_at"] + step * 25)
         print(json.dumps({"kind": "demo_run", "run_id": run.id, "name": name}), flush=True)
     print(json.dumps({"kind": "demo_complete", "experiment_id": experiment["id"],
                       "run_ids": ids, "points_per_metric": args.points, "frames_per_run": args.frames}))

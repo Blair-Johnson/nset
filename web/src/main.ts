@@ -27,6 +27,9 @@ import { openChartEditor } from "./chart-editor";
 import { experimentTable, runTable, tableState } from "./browser-tables";
 import { renderRunDetail } from "./run-detail";
 import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
+import { createDashboardControls } from "./workspace-controls";
+import { dashboardSettings, withDashboardSettings } from "./workspace-settings";
+import type { DashboardControls } from "./dashboard-controls";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -709,7 +712,23 @@ function workspaceToolbar(workspace: Workspace) {
   undoButton.disabled = !undo.get(workspace.id)?.length;
   undoButton.title = "Undo the last view edit";
   if (runDrawer) host.append(runDrawer.toggle);
-  host.append(views, search, undoButton, add, more);
+  host.append(views);
+  const settings = dashboardSettings(workspace);
+  if (settings.count) {
+    const apply = (controls: DashboardControls) =>
+      change(workspace, () => {
+        workspace.sections = withDashboardSettings(workspace, controls);
+      });
+    host.append(
+      createDashboardControls({
+        axis: settings.axis,
+        smoothing: settings.smoothing,
+        onAxis: (axis) => apply({ axis }),
+        onSmoothing: (smoothingStrength) => apply({ smoothingStrength }),
+      }),
+    );
+  }
+  host.append(search, undoButton, add, more);
   for (const d of host.querySelectorAll<HTMLDetailsElement>("details"))
     if (openMenus.includes(d.dataset.menu)) d.open = true;
   if (focused)

@@ -15,14 +15,17 @@ def main():
     server = Server().start()
     try:
         experiment = server.client.experiment("Browser verification")
-        run_a = server.client.start_run(experiment, "Curve A", params={"lr": 0.001})
-        run_b = server.client.start_run(experiment, "Curve B", params={"lr": 0.003})
+        run_a = server.client.start_run(experiment, "Curve A", params={
+            "train.optim.lr": 0.001, "train.optim.batch_size": 64,
+            "data.source.root_path": "/datasets/vision/train",
+            "model": {"width": 128, "layers": [32, 64, 128], "pretrained": False}})
+        run_b = server.client.start_run(experiment, "Curve B", params={"train.optim.lr": 0.003})
         for run, points in [(run_a, [(0, 1), (10, 3), (20, 1)]),
                             (run_b, [(0, 2), (5, 2), (20, 4)])]:
             run.log_batch([{"key": "train/loss", "step": x, "value": y,
-                            "timestamp": 1735689600000 + x * 1000} for x, y in points])
+                            "timestamp": run.data["created_at"] + x * 1000} for x, y in points])
             run.log_batch([{"key": "eval/score", "step": x, "value": y,
-                            "timestamp": 1735689600000 + x * 1000}
+                            "timestamp": run.data["created_at"] + x * 1000}
                            for x, y in [(0, .1), (10, .8), (20, .9)]])
             for frame in range(4):
                 run.log_image_bytes("train/prediction", frame_png(frame / 3), step=frame * 10)
@@ -34,7 +37,8 @@ def main():
         remote.finish()
         env = dict(os.environ, NSET_BROWSER_URL=server.url, NSET_BROWSER_TOKEN=server.token,
                    NSET_BROWSER_FIXTURE=json.dumps({"experiment": experiment["id"],
-                       "a": run_a.id, "b": run_b.id, "other": other["id"], "remote": remote.id}))
+                       "a": run_a.id, "b": run_b.id, "startA": run_a.data["created_at"],
+                        "startB": run_b.data["created_at"], "other": other["id"], "remote": remote.id}))
         subprocess.run(["node", str(ROOT / "scripts/browser_verify.mjs")], env=env, check=True)
     finally:
         server.close()

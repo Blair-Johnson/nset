@@ -483,7 +483,8 @@ h3 {
 .workspace-toolbar #chart-search {
   min-width: 120px;
   margin-left: auto;
-  width: 220px;
+  flex: 0 1 180px;
+  width: 180px;
 }
 .dashboard {
   display: flex;
@@ -677,7 +678,7 @@ dialog::backdrop {
     flex-basis: var(--card-width, 100%);
   }
   .workspace-toolbar #chart-search {
-    width: 180px;
+    width: 150px;
   }
 }
 @media (max-width: 640px) {

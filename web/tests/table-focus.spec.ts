@@ -83,7 +83,7 @@ test("Space preserves the same run checkbox through row reordering and duplicate
   await expect(
     checkbox
       .locator("xpath=ancestor::tr")
-      .getByRole("button", { name: "Duplicate name" }),
+      .getByRole("button", { name: "Duplicate name", exact: true }),
   ).toBeFocused();
   const calls = await page.evaluate(() => (window as any).__table.focusCalls);
   expect(calls.slice(-2)).toEqual([

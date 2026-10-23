@@ -100,7 +100,9 @@ try {
     .filter({ has: page.locator(".section-toggle", { hasText: "train" }) });
   await expect(train.locator(".dashboard-cell")).toHaveCount(2);
   await screenshot("ux-03-mixed-dashboard");
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await coordinate(loss, "Cursor A coordinate", 5);
   await coordinate(loss, "Cursor B coordinate", 10);
   assert.equal(await value(loss, "Curve A", 0), 2);
@@ -113,42 +115,50 @@ try {
     .getByRole("button", { name: "Fit configured range", exact: true })
     .click();
   assert.equal(await loss.locator(".card-value-table").textContent(), answers);
-  await loss.getByRole("button", { name: "Pan", exact: true }).click();
   const surface = loss.locator(".u-over");
   const bounds = await surface.boundingBox();
   await page.mouse.move(
     bounds.x + bounds.width * 0.5,
     bounds.y + bounds.height * 0.5,
   );
-  await page.mouse.down();
+  await page.mouse.down({ button: "right" });
+  await expect(loss.locator(".uplot")).toHaveClass(/plot-pan-hover-hidden/);
   await page.mouse.move(
     bounds.x + bounds.width * 0.65,
     bounds.y + bounds.height * 0.55,
     { steps: 5 },
   );
-  await page.mouse.up();
+  await page.mouse.up({ button: "right" });
   await loss
     .getByRole("button", { name: "Previous view", exact: true })
     .click();
   await surface.focus();
   await page.keyboard.press("+");
   await page.keyboard.press("0");
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   assert.equal(await loss.locator(".card-value-table").textContent(), answers);
-  await loss.getByRole("button", { name: "Threshold", exact: true }).click();
-  await coordinate(loss, "Threshold value", 2);
+  await loss
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
+  await coordinate(loss, "Cursor A level", 2);
   const aCross = loss.locator(".card-crossings").filter({ hasText: "Curve A" }),
     bCross = loss.locator(".card-crossings").filter({ hasText: "Curve B" });
   await aCross.locator("summary").click();
   await bCross.locator("summary").click();
   await expect(aCross).toContainText("5, 15");
   await expect(bCross).toContainText("0 – 5");
+  await coordinate(loss, "Cursor B level", 3);
+  await expect(loss.locator(".card-delta-y")).toContainText("Δ Y 1");
   await screenshot("ux-04-cursors");
   await score
     .locator("canvas")
     .evaluate((el) => (window.__neighborCanvas = el));
   let editor = await edit(loss);
-  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
+  await editor
+    .getByRole("heading", { name: "Axes", exact: true })
+    .scrollIntoViewIfNeeded();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("log");
   await screenshot("ux-05-chart-editor");
   await editor
@@ -163,7 +173,9 @@ try {
     true,
     "editing a chart does not remount its neighbor",
   );
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await coordinate(loss, "Cursor A coordinate", 5);
   await coordinate(loss, "Cursor B coordinate", 10);
   assert.equal(await value(loss, "Curve A", 0), 2);
@@ -175,7 +187,9 @@ try {
   await editor.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(loss.locator(".card-title")).toHaveText("loss");
   editor = await edit(loss);
-  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor
+    .getByRole("heading", { name: "Appearance", exact: true })
+    .scrollIntoViewIfNeeded();
   await editor
     .getByLabel("Between observations", { exact: true })
     .selectOption("pchip");
@@ -184,38 +198,53 @@ try {
     .click();
   await editor.waitFor({ state: "hidden" });
   await loss.locator("canvas").waitFor();
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await coordinate(loss, "Cursor A coordinate", 5);
   assert.equal(await value(loss, "Curve A", 0), 2.5);
   editor = await edit(loss);
-  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
+  await editor
+    .getByRole("heading", { name: "Appearance", exact: true })
+    .scrollIntoViewIfNeeded();
   await editor
     .getByLabel("Between observations", { exact: true })
     .selectOption("linear");
-  await editor.getByLabel("Smooth the curve", { exact: true }).check();
+  await editor
+    .getByRole("slider", { name: "Smoothing strength", exact: true })
+    .fill("50");
   await editor
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await editor.waitFor({ state: "hidden" });
   await loss.locator("canvas").waitFor();
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await coordinate(loss, "Cursor A coordinate", 5);
-  assert.equal(await value(loss, "Curve A", 0), 1.2);
+  assert.equal(await value(loss, "Curve A", 0), 1.1);
   editor = await edit(loss);
-  await editor.getByRole("tab", { name: "Appearance", exact: true }).click();
-  await editor.getByLabel("Smooth the curve", { exact: true }).uncheck();
-  await editor.getByRole("tab", { name: "Axes", exact: true }).click();
+  await editor
+    .getByRole("heading", { name: "Appearance", exact: true })
+    .scrollIntoViewIfNeeded();
+  await editor
+    .getByRole("slider", { name: "Smoothing strength", exact: true })
+    .fill("0");
+  await editor
+    .getByRole("heading", { name: "Axes", exact: true })
+    .scrollIntoViewIfNeeded();
   await editor.getByLabel("Y scale", { exact: true }).selectOption("linear");
   await editor
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await editor.waitFor({ state: "hidden" });
   await loss.locator("canvas").waitFor();
-  await loss.getByRole("button", { name: "Inspect", exact: true }).click();
+  await loss
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await loss
     .getByRole("button", { name: "Clear cursors", exact: true })
     .click();
-  await loss.getByRole("button", { name: "Pan", exact: true }).click();
   const plotPixels = await pixelStats(page, loss.locator(".u-over"));
   assert.ok(
     plotPixels.blue > 50 && plotPixels.violet > 50,
@@ -248,7 +277,9 @@ try {
   const custom = card("Cross-experiment comparison");
   await custom.scrollIntoViewIfNeeded();
   await custom.locator("canvas").waitFor();
-  await custom.getByRole("button", { name: "Inspect", exact: true }).click();
+  await custom
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await coordinate(custom, "Cursor A coordinate", 5);
   assert.equal(await value(custom, "Curve A", 0), 2);
   assert.equal(await value(custom, "Remote baseline", 0), 3);
