@@ -76,4 +76,4 @@ NSET_BINARY="$PWD/target/release/nset" pixi run python -m unittest discover -s t
 NSET_BINARY="$PWD/target/release/nset" pixi run python scripts/benchmark.py
 ```
 
-The server deliberately starts simple: one SQLite worker, transactional metric batches, snapshot-bounded reads, and a bounded work queue. Very large histories are complete but still consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.
+The server deliberately starts simple: one SQLite writer and two read workers, transactional metric batches, snapshot-bounded reads, and bounded work queues. Very large histories are complete but still consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.
