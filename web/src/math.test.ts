@@ -248,3 +248,53 @@ test('unrepresentable normalized interior coordinates fail rather than returning
     assert.equal(makeInterpolator([[0, 2], [1e300, 2]], kind).at(Number.MIN_VALUE), 2);
   }
 });
+
+test('relative coordinates use each run creation time, not its first logged point', () => {
+  const startA = 1_700_000_000_000, startB = startA + 86_400_000;
+  const a = [point(1, 70, startA + 5000, 2), point(2, 90, startA + 7000, 6)];
+  const b = [point(1, 0, startB + 5000, 2), point(2, 1, startB + 7000, 6)];
+  const before = structuredClone(a);
+  assert.deepEqual(canonicalize(a, 'relative', startA), [[5000, 2], [7000, 6]]);
+  assert.deepEqual(canonicalize(a, 'relative', startA), canonicalize(b, 'relative', startB));
+  for (const kind of kinds) {
+    const curve = makeInterpolator(canonicalize(a, 'relative', startA), kind);
+    assert.equal(curve.at(0), null); // no extrapolation across late logging
+    assert.equal(curve.at(5500), 3);
+    assert.deepEqual(curve.crossings(3), { points: [5500], plateaus: [] });
+  }
+  assert.deepEqual(a, before);
+});
+
+test('relative canonicalization sorts elapsed values and retains seq/tie semantics', () => {
+  const data = [point(8, 0, 110, 8), point(9, 1, 90, 9), point(7, 2, 110, 7),
+    point(8, 3, 110, 18), point(1, 4, 100, 1)];
+  assert.deepEqual(canonicalize(data, 'relative', 100), [[-10, 9], [0, 1], [10, 18]]);
+  assert.deepEqual(canonicalize([point(1, 0, 0.125, 1)], 'relative', 0), [[0.125, 1]]);
+  assert.deepEqual(canonicalize([], 'relative', 0), []);
+});
+
+test('relative origin is mandatory and finite even for empty data; subtraction must be finite', () => {
+  for (const origin of [undefined, NaN, Infinity, -Infinity]) {
+    assert.throws(() => canonicalize([], 'relative', origin), /runStart must be finite/);
+    assert.throws(() => canonicalize([point(1, 0, 10, 2)], 'relative', origin), /runStart/);
+    // Origins are irrelevant for the original axes; their behavior is unchanged.
+    assert.deepEqual(canonicalize([point(1, 0, 10, 2)], 'step', origin), [[0, 2]]);
+    assert.deepEqual(canonicalize([point(1, 0, 10, 2)], 'timestamp', origin), [[10, 2]]);
+  }
+  assert.throws(() => canonicalize([point(1, 0, Number.MAX_VALUE, 2)], 'relative', -Number.MAX_VALUE), /Relative timestamp/);
+  for (const field of ['seq', 'step', 'timestamp', 'value'] as const) {
+    for (const invalid of [NaN, Infinity, -Infinity]) {
+      const discarded = { ...point(1, 0, 10, 1), [field]: invalid };
+      assert.throws(() => canonicalize([point(2, 0, 10, 2), discarded], 'relative', 5), RangeError);
+    }
+  }
+});
+
+test('relative irregular-grid PCHIP keeps independently known interpolation and roots', () => {
+  const start = 1_700_000_000_000;
+  const data = [point(1, 0, start + 5000, 0), point(2, 1, start + 6000, 1), point(3, 2, start + 8000, 2)];
+  const curve = makeInterpolator(canonicalize(data, 'relative', start), 'pchip');
+  near(curve.at(5500), 349 / 624);
+  near(curve.at(7000), 509 / 312);
+  near(curve.crossings(509 / 312).points[0], 7000);
+});
