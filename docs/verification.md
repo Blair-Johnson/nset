@@ -1,6 +1,8 @@
 # Verification record
 
-Integration acceptance is in progress; this file will be updated after the final plot-configuration merge and all-source verification run.
+Full integrated acceptance passed in rx r23 against source commit `780d988747346cb3d91b43d849cfd3b6a4181f95`, exit 0 in 78.37 seconds. The command was `CARGO_TARGET_DIR="$PWD/target" rx run -t verification,acceptance bash scripts/verify.sh` from the integration worktree. Later delivery changes only update documentation.
+
+The successful run includes 196 frontend/numerical/configuration tests, 25 Rust tests, strict Clippy and Rust formatting, TypeScript and production/release builds, 11 real HTTP/client tests, 11 Chromium fixtures, the real-server browser acceptance scenario with PNG-pixel assertions, and both 100,000-point throughput probes. No tests were skipped. Rx r22 had passed the first stages but stopped on a new test's use of visibility-dependent `innerText`; comparing stable DOM text repaired that assertion. Runtime rejection now demonstrably preserves the active chart, readouts and saved settings.
 
 ## Environment and scope
 
@@ -30,6 +32,10 @@ A live fullscreen check found that fullscreening only the OpenSeadragon canvas h
 
 Rx r19 ingested 100,000 scalar observations in 1,000-point batches over loopback HTTP using the release executable. It measured 2.490 seconds for ingestion (about 40,165 observations/second) and 0.220 seconds for complete retrieval. This includes the synchronous Python client and JSON/HTTP overhead; it is one local observation, not a general throughput guarantee or a browser-rendering benchmark. The run records the executable SHA-256 and environment fingerprint.
 
+The final r23 run measured the same 100,000 observations at 4.807 seconds ingestion (about 20,801 observations/second) and 0.228 seconds complete retrieval. The variation from r19 is retained rather than presenting the faster run as guaranteed performance. The final binary SHA-256 is `e20a7aaf34563b1180f14c07784ef374d56f226f03ac2c829dfdad4fb13d4179`.
+
+A separate real-browser probe in r23 loaded and rendered one unsampled 100,000-point series in 251.87 ms and switched it to PCHIP in 210.37 ms. The pinned linear query matched the known interpolated value; no uncaught page errors occurred. Chromium reported approximately 76.6 MB used JavaScript heap (a coarse browser estimate, not total process/GPU memory). Timings include automated interaction, HTTP and analysis work and are single local observations; this is not a concurrent-user or million-point capacity claim.
+
 ## Reproduce
 
 ```sh
@@ -38,9 +44,11 @@ pixi run web-install
 bash scripts/verify.sh
 ```
 
-The full script builds production frontend assets, runs numerical/frontend tests, Rust tests and Clippy, builds the release executable, then runs real HTTP tests, fixture-browser tests, real-server browser tests, and a throughput probe. `scripts/browser_verify.py` creates an isolated temporary server and known-answer dataset; it does not alter the preview database.
+The full script builds production frontend assets, runs numerical/frontend tests, Rust tests and Clippy, builds the release executable, then runs real HTTP tests, fixture-browser tests, real-server browser tests, an HTTP throughput probe, and a 100,000-point dense-browser probe. `scripts/browser_verify.py` creates an isolated temporary server and known-answer dataset; it does not alter the preview database.
 
-Recorded commands and snapshots can be inspected with `rx show RUN` and `rx tail RUN`. The initial real-browser screenshots are retained under `../.rx-worktrees/r18/artifacts/screenshots/` relative to the integration worktree; fixture screenshots are under `../.rx-worktrees/r14/web/test-results/`. Each final run retains its own artifacts rather than overwriting the earlier evidence.
+Recorded commands and snapshots can be inspected with `rx show r23` and `rx tail r23`. Final screenshots are retained at `../not-shitty-experiment-tracker-worktrees/.rx-worktrees/r23/artifacts/screenshots/` relative to the main repository. They include timeseries, log scales, configuration, timestamp axes, image scrubbing, preserved image zoom, fullscreen timeline controls, narrow layout, and `dense-100k.png`. Fixture captures are in the same run's `web/test-results/`. Logs live in `.git/rx/runs/r23/`. These are local ignored artifacts, not embedded or committed source files.
+
+The final pixel inspection counted 1,448 cyan and 1,369 violet plot pixels with cursor overlays cleared, and 6,176 gold plus 260,938 blue image pixels. Spatial thumbnails showed the expected peaked curve, flat-then-rising comparison curve, and image feature. These content checks complement numerical assertions and camera/layout checks; they do not prove every cosmetic option looks correct.
 
 ## Deliberate limits
 
