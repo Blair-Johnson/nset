@@ -12,6 +12,6 @@ pixi run cargo clippy --locked --all-targets -- -D warnings
 pixi run cargo build --release --locked
 pixi run python -m unittest discover -s tests -p 'test_*.py'
 pixi run browser-install
-pixi run npm --prefix web run test:browser
+CI=1 pixi run npm --prefix web run test:browser
 pixi run python scripts/browser_verify.py
 pixi run python scripts/benchmark.py
