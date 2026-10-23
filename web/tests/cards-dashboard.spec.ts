@@ -600,9 +600,13 @@ test("image pointer anchoring survives actual card maximize and restore", async 
       })
       .click();
     if (maximized)
-      await expect(imageCard.locator(".chart-card")).toHaveClass(/card-maximized/);
+      await expect(imageCard.locator(".chart-card")).toHaveClass(
+        /card-maximized/,
+      );
     else
-      await expect(imageCard.locator(".chart-card")).not.toHaveClass(/card-maximized/);
+      await expect(imageCard.locator(".chart-card")).not.toHaveClass(
+        /card-maximized/,
+      );
     await page.evaluate(async () => {
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
@@ -613,9 +617,12 @@ test("image pointer anchoring survives actual card maximize and restore", async 
       v.viewport.setFlip(true);
       v.viewport.zoomTo(2, undefined, true);
     });
-    await page.waitForFunction(
-      () => !(window as any).cardsFixture.cards[2].images.viewer.isAnimating(),
-    );
+    await page.waitForFunction(() => {
+      const v = (window as any).cardsFixture.cards[2].images.viewer;
+      return (
+        !v.isAnimating() && Math.abs(v.viewport.getRotation(true) - 90) < 1e-8
+      );
+    });
     const pointer = await page.evaluate(() => {
       const s = (window as any).cardsFixture,
         v = s.cards[2].images.viewer;
@@ -626,6 +633,15 @@ test("image pointer anchoring survives actual card maximize and restore", async 
       return {
         x: rect.left + rect.width * 0.58,
         y: rect.top + rect.height * 0.42,
+        diagnostic: {
+          rect: rect.toJSON(),
+          size,
+          anchor: s.imageAnchor,
+          zoom: v.viewport.getZoom(true),
+          center: v.viewport.getCenter(true),
+          targetCenter: v.viewport.getCenter(false),
+          bounds: v.viewport.getBounds(true),
+        },
       };
     });
     await page.mouse.move(pointer.x, pointer.y);
@@ -659,6 +675,9 @@ test("image pointer anchoring survives actual card maximize and restore", async 
         },
       };
     });
+    console.log(
+      JSON.stringify({ kind: "image-card-anchor", maximized, pointer, after }),
+    );
     expect(after.sameViewer).toBe(true);
     expect(Math.hypot(after.x - pointer.x, after.y - pointer.y)).toBeLessThan(
       1.5,
