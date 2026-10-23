@@ -576,3 +576,120 @@ test("offscreen and inactive cards defer loads, unavailable sources stay explici
     "No matching series",
   );
 });
+
+test("image pointer anchoring survives actual card maximize and restore", async ({
+  page,
+}, info) => {
+  await fixture(page);
+  const imageCard = card(page, 2);
+  const canvas = imageCard.locator("[data-role=image-viewer]");
+  await canvas.scrollIntoViewIfNeeded();
+  await expect(imageCard.locator(".frame-info")).toHaveAttribute(
+    "data-step",
+    "0",
+  );
+  await page.evaluate(() => {
+    const s = (window as any).cardsFixture;
+    s.imageViewerIdentity = s.cards[2].images.viewer;
+  });
+  for (const maximized of [true, false]) {
+    await imageCard
+      .getByRole("button", {
+        name: maximized ? "Maximize chart" : "Restore chart",
+        exact: true,
+      })
+      .click();
+    await expect(imageCard).toHaveClass(
+      maximized ? /card-maximized/ : /chart-card/,
+    );
+    await page.evaluate(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      const v = (window as any).cardsFixture.cards[2].images.viewer;
+      v.forceResize();
+      v.viewport.setRotation(90);
+      v.viewport.setFlip(true);
+      v.viewport.zoomTo(2, undefined, true);
+    });
+    await page.waitForFunction(
+      () => !(window as any).cardsFixture.cards[2].images.viewer.isAnimating(),
+    );
+    const pointer = await page.evaluate(() => {
+      const s = (window as any).cardsFixture,
+        v = s.cards[2].images.viewer;
+      const rect = v.container.getBoundingClientRect(),
+        size = v.viewport.getContainerSize();
+      const position = new (v.viewport.getCenter().constructor)(
+        size.x * 0.42,
+        size.y * 0.42,
+      );
+      s.imageAnchor = v.viewport.pointFromPixel(position, true);
+      return {
+        x: rect.left + rect.width * 0.58,
+        y: rect.top + rect.height * 0.42,
+      };
+    });
+    await page.mouse.move(pointer.x, pointer.y);
+    await page.keyboard.down("Alt");
+    await page.mouse.wheel(0, -100);
+    await page.keyboard.up("Alt");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window as any).cardsFixture.cards[2].images.viewer.viewport.getZoom(
+            true,
+          ),
+        ),
+      )
+      .toBeCloseTo(2 * Math.exp(0.2), 5);
+    const after = await page.evaluate(() => {
+      const s = (window as any).cardsFixture,
+        v = s.cards[2].images.viewer;
+      const rect = v.container.getBoundingClientRect(),
+        size = v.viewport.getContainerSize();
+      const p = v.viewport.pixelFromPoint(s.imageAnchor, true);
+      return {
+        x: rect.left + ((size.x - p.x) / size.x) * rect.width,
+        y: rect.top + (p.y / size.y) * rect.height,
+        sameViewer: v === s.imageViewerIdentity,
+        camera: {
+          zoom: v.viewport.getZoom(true),
+          center: v.viewport.getCenter(true),
+          rotation: v.viewport.getRotation(),
+          flip: v.viewport.getFlip(),
+        },
+      };
+    });
+    expect(after.sameViewer).toBe(true);
+    expect(Math.hypot(after.x - pointer.x, after.y - pointer.y)).toBeLessThan(
+      1.5,
+    );
+    await imageCard
+      .getByRole("button", { name: "Next →", exact: true })
+      .click();
+    await expect(imageCard.locator(".frame-info")).toHaveAttribute(
+      "data-step",
+      maximized ? "1" : "2",
+    );
+    const camera = await page.evaluate(() => {
+      const v = (window as any).cardsFixture.cards[2].images.viewer.viewport;
+      return {
+        zoom: v.getZoom(true),
+        center: v.getCenter(true),
+        rotation: v.getRotation(),
+        flip: v.getFlip(),
+      };
+    });
+    expect(camera.zoom).toBeCloseTo(after.camera.zoom, 10);
+    expect(camera.center.x).toBeCloseTo(after.camera.center.x, 10);
+    expect(camera.center.y).toBeCloseTo(after.camera.center.y, 10);
+    expect(camera.rotation).toBe(after.camera.rotation);
+    expect(camera.flip).toBe(after.camera.flip);
+    await imageCard.screenshot({
+      path: info.outputPath(
+        maximized ? "maximized-image-anchor.png" : "restored-image-anchor.png",
+      ),
+    });
+  }
+});
