@@ -60,23 +60,25 @@ For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, 
 
 ## Explore runs and charts
 
-Open **Experiments**, choose an experiment, then search or filter its run table. Check the runs you want to compare and open **Charts**; selection is shared between Runs and Charts.
+Open Experiments, choose an experiment, then search or filter its run table. Checkboxes select runs for comparison; row highlighting is not selection. Open Charts to compare them, and use the persistent, collapsible Runs drawer to adjust the selection without leaving the workspace. Click a run name for its dedicated detail page. Its configuration viewer searches dotted paths and nested values, preserves types, and offers Copy JSON / Export JSON; it is not a raw YAML or file-artifact browser.
 
-The initial **Overview** view places line charts and image panels together in collapsible sections. Keys such as `train/loss` and `train/prediction` share a `train` section; keys without a slash go in an Overview section. Use the **Runs** picker to adjust the comparison without leaving Charts.
+Click a run’s color swatch to change its shared color in tables, the drawer and plots. These overrides are stored only in this browser, separately from saved views and view exports.
 
-Use a card’s **⋯ → Edit chart** to choose data, axes and appearance beside a live preview. **Save changes** updates that card; **Cancel** leaves it unchanged. **Add chart** creates a Line plot, Scatter plot, Area plot, Step plot or Image panel. Follow selected runs for ordinary comparisons, or choose specific series across experiments for a custom comparison.
+The initial Overview view places scalar charts and image panels together in collapsible sections, grouped by key prefix. Use a card’s ⋯ → Edit chart for data, axes and appearance beside a live preview; Add chart uses the same editor. Follow selected runs for ordinary comparisons, or choose specific sources across experiments. Save changes updates the card; Cancel leaves it unchanged.
 
-Changes to named views are saved in this browser. Use **View actions (⋯) → Save as…** for another view and **Export view / Import view…** to transfer its layout and settings. These files contain data references, not credentials or logged observations; they are not data backups.
+The dashboard X axis chooses Step, Wall time or Relative time (milliseconds since each run’s `created_at`). Smoothing runs from None to More. Changing either global control updates that setting in every scalar card’s saved configuration; image panels are unaffected. Loading mixed per-chart settings preserves them and displays Mixed. Per-chart overrides remain possible until the next global change to that setting.
 
-Line charts start in **Pan** mode. Choose **Zoom** to drag a box, **Inspect** for A/B values and deltas, or **Threshold** for all crossings. Ordinary scrolling moves the page; **Alt + wheel** zooms a chart. **Fit**, **Back** and **+/−** provide visible navigation controls. Image panels keep the camera while you scrub or play the timeline; maximize a card for more space without losing its timeline. See `web/README.md` for shortcuts and detailed controls.
+Left-drag a scalar plot to zoom, with X, Y or both inferred from the gesture. Right-button drag or Space + left-drag pans; Alt + wheel zooms. Compact icons provide fit, back and +/−, plus vertical and horizontal A/B cursors for values, deltas and all crossings. Resize each card’s width and height independently from its corner, or maximize it to fill the workspace. See `web/README.md` for controls and precision details.
+
+Named views save locally in this browser. View actions (⋯) → Save as… creates another view; Export view / Import view… transfers layout and settings, not credentials or logged data. These files are not data backups.
 
 ## What the plots mean
 
 Charts load complete metric histories before showing a comparison; they do not downsample observations. At duplicate step or timestamp coordinates, the latest inserted observation supplies the curve value. Interpolation estimates values between observations and never extrapolates beyond them.
 
-Linear and smooth, shape-preserving interpolation are selectable. Smoothing gives each new observation a chosen weight and is calculated over the complete ordered history, not just the visible area. Zoom and scale changes do not alter A/B or threshold answers. **Central 98%** narrows the displayed Y range without deleting observations; **Fit all** reveals the full range again.
+Linear and smooth, shape-preserving interpolation are selectable. Smoothing gives each new observation a chosen weight and is calculated over the complete ordered history, not just the visible area. Zoom and scale changes do not alter A/B or crossing answers. **Central 98%** narrows the displayed Y range without deleting observations; **Fit all** reveals the full range again.
 
-Images retain their original bytes and resolution. Frames are selected by their logged step, not interpolated between steps. Camera controls include fit, native 1:1 pixels, smooth/nearest pixels, rotation and flip.
+Images retain their original bytes and resolution. Frames are selected by their logged step, not interpolated between steps. The current decoded frame stays visible until the next is ready, without a Loading-frame flash; frame changes preserve the camera. Camera controls include fit, native 1:1 pixels, smooth/nearest pixels, rotation and flip.
 
 ## Catalog API
 
@@ -84,7 +86,7 @@ Authenticated `GET /api/catalog` returns `{experiments, runs, series}` for table
 
 ## Verification and architecture
 
-The API and initial component boundaries are documented in `docs/contract.md`. The redesign specification and reference survey are in `docs/ux-contract.md` and `docs/ux-survey.md`; the detailed development checklists are retained locally in ignored `.agents/plan.md` and `.agents/ux-redesign-plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
+The API and initial component boundaries are documented in `docs/contract.md`. The redesign specification, compact UX contract and reference survey are in `docs/ux-contract.md`, `docs/ux-refinement-contract.md` and `docs/ux-survey.md`; the detailed development checklists are retained locally in ignored `.agents/plan.md` and `.agents/ux-redesign-plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
 
 ```sh
 pixi run check
