@@ -10,6 +10,7 @@ export interface RunDrawerState {
   query: string;
   status: string;
   scrollTop: number;
+  selectedOnly?: boolean;
 }
 const DEFAULT_WIDTH = 300;
 const MIN_WIDTH = 250;
@@ -64,7 +65,15 @@ export class RunDrawer {
   private readonly list = element("div", "run-drawer-list");
   private readonly search = element("input");
   private readonly status = element("select");
-  private readonly count = element("span", "drawer-selection-count");
+  private readonly count = element("button", "drawer-selection-count");
+  private readonly outside = element("span", "drawer-outside-count");
+  private readonly clearFilters = this.button("Clear filters", () => {
+    this.state.query = this.search.value = "";
+    this.state.status = this.status.value = "all";
+    this.filter();
+    this.search.focus({ preventScroll: true });
+  });
+  private readonly empty = element("p", "drawer-empty muted");
   private readonly matching = element("span", "muted");
   private readonly rows = new Map<
     string,
@@ -151,7 +160,25 @@ export class RunDrawer {
     this.divider.onlostpointercapture = () => this.finishResize(true);
     this.pane.append(this.root, this.divider, this.toggle);
     const heading = element("div", "run-drawer-heading");
-    heading.append(element("strong", "", "Runs"), this.count);
+    this.list.id = `${this.root.id}-list`;
+    this.count.type = "button";
+    this.count.setAttribute("aria-controls", this.list.id);
+    this.count.title =
+      "Show only selected runs; text and status filters still apply";
+    this.count.onclick = () => {
+      state.selectedOnly = !state.selectedOnly;
+      this.filter();
+    };
+    this.outside.id = `${this.root.id}-outside`;
+    this.outside.setAttribute("role", "status");
+    this.count.setAttribute("aria-describedby", this.outside.id);
+    heading.append(element("strong", "", "Runs"), this.count, this.outside);
+    const searchTools = element("div", "run-drawer-search");
+    this.clearFilters.className = "drawer-clear-filters";
+    this.clearFilters.title =
+      "Clear text and status filters; keep Selected mode";
+    searchTools.append(this.search, this.clearFilters);
+    this.list.append(this.empty);
     this.root.addEventListener("focusin", (event) => {
       this.previousFocus = event.target as HTMLElement;
     });
@@ -197,7 +224,7 @@ export class RunDrawer {
     footer.append(this.matching, this.button("Open run table", onTable));
     this.root.append(
       heading,
-      this.search,
+      searchTools,
       this.status,
       actions,
       this.list,
@@ -257,8 +284,47 @@ export class RunDrawer {
   }
   private filter() {
     const matches = new Set(this.matches().map((run) => run.id));
-    for (const [id, row] of this.rows) row.root.hidden = !matches.has(id);
-    this.matching.textContent = `${matches.size} matching`;
+    const rows = [...this.rows.entries()];
+    const focusedIndex = rows.findIndex(([, row]) =>
+      row.root.contains(document.activeElement),
+    );
+    let visible = 0;
+    for (const [id, row] of rows) {
+      row.root.hidden =
+        !matches.has(id) ||
+        (!!this.state.selectedOnly && !this.selected.has(id));
+      if (!row.root.hidden) visible++;
+    }
+    const outside = [...this.selected].filter((id) => !matches.has(id)).length;
+    this.count.textContent = `Selected (${this.selected.size})`;
+    this.count.setAttribute("aria-pressed", String(!!this.state.selectedOnly));
+    this.outside.hidden = outside === 0;
+    this.outside.textContent = outside ? `· ${outside} outside filters` : "";
+    this.outside.setAttribute(
+      "aria-label",
+      `${this.selected.size} selected · ${outside} outside filters`,
+    );
+    this.clearFilters.hidden = !this.state.query && this.state.status === "all";
+    this.matching.textContent = this.state.selectedOnly
+      ? `${visible} of ${this.selected.size} selected shown`
+      : `${matches.size} matching`;
+    this.empty.hidden = visible > 0;
+    this.empty.textContent = this.state.selectedOnly
+      ? this.selected.size
+        ? "No selected runs match these filters. Clear filters or turn off Selected."
+        : "No runs selected. Turn off Selected to browse runs."
+      : "No runs match these filters. Clear filters to browse runs.";
+    // Only move focus when its keyed row actually disappears. Rollback leaves
+    // the accepted selection unchanged, so failed writes keep the same checkbox.
+    if (focusedIndex >= 0 && rows[focusedIndex][1].root.hidden) {
+      const next =
+        rows.slice(focusedIndex + 1).find(([, row]) => !row.root.hidden) ??
+        rows
+          .slice(0, focusedIndex)
+          .reverse()
+          .find(([, row]) => !row.root.hidden);
+      (next?.[1].check ?? this.count).focus({ preventScroll: true });
+    }
   }
   /** Called after mounting; charts and list nodes never move during resizing. */
   mount() {
@@ -409,12 +475,11 @@ export class RunDrawer {
         );
         this.list.append(row.root);
       }
-      this.filter();
       this.list.scrollTop = this.state.scrollTop;
     }
     for (const [id, row] of this.rows)
       row.check.checked = this.selected.has(id);
-    this.count.textContent = `${this.selected.size} selected`;
+    this.filter();
   }
   restoreScroll() {
     this.list.scrollTop = this.state.scrollTop;
