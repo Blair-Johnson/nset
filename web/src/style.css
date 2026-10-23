@@ -448,8 +448,59 @@ h3 {
   font-weight: 400;
 }
 .column-picker {
-  max-height: 340px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(340px, 60dvh);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.column-picker > input {
+  width: 100%;
+  min-width: 0;
+  flex: none;
+}
+.column-choices {
   overflow: auto;
+  min-height: 0;
+}
+.column-group {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.column-group legend {
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.column-picker .check-option {
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+.column-picker .check-option input {
+  flex: none;
+  margin-top: 3px;
+}
+.parameter-cell,
+.parameter-header .sort-button {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .table-toolbar .menu:has(.column-picker) {
+    position: static;
+  }
+  .table-toolbar:has(.column-picker) {
+    position: relative;
+  }
+  .column-picker {
+    left: 0;
+    right: auto;
+    max-width: 100%;
+  }
 }
 .check-option {
   display: flex;
