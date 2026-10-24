@@ -6,7 +6,9 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import select
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -94,6 +96,202 @@ class ContextTests(unittest.TestCase):
         finally:
             other.close()
 
+    def reopen_context(self, *, native_url="http://127.0.0.1:1", token=TOKEN, public_url="http://localhost:5000"):
+        ctx = CompatContext(native_url, token, self.temp.name, public_url)
+        self.addCleanup(ctx.close)
+        return ctx
+
+    @unittest.skipUnless(hasattr(sqlite3.Connection, "setlimit"), "SQLite runtime limit API requires Python 3.11+")
+    def test_state_bulk_indexed_reads_obey_sql_variable_limit(self):
+        state = self.ctx.state
+        values = {str(i): {"value": i} for i in range(2000)}
+        values["null"] = None
+        self.assertIsNone(state.put_many("bulk", values))
+        state.put("other", "0", "wrong namespace")
+        old_limit = state._db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 17)
+        statements = []
+        state._db.set_trace_callback(statements.append)
+        try:
+            self.assertEqual(state.get_many("bulk", [*values, "missing", "0"]), values)
+            selects = [sql for sql in statements if sql.startswith("SELECT")]
+            self.assertEqual(len(selects), (len(values) + 1 + 15) // 16)
+            self.assertTrue(all("key IN (" in sql and "namespace=" in sql for sql in selects))
+            statements.clear()
+            self.assertEqual(state.get_many("bulk", []), {})
+            self.assertIsNone(state.put_many("bulk", {}))
+            self.assertEqual(statements, [])
+        finally:
+            state._db.set_trace_callback(None)
+            state._db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+
+    def test_state_bulk_validation_precedes_any_mutation(self):
+        state = self.ctx.state
+        state.put_many("bulk", {"old": 1, "keep": 2})
+        circular = []
+        circular.append(circular)
+        for bad in (float("nan"), float("inf"), object(), circular):
+            statements = []
+            state._db.set_trace_callback(statements.append)
+            try:
+                with self.assertRaises((TypeError, ValueError, RecursionError)):
+                    state.put_many("bulk", {"old": 3, "new": "new", "bad": bad})
+                self.assertEqual(statements, [])
+            finally:
+                state._db.set_trace_callback(None)
+            self.assertEqual(state.get_many("bulk", ["old", "keep", "new", "bad"]), {"old": 1, "keep": 2})
+        for call in (lambda: state.put_many("bulk", {"old": 3, 1: 4}),
+                     lambda: state.put_many(None, {}),
+                     lambda: state.get_many("bulk", ["old", 1]),
+                     lambda: state.get_many(None, [])):
+            with self.assertRaises(TypeError):
+                call()
+        self.assertEqual(state.get("bulk", "old"), 1)
+
+    def test_state_bulk_rolls_back_database_failure(self):
+        state = self.ctx.state
+        state.put("bulk", "old", 1)
+        state._db.execute("CREATE TRIGGER fail_bulk BEFORE INSERT ON kv WHEN NEW.key='fail' "
+                          "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            state.put_many("bulk", {"old": 2, "new": 3, "fail": 4})
+        self.assertFalse(state._db.in_transaction)
+        self.assertEqual(state.get_many("bulk", ["old", "new", "fail"]), {"old": 1})
+        state.put_many("bulk", {"old": 5, "new": 6})
+        self.assertEqual(state.get_many("bulk", ["old", "new"]), {"old": 5, "new": 6})
+
+    @unittest.skipUnless(hasattr(sqlite3.Connection, "setlimit"), "SQLite runtime limit API requires Python 3.11+")
+    def test_state_bulk_reads_share_one_snapshot(self):
+        state = self.ctx.state
+        other = State(Path(self.temp.name) / "compat.sqlite3")
+        self.addCleanup(other.close)
+        values = {str(i): 0 for i in range(8)}
+        state.put_many("bulk", values)
+        old_limit = state._db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 5)
+        selects = []
+        def write_between_chunks(sql):
+            if sql.startswith("SELECT"):
+                selects.append(sql)
+                if len(selects) == 2:
+                    other.put_many("bulk", dict.fromkeys(values, 1))
+        state._db.set_trace_callback(write_between_chunks)
+        try:
+            self.assertEqual(state.get_many("bulk", values), values)
+        finally:
+            state._db.set_trace_callback(None)
+            state._db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+        self.assertEqual(len(selects), 2)
+        self.assertEqual(state.get_many("bulk", values), dict.fromkeys(values, 1))
+
+    def test_context_exclusive_in_process_and_through_directory_alias(self):
+        lock_path = Path(self.temp.name) / "compat.lock"
+        inode = lock_path.stat().st_ino
+        with self.assertRaisesRegex(RuntimeError, "already in use"):
+            self.reopen_context()
+        with tempfile.TemporaryDirectory() as parent:
+            alias = Path(parent) / "alias"
+            alias.symlink_to(self.temp.name, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                CompatContext("http://127.0.0.1:1", TOKEN, alias, "http://localhost")
+        self.ctx.close()
+        reopened = self.reopen_context()
+        self.ctx.close()  # Closing the former owner cannot release the new lock.
+        with self.assertRaisesRegex(RuntimeError, "already in use"):
+            self.reopen_context()
+        reopened.close()
+        reopened.close()
+        self.assertEqual(lock_path.stat().st_ino, inode)
+        self.reopen_context()
+
+    def test_context_exclusive_across_processes(self):
+        code = '''import sys
+from nset_compat import CompatContext
+try:
+    CompatContext("http://127.0.0.1:1", "secret", sys.argv[1], "http://localhost")
+except RuntimeError as exc:
+    assert "already in use" in str(exc)
+else:
+    raise AssertionError("second process acquired live directory")
+'''
+        result = subprocess.run([sys.executable, "-c", code, self.temp.name], capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.ctx.state.put("test", "still-live", True)
+
+    def test_context_recovers_after_owner_is_killed(self):
+        self.ctx.close()
+        lock_path = Path(self.temp.name) / "compat.lock"
+        inode = lock_path.stat().st_ino
+        code = '''import sys
+from nset_compat import CompatContext
+c=CompatContext("http://127.0.0.1:1", "secret", sys.argv[1], "http://localhost")
+c.state.put("test:kill", "key", {"saved": True})
+c.artifacts.put("test:kill", "file", b"durable")
+print("ready", flush=True)
+sys.stdin.read()
+'''
+        child = subprocess.Popen([sys.executable, "-c", code, self.temp.name],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "owner did not become ready")
+            self.assertEqual(child.stdout.readline(), b"ready\n")
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                self.reopen_context()
+            child.kill()
+            child.wait(timeout=10)
+            recovered = self.reopen_context()
+            self.assertEqual(recovered.state.get("test:kill", "key"), {"saved": True})
+            self.assertEqual(recovered.artifacts.get("test:kill", "file")[0], b"durable")
+            self.assertEqual(lock_path.stat().st_ino, inode)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
+
+    def test_context_failed_initialization_closes_database_and_releases_lock(self):
+        self.ctx.close()
+        connect = sqlite3.connect
+        for failure in ("_fsync_dir", "Artifacts"):
+            connections = []
+            def capture_connection(*args, **kwargs):
+                db = connect(*args, **kwargs)
+                connections.append(db)
+                return db
+            with patch("nset_compat.context.sqlite3.connect", side_effect=capture_connection):
+                with patch("nset_compat.context." + failure, side_effect=OSError("injected init failure")):
+                    with self.assertRaisesRegex(OSError, "injected init failure"):
+                        self.reopen_context()
+            self.assertEqual(len(connections), 1)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connections[0].execute("SELECT 1")
+            self.reopen_context().close()
+
+    def test_context_native_binding_precedes_artifacts_and_allows_rotation(self):
+        self.assertEqual(self.ctx.state.get("gateway:config", "native_url"), self.ctx.native.url)
+        self.ctx.artifacts.put("test", "file", b"original")
+        self.ctx.close()
+        blobs = Path(self.temp.name) / "blobs"
+        before = {p.name: p.read_bytes() for p in blobs.iterdir()}
+        for native_url in ("http://127.0.0.1:2", "https://127.0.0.1:1", "http://127.0.0.1:1/prefix"):
+            with patch("nset_compat.context.Artifacts") as artifacts:
+                with self.assertRaisesRegex(ValueError, "different native URL"):
+                    self.reopen_context(native_url=native_url)
+                artifacts.assert_not_called()
+            self.assertEqual({p.name: p.read_bytes() for p in blobs.iterdir()}, before)
+        rotated = self.reopen_context(native_url="http://127.0.0.1:1/", token="rotated", public_url="https://example.test")
+        self.assertEqual(rotated.state.get("gateway:config", "native_url"), "http://127.0.0.1:1")
+        self.assertEqual(rotated.artifacts.get("test", "file")[0], b"original")
+        self.assertEqual(rotated.native.token, "rotated")
+        self.assertEqual(rotated.public_url, "https://example.test")
+        rotated.state.put("gateway:config", "native_url", None)
+        rotated.close()
+        with self.assertRaisesRegex(ValueError, "different native URL"):
+            self.reopen_context()
+
+    def test_context_unsupported_platform_fails_before_mutation(self):
+        with patch("nset_compat.context.os.name", "nt"), patch("nset_compat.context._mkdir") as mkdir:
+            with self.assertRaisesRegex(RuntimeError, "platform is unsupported"):
+                self.reopen_context()
+            mkdir.assert_not_called()
+
     def test_artifact_bytes_namespace_listing_and_dedup(self):
         artifacts = self.ctx.artifacts
         artifacts.put("mlflow:run", "nested/data.bin", b"\x00\xff", "application/custom")
@@ -140,10 +338,12 @@ c.state.put("test:crash", "key", {"saved":True})
 c.artifacts.put("test:crash", "file.bin", b"durable")
 os._exit(0)
 '''
-        result = subprocess.run([sys.executable, "-c", code, self.temp.name], capture_output=True)
+        self.ctx.close()
+        result = subprocess.run([sys.executable, "-c", code, self.temp.name], capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.ctx.state.get("test:crash", "key"), {"saved": True})
-        self.assertEqual(self.ctx.artifacts.get("test:crash", "file.bin")[0], b"durable")
+        reopened = self.reopen_context()
+        self.assertEqual(reopened.state.get("test:crash", "key"), {"saved": True})
+        self.assertEqual(reopened.artifacts.get("test:crash", "file.bin")[0], b"durable")
 
     def test_signatures_scope_expiry_tamper_and_replay(self):
         with patch("nset_compat.context.time.time", return_value=100):
@@ -212,6 +412,34 @@ os._exit(0)
             with self.assertRaises(ProtocolError) as caught:
                 self.ctx.ingest_metrics("run", "invalid-receipt", [{}])
             self.assertEqual(caught.exception.status, 502)
+
+    def test_receipt_timestamp_is_nonnegative_js_safe_integer(self):
+        receipt = {"run_id": "run", "batch_id": "batch", "state": "applied", "accepted": 1, "accepted_at": 0}
+        for accepted_at in (-1, 2**53, True, 1.0, "1", None):
+            with self.subTest(accepted_at=accepted_at), self.assertRaises(ProtocolError) as caught:
+                self.ctx._receipt({**receipt, "accepted_at": accepted_at}, "run", "batch", 1)
+            self.assertEqual(caught.exception.status, 502)
+        for accepted_at in (0, 1, 2**53 - 1):
+            value = {**receipt, "accepted_at": accepted_at}
+            self.assertEqual(self.ctx._receipt(value, "run", "batch", 1), value)
+
+    def test_ingest_body_limit_includes_wrapper_and_transport_encoding(self):
+        native = FakeNative()
+        self.ctx.native = native
+        metrics = [{"key": "é", "step": 0, "value": 1.5}]
+        # Transport uses default JSON separators and ASCII escapes, not the
+        # compact representation used for batch identity hashing.
+        body = json.dumps({"metrics": metrics}, allow_nan=False).encode()
+        for limit in (len(json.dumps(metrics).encode()), len(body) - 1):
+            self.ctx.max_body_bytes = limit
+            with self.assertRaises(ProtocolError) as caught:
+                self.ctx.ingest_metrics("run", "body-limit", metrics)
+            self.assertEqual(caught.exception.status, 413)
+            self.assertEqual(self.ctx.state.items("gateway:ingest"), [])
+            self.assertEqual(native.calls, [])
+        self.ctx.max_body_bytes = len(body)
+        self.assertEqual(self.ctx.ingest_metrics("run", "body-limit", metrics)["accepted"], 1)
+        self.assertEqual(json.dumps(native.calls[0][2], allow_nan=False).encode(), body)
 
     def test_missing_adapters_are_lazy_but_broken_imports_fail(self):
         def missing(name):
@@ -444,17 +672,22 @@ class HTTPTests(unittest.TestCase):
         native_path = "/api/runs/run/ingest/http-batch"
         self.assertEqual([p for p, _ in self.backend.seen], [native_path, native_path])
         self.assertTrue(all(auth == "Bearer " + TOKEN for _, auth in self.backend.seen))
-        second = CompatContext(self.ctx.native.url, TOKEN, self.temp.name, self.ctx.public_url)
-        try:
-            receipt = second.ingest_metrics("run", "http-batch", payload["metrics"])
-            self.assertEqual(receipt, json.loads(body))
-            self.assertEqual(len(self.backend.receipts), 1)
-        finally:
-            second.close()
+        applied_receipt = json.loads(body)
         payload["batch_id"] = "capacity"
         status, _, body = self.request("POST", "/compat/ingest", json.dumps(payload).encode())
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)["error_code"], "NATIVE_ERROR")
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(3)
+        self.ctx.close()
+        second = CompatContext(self.ctx.native.url, TOKEN, self.temp.name, self.ctx.public_url)
+        try:
+            receipt = second.ingest_metrics("run", "http-batch", payload["metrics"])
+            self.assertEqual(receipt, applied_receipt)
+            self.assertEqual(len(self.backend.receipts), 1)
+        finally:
+            second.close()
 
     def test_worker_capacity_and_absolute_header_deadline(self):
         self.server.request_timeout = 0.3
