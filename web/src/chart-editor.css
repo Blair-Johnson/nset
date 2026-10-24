@@ -655,3 +655,8 @@
   font-size: 11px;
   margin: -10px 0 12px;
 }
+
+.record-filter-row { border-top: 1px solid var(--border); padding: .5rem 0; }
+.record-inspection { max-height: 320px; overflow: auto; font-size: 12px; }
+.record-inspection summary { overflow-wrap: anywhere; }
+.record-inspection pre { max-height: 220px; overflow: auto; white-space: pre-wrap; }

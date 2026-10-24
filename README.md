@@ -1,17 +1,16 @@
 # Not Shitty Experiment Tracker
 
-NSET is a self-hosted experiment tracker compatible with existing logging clients like MLflow and WandB. It is narrowly focused on providing a high-quality user experience for logging and analyzing scalar metrics and images.
+NSET is a self-hosted experiment tracker focused on logging and comparing scalar metrics and images. It has a native Python client and scoped MLflow and W&B tracking support.
 
 ![Four training runs compared in nset, showing accuracy, gradient norm, learning rate, and loss.](docs/images/training-comparison.png)
 
-NSET addresses many of my frustrations with existing tools: 
-- Curves are plotted at full resolution with configurable interpolation settings.
-- Cursors enable easy comparative measurements between curves.
-- Curves can be measured at interpolated positions, rather than only where logged data exists.
-- Layouts can be saved, named, and exported.
-- Chart zoom and layout is preserved across content setting changes.
-- Logged images can easily be scrubbed through without resetting crop or zoom.
-- Metrics can be joined on a common axis with interpolation and plotted against each other.
+NSET addresses many of my frustrations with existing tools:
+- Compare complete metric histories with configurable interpolation and smoothing.
+- Measure curves at interpolated positions with vertical and horizontal cursors.
+- Save, name, and export chart layouts.
+- Keep chart zoom while adjusting styles or resizing cards.
+- Scrub logged images while keeping the same crop and zoom.
+- Join metrics by step or time and plot them against each other.
 
 ## Set up and launch
 
@@ -20,21 +19,30 @@ Install Pixi and a C/C++ build toolchain, then build from source:
 ```sh
 git clone https://github.com/Blair-Johnson/nset.git
 cd nset
+pixi install --locked
 pixi run web-install
 pixi run build
 ```
 
-Choose an access token, then start the server:
+Choose a random access token, then start the server:
 
 ```sh
 export NSET_TOKEN='replace-this-with-your-own-random-access-token'
 ./target/release/nset serve --host 127.0.0.1 --port 8080 \
-  --token "$NSET_TOKEN" --db-path ./nset-data
+  --db-path ./nset-data
 ```
 
-Open `http://127.0.0.1:8080` and enter the same token. Use at least 40 characters for W&B clients. `--db-path` sets the directory where the server stores its data.
+Open `http://127.0.0.1:8080` and enter the same token. Use at least 40 characters for W&B clients. The token grants access to the whole service. `--db-path` sets the data directory; keep it on local storage.
 
-Use `--host 0.0.0.0` for remote clients, with HTTPS or a tunnel on untrusted networks. Run `./target/release/nset serve --help` for other options.
+Use `--host 0.0.0.0` for remote clients, with HTTPS or a secure tunnel on untrusted networks. `--log-level debug` enables diagnostic logs. Run `./target/release/nset serve --help` for other options.
+
+## Read local rx records
+
+Add `--rx-repo /path/to/repository` to `nset serve` to browse that repository’s recorded structured events alongside native data. The repository appears as a read-only source; Git worktrees resolve to their shared repository storage.
+
+Select runs, open Charts, and add an **rx records** chart. Enter a numeric X field and add Y fields with Tab completion. **Filter records** selects observations within those runs; **Group by** separates curves using a scalar field on each record. For example, filter `kind = "epoch"`, choose X `epoch`, and add `train_loss` and `val_loss`. Use `metrics.loss` for a nested field and `$["metrics.loss"]` for a literal dotted key. **Inspect records** pages through the underlying JSON.
+
+Charts retain fractional, repeated, and restarted X coordinates in event order. Preview notes show sampled discovery coverage, skipped values, and query limits. Refresh reads a new committed snapshot. WAL-mode sources require existing readable producer-owned `-wal` and `-shm` files; an unavailable source is reported without changing the repository.
 
 ## Log data
 
@@ -60,16 +68,4 @@ with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
 
 Refresh the experiment list, select your runs, and open Charts to compare them.
 
-Already using MLflow or W&B? Keep your existing tracking calls and point the client at the same server:
-
-```sh
-export MLFLOW_TRACKING_URI=http://127.0.0.1:8080
-export MLFLOW_TRACKING_TOKEN="$NSET_TOKEN"
-export WANDB_BASE_URL=http://127.0.0.1:8080
-export WANDB_API_KEY="$NSET_TOKEN"
-export WANDB_ENTITY=local
-```
-
-See [supported clients](docs/client-compatibility.md) for supported MLflow and W&B features and TensorBoard event ingestion.
-
-[Chart controls](web/README.md) · [Durable delivery](docs/durable-ingestion.md) · [Build and development](docs/contributing.md)
+[Logging, supported SDKs, and delivery](docs/logging.md) · [Development](docs/contributing.md)

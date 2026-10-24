@@ -1,3 +1,4 @@
+import { loadRecordPlot, recordConfig } from "./records";
 import {
   analyze,
   PlotPanel,
@@ -189,6 +190,7 @@ export class ChartCard {
   }
 
   private displayConfig(): ViewConfig {
+    if (this.spec.records) return recordConfig(withRunColors(this.spec.config, this.sources, this.context.catalog), this.spec.records);
     return withMetricLabel(
       withRunColors(this.spec.config, this.sources, this.context.catalog),
       this.spec.source,
@@ -197,7 +199,7 @@ export class ChartCard {
   }
   /** What the X axis shows; XY charts read X in metric units. */
   private xAxis(): XQuantity {
-    return this.spec.kind === "timeseries" && this.spec.x
+    return this.spec.kind === "timeseries" && (this.spec.x || this.spec.records)
       ? "metric"
       : this.spec.config.axis;
   }
@@ -733,6 +735,7 @@ export class ChartCard {
     return value === null ? "—" : formatValue(value, this.spec.config.yFormat);
   }
   private seriesLabel(index: number) {
+    if (this.spec.records) return this.data[index].run.name;
     const source = this.sources[index];
     if (!source) return this.data[index].run.name;
     const mixed = new Set(this.sources.map((item) => item.key)).size > 1;
@@ -950,17 +953,15 @@ export class ChartCard {
     }
     this.status.textContent = "Loading…";
     try {
-      const data = await loadPlotRuns(
-        sources,
-        this.context.store,
-        controller.signal,
-      );
+      const recordResult = this.spec.records ? await loadRecordPlot(this.context.api, this.spec.records, this.context.catalog, this.context.selectedRunIds, controller.signal) : undefined;
+      const data = recordResult?.data ?? await loadPlotRuns(sources, this.context.store, controller.signal);
       if (
         this.destroyed ||
         generation !== this.generation ||
         controller.signal.aborted
       )
         return;
+      if (recordResult) { this.notice.textContent = recordResult.notes; this.sources = recordResult.sources; }
       this.raw = data;
       this.data = analyze(data, this.spec.config);
       const display = this.displayConfig();

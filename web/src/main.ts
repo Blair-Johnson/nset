@@ -1,3 +1,4 @@
+import { appendRxCatalog } from "./records";
 import "./style.css";
 import { Api, type Run } from "./api";
 import { element, message, isAbort } from "./utils";
@@ -383,6 +384,24 @@ function renderPage() {
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
+      if (catalog.rx?.id === experiment.id) {
+        const note = element("div", "table-toolbar");
+        note.append(element("span", "muted", catalog.rx.error || "Read-only rx records. Select runs, open Charts, and add a record chart."));
+        if (catalog.rx.nextAfter != null) {
+          const more = button("Load more rx runs", async () => {
+            more.disabled = true;
+            const generation = catalogGeneration;
+            try {
+              const next = await appendRxCatalog(api, structuredClone(catalog), undefined, catalog.rx!.nextAfter!);
+              if (generation !== catalogGeneration || !connected) return;
+              catalog = next;
+              renderPage();
+            } catch (e) { error(`Could not load rx runs: ${message(e)}`); more.disabled = false; }
+          });
+          note.append(more);
+        }
+        table.prepend(note);
+      }
       $("page").replaceChildren(table);
     } else {
       pageHeader(experiment.id, "charts");
@@ -1342,6 +1361,7 @@ async function connect(refresh = false) {
       const workspace = workspaceFor(currentRoute().experimentId);
       renderCharts(workspace);
     } else renderPage();
+    if (catalog.rx?.error) error(catalog.rx.error);
   } catch (e) {
     if (isAbort(e) || generation !== catalogGeneration) return;
     if (connected)

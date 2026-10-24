@@ -13,6 +13,7 @@ export interface CatalogSeries {
   last_value: number | null;
 }
 export interface Catalog {
+  rx?: { id: string; name: string; error?: string; nextAfter?: number | null };
   experiments: Experiment[];
   runs: Run[];
   series: CatalogSeries[];
@@ -41,6 +42,7 @@ export interface CardLayout {
   height: number;
 }
 export interface ChartSpec {
+  records?: import("./records").RecordBinding;
   id: string;
   title: string;
   kind: "timeseries" | "image";

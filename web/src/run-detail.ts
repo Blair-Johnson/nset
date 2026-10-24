@@ -47,7 +47,7 @@ export function renderRunDetail(
   back.onclick = options.onBack;
   const name = element("h1", "", run.name || run.id);
   name.title = run.name || run.id;
-  const status = element("span", `run-detail-status ${run.status}`, run.status);
+  const status = element("span", `run-detail-status ${run.status}`, run.rx?.state ?? run.status);
   header.append(back);
   if (options.catalog) header.append(runSwatch(options.catalog, run.id));
   header.append(name, status);
@@ -104,7 +104,7 @@ export function renderRunDetail(
   const renderTags = (error = "") => {
     tags.replaceChildren(element("h2", "", "Tags"));
     const entries = Object.entries(current.tags);
-    if (!entries.length && !options.onTags)
+    if (!entries.length && (!options.onTags || current.rx))
       tags.append(element("span", "muted", "No tags"));
     for (const [key, value] of entries) {
       const tag = element("span", "run-detail-tag");
@@ -113,7 +113,7 @@ export function renderRunDetail(
         element("code", "", configJSON(value)),
       );
       tag.title = `${key} (${configType(value)})`;
-      if (options.onTags) {
+      if (options.onTags && !current.rx) {
         const edit = iconButton("tag", `Edit tag ${key}`);
         edit.classList.add("run-detail-tag-action");
         edit.onclick = () => openEditor(key, value);
@@ -126,7 +126,7 @@ export function renderRunDetail(
       }
       tags.append(tag);
     }
-    if (options.onTags) {
+    if (options.onTags && !current.rx) {
       const addTag = element("button", "run-detail-tag-add", "+ Add tag");
       addTag.type = "button";
       addTag.onclick = () => openEditor("", "");

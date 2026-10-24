@@ -3,6 +3,7 @@
 import {
   canonicalize,
   ema,
+  emaInOrder,
   joinXY,
   makeInterpolator,
   makeXYInterpolator,
@@ -17,6 +18,8 @@ import type { Run } from "./api";
 export interface PlotRun {
   run: Run;
   raw: Point[];
+  /** Record observations are already paired, in event order; never canonicalize/join. */
+  paired?: { key: string; points: XY[] };
   /** XY charts: the X channel, joined to `raw` on the config's step/time axis.
    * `run` supplies the relative-time origin for that channel. */
   x?: { run: Run; raw: Point[]; key: string };
@@ -33,7 +36,27 @@ export interface Analyzed {
   x?: { key: string };
 }
 export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
-  return data.map(({ run, raw, x }) => {
+  return data.map(({ run, raw, x, paired }) => {
+    if (paired) {
+      const observations = paired.points;
+      const points = config.smoothing
+        ? emaInOrder(observations, config.alpha)
+        : observations;
+      const fn = makeXYInterpolator(points);
+      // Repeated coordinates can represent different values, not replacements.
+      if (new Set(points.map((p) => p[0])).size !== points.length) {
+        fn.at = () => null;
+        fn.monotonic = false;
+      }
+      return {
+        run,
+        observations,
+        points,
+        fn,
+        count: observations.length,
+        x: { key: paired.key },
+      };
+    }
     const observations = canonicalize(raw, config.axis, run.created_at);
     const points = config.smoothing
       ? ema(observations, config.alpha)

@@ -59,7 +59,8 @@ export function attachSuggestions(
   input: HTMLInputElement,
   source: () => Suggestion[],
   onPick: (value: string) => void,
-): void {
+  complete: () => boolean = () => true,
+): { refresh: () => void; close: () => void } {
   const id = `suggest-${++nextId}`;
   const list = element("div", "suggest-list");
   list.id = id;
@@ -111,6 +112,7 @@ export function attachSuggestions(
         const option = element("div", "suggest-option");
         option.id = `${id}-${i}`;
         option.setAttribute("role", "option");
+        option.setAttribute("aria-label", [item.value, item.detail].filter(Boolean).join(" "));
         option.append(element("span", "suggest-value", item.value));
         if (item.detail)
           option.append(element("span", "suggest-detail", item.detail));
@@ -149,15 +151,15 @@ export function attachSuggestions(
       event.preventDefault();
       pick(shown[active].value);
     } else if (event.key === "Tab" && !event.shiftKey && isOpen()) {
-      const matches = shown.map((item) => item.value);
+      const matches = rankSuggestions(input.value, source(), Infinity).map((item) => item.value);
       const typed = input.value;
       if (active >= 0) {
         event.preventDefault();
-        pick(matches[active]);
-      } else if (matches.length === 1) {
+        pick(shown[active].value);
+      } else if (complete() && matches.length === 1) {
         event.preventDefault();
         pick(matches[0]);
-      } else {
+      } else if (complete()) {
         // Extend to the shared prefix when the matches all start with what was typed.
         const prefix = commonPrefix(matches);
         if (
@@ -166,6 +168,7 @@ export function attachSuggestions(
         ) {
           event.preventDefault();
           input.value = prefix;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
           open();
         }
       }
@@ -176,4 +179,5 @@ export function attachSuggestions(
       close();
     }
   });
+  return { refresh: () => { if (document.activeElement === input) open(); }, close };
 }

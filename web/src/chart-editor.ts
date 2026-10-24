@@ -1,3 +1,5 @@
+import { mountRecordControls } from "./record-controls";
+import { newRecordBinding, loadRecordPlot } from "./records";
 import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
 import { withRunColors } from "./series-colors";
@@ -124,6 +126,7 @@ export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
   if (typeof literal === "string") return literal;
   const saved = card.config[`${axis}Label`];
   if (saved) return saved;
+  if (card.records) return axis === "x" ? card.records.x : card.records.ys.length === 1 ? card.records.ys[0] : "Record values";
   if (axis === "x")
     return card.kind === "timeseries" && card.x
       ? xMetricLabel(card.x)
@@ -369,6 +372,11 @@ export function openChartEditor(options: ChartEditorOptions): {
   // Keep pure helpers importable by Node tests without a CSS loader or browser globals.
   void import("./chart-editor.css");
   const draft = clone(options.card);
+  if (options.isNew && draft.kind !== "image" && options.catalog.rx && options.catalog.runs.some(r => r.rx && options.selectedRunIds.includes(r.id))) draft.records ??= newRecordBinding(options.catalog);
+  let recordControls: ReturnType<typeof mountRecordControls> | undefined;
+  let recordPreviewNotes = "";
+  let recordPreviewSources: ResolvedSeries[] = [];
+  let renderedRecordStyles = "";
   const originalFocus =
     document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -705,12 +713,17 @@ export function openChartEditor(options: ChartEditorOptions): {
   let pickerSearch = "";
   let renderChoices = () => {};
   function renderAll() {
+    recordControls?.destroy(); recordControls = undefined;
     renderChart();
     renderData();
     renderX();
     renderAxes();
     renderSmoothing();
     renderAppearance();
+    if (draft.records) recordControls = mountRecordControls(panels.get("Data")!, panels.get("X")!, {
+      binding: draft.records, catalog: options.catalog, selected: options.selectedRunIds, api: options.api,
+      changed: change, error: message => { if (message) errors.set("records", message); else errors.delete("records"); },
+    });
   }
   function renderChart() {
     const panel = clearPanel("Chart");
@@ -739,7 +752,7 @@ export function openChartEditor(options: ChartEditorOptions): {
           clone(draft.source),
         );
         setPlotType(draft, value as PlotType);
-        if (draft.kind === "image") delete draft.x;
+        if (draft.kind === "image") { delete draft.x; delete draft.records; }
         draft.source = clone(
           sourceMemory.get(`${draft.kind}/${draft.source.mode}`) ??
             (draft.source.mode === "selected"
@@ -752,6 +765,17 @@ export function openChartEditor(options: ChartEditorOptions): {
         fields.get("kind")?.control.focus({ preventScroll: true });
       },
     );
+    if (draft.kind !== "image" && (options.catalog.rx || draft.records)) {
+      select(panel, "data-source", "Data source", draft.records ? "records" : "metrics", [["metrics", "Metrics"], ["records", "rx records"]], value => {
+        if (value === "records") { draft.records = newRecordBinding(options.catalog); delete draft.x; }
+        else delete draft.records;
+        renderAll();
+      });
+    }
+    if (draft.records) {
+      panel.append(el("p", "ce-help", "Runs: selected rx runs in this workspace. This source is read-only."));
+      return;
+    }
     select(
       row,
       "source-mode",
@@ -789,6 +813,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
   function renderData() {
     const panel = clearPanel("Data");
+    if (draft.records) { panelHeadings.get("Data")!.textContent = "Record fields"; return; }
     panelHeadings.get("Data")!.textContent =
       draft.kind === "image" ? "Images" : "Y axis";
     // What is on the axis now, at a glance: one removable chip per choice.
@@ -984,7 +1009,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
   function renderX() {
     const panel = clearPanel("X");
-    if (scalarOnly("X")) return;
+    if (scalarOnly("X") || draft.records) return;
     const control = el("select");
     const group = (label: string, entries: [string, string][]) => {
       if (!entries.length) return;
@@ -1351,7 +1376,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     const refreshState = () =>
       foldState(
         "Smoothing",
-        `${strengthHint()} · ${draft.config.interpolation === "pchip" ? "smooth" : "linear"}`,
+        `${strengthHint()} · ${draft.records ? "event order" : draft.config.interpolation === "pchip" ? "smooth" : "linear"}`,
       );
     strength.setAttribute("aria-valuetext", strengthHint());
     strength.oninput = () => {
@@ -1360,7 +1385,8 @@ export function openChartEditor(options: ChartEditorOptions): {
       refreshState();
       change();
     };
-    select(
+    if (draft.records) panel.append(el("p", "ce-help", "Smoothing follows event order. Record observations are already paired; no independent-series interpolation is applied."));
+    else select(
       panel,
       "interpolation",
       "Between observations",
@@ -1469,7 +1495,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     const curveForm = el("div", "ce-curve-form");
     details.append(rows, paging, curveForm);
     function renderSeriesList() {
-      const resolved = resolveSources(
+      const resolved = draft.records ? recordPreviewSources : resolveSources(
         draft,
         options.selectedRunIds,
         options.catalog,
@@ -1905,6 +1931,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   async function updatePreview(version: number) {
     if (closed || version !== previewVersion) return;
     retry.hidden = true;
+    if (!draft.records) recordPreviewNotes = "";
     if (!hasPreviousScalarPreview())
       previewTitle.textContent = draft.title || "Untitled chart";
     const sources = resolveSources(
@@ -1914,6 +1941,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     );
     const token = JSON.stringify([
       draft.kind,
+      draft.records,
       sources.map((source) => [source.id, source.x ? seriesId(source.x.ref) : null]),
     ]);
     if (token !== sourceToken) {
@@ -1931,7 +1959,7 @@ export function openChartEditor(options: ChartEditorOptions): {
     previewWarnings.textContent = unavailable
       ? `${unavailable} chosen source(s) unavailable. References are kept.`
       : "";
-    if (!sources.length) {
+    if (!sources.length && !draft.records) {
       clearPreview();
       previewStatus.textContent = "Choose a source in Data to see a preview.";
       return;
@@ -2018,23 +2046,27 @@ export function openChartEditor(options: ChartEditorOptions): {
         previewStatus.textContent = `${sources.length} image source(s) · preview only`;
         return;
       }
-      if (!options.store) {
+      if (!options.store && !draft.records || draft.records && !options.api) {
         previewStatus.textContent = `${sources.length} curve(s) chosen. Preview is available when connected.`;
         return;
       }
       if (!pendingLoad) {
         loadAbort = new AbortController();
         const signal = loadAbort.signal;
-        pendingLoad = loadPlotRuns(sources, options.store, signal);
+        pendingLoad = draft.records
+          ? loadRecordPlot(options.api!, clone(draft.records), options.catalog, options.selectedRunIds, signal).then(result => { if (!signal.aborted) { recordPreviewNotes = result.notes; recordPreviewSources = result.sources; } return result.data; })
+          : loadPlotRuns(sources, options.store!, signal);
       }
       previewStatus.textContent = hasPreviousScalarPreview()
         ? "Previous preview · updating sources…"
         : "Loading complete histories…";
       const [data, module] = await Promise.all([pendingLoad, import("./plot")]);
       if (closed || version !== previewVersion) return;
+      const stylesKey = JSON.stringify(recordPreviewSources.map(ref => ref.id));
+      if (valid.records && stylesKey !== renderedRecordStyles) { renderedRecordStyles = stylesKey; renderAppearance(); }
       const config = withRunColors(
         clone(valid.config),
-        sources,
+        valid.records ? recordPreviewSources : sources,
         options.catalog,
       );
       config.xLabel = editorAxisTitle(valid, "x");
@@ -2089,6 +2121,7 @@ export function openChartEditor(options: ChartEditorOptions): {
               renderedUnavailable
                 ? `${renderedUnavailable} source(s) unavailable.`
                 : "",
+              recordPreviewNotes,
               ...warnings,
             ]
               .filter(Boolean)
@@ -2124,8 +2157,8 @@ export function openChartEditor(options: ChartEditorOptions): {
       pendingScalarView = undefined;
       renderedScalarKind = valid.kind;
       previewTitle.textContent = valid.title || "Untitled chart";
-      const count = data.reduce((sum, series) => sum + series.raw.length, 0);
-      previewStatus.textContent = `${sources.length} curve(s) · ${count.toLocaleString()} observations${robustRangeApplied ? " · Central 98% display" : ""}`;
+      const count = data.reduce((sum, series) => sum + (series.paired?.points.length ?? series.raw.length), 0);
+      previewStatus.textContent = `${data.length} curve(s) · ${count.toLocaleString()} observations${robustRangeApplied ? " · Central 98% display" : ""}`;
       previewHost.dataset.observationCount = String(count);
     } catch (error) {
       if (closed || version !== previewVersion) return;
@@ -2150,7 +2183,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   form.onsubmit = async (event) => {
     event.preventDefault();
     if (saving || closed) return;
-    const sourceCount =
+    const sourceCount = draft.records ? draft.records.ys.length :
       draft.source.mode === "selected"
         ? draft.source.keys.length
         : draft.source.series.length;
@@ -2200,6 +2233,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   function close() {
     if (closed) return;
     closed = true;
+    recordControls?.destroy();
     ++previewVersion;
     clearTimeout(previewTimer);
     loadAbort?.abort();

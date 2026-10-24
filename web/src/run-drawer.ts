@@ -490,9 +490,9 @@ export class RunDrawer {
         const status = element(
           "span",
           `drawer-run-status status-${run.status}`,
-          run.status,
+          run.rx?.state ?? run.status,
         );
-        status.title = run.status;
+        status.title = run.rx?.state ?? run.status;
         row.root.replaceChildren(
           runSwatch(catalog, run.id),
           row.check,
