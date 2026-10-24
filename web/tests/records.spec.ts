@@ -386,7 +386,7 @@ test("container completion retains focus, literal paths remain distinct, Escape 
   await expect(y).not.toBeFocused();
 });
 
-test("partial hint sets never imply unique Tab completion", async ({
+test("sampled hints accept an offered path without requiring arrow selection", async ({
   page,
 }) => {
   await fixture(page);
@@ -420,15 +420,8 @@ test("partial hint sets never imply unique Tab completion", async ({
     page.getByRole("option", { name: /^epoch number/ }),
   ).toBeVisible();
   await x.press("Tab");
-  await expect(x).toHaveValue("epo");
-  await expect(x).not.toBeFocused();
-  await x.focus();
-  await expect(
-    page.getByRole("option", { name: /^epoch number/ }),
-  ).toBeVisible();
-  await x.press("ArrowDown");
-  await x.press("Tab");
   await expect(x).toHaveValue("epoch");
+  await expect(x).toBeFocused();
 });
 
 test("shell exposes rx beside native data, saves a record chart, and hides run mutation controls", async ({
@@ -683,4 +676,398 @@ test("raw inspector does not coerce object keys into array indices", async ({
       "seq 9007199254740993",
     );
   }
+});
+
+/** Real Add Chart flow, two scoped runs, mixed/sampled hints and delayed discovery. */
+async function freshCompletionEditor(page: Page) {
+  const { requests } = await fixture(page, true);
+  const settled: string[] = [];
+  let mode: "normal" | "partial" | "error" = "normal";
+  await page.route("**/api/catalog", (route) =>
+    route.fulfill({
+      json: { rx_enabled: true, experiments: [], runs: [], series: [] },
+    }),
+  );
+  await page.route("**/api/rx/catalog", (route) =>
+    route.fulfill({
+      json: {
+        source: { id: "rx:test", name: "completion fixture", readonly: true },
+        next_after: null,
+        runs: ["uid", "uid2"].map((uid, i) => ({
+          id: String(859 + i),
+          run_uid: uid,
+          state: "succeeded",
+          alias: null,
+          config: null,
+          argv: "[]",
+          created_at: "2026-01-01",
+          started_at: null,
+          finished_at: null,
+          exit_code: 0,
+        })),
+      },
+    }),
+  );
+  const diagnostics = {
+    scanned: 344,
+    matched: 344,
+    bytes: 12000,
+    invalid_json: 0,
+    oversized: 0,
+    skipped_axes: 262,
+    skipped_groups: 0,
+    omitted_traces: 0,
+    points: 4,
+    partial: false,
+    reasons: [],
+  };
+  await page.route("**/api/rx/fields", async (route) => {
+    const body = route.request().postDataJSON();
+    requests.push({ path: "/api/rx/fields", body });
+    await new Promise((resolve) =>
+      setTimeout(resolve, body.prefix === "met" ? 600 : 180),
+    );
+    const fields = (
+      body.prefix.startsWith("metrics.")
+        ? [
+            { path: "metrics.loss", types: ["number", "null"] },
+            { path: "metrics.loss_mean", types: ["number"] },
+            { path: "metrics.learning_rate", types: ["number"] },
+          ]
+        : [
+            { path: "epoch", types: ["number", "null"] },
+            { path: "metrics", types: ["object", "null"] },
+            { path: '$["metrics.loss"]', types: ["number"] },
+          ]
+    ).filter((f) => f.path.startsWith(body.prefix));
+    await route.fulfill({
+      json: {
+        diagnostics: {
+          ...diagnostics,
+          partial: true,
+          reasons: ["scan budget reached"],
+        },
+        fields: fields.map((f) => ({ ...f, present: 82, values: [] })),
+        records: [],
+        traces: [],
+        next_cursor: null,
+        coverage: "sampled hints",
+      },
+    });
+    settled.push(body.prefix);
+  });
+  await page.route("**/api/rx/plot", (route) => {
+    const body = route.request().postDataJSON();
+    requests.push({ path: "/api/rx/plot", body });
+    if (mode === "error")
+      return route.fulfill({
+        status: 503,
+        json: { error: "source unavailable" },
+      });
+    return route.fulfill({
+      json: {
+        diagnostics: {
+          ...diagnostics,
+          partial: mode === "partial",
+          reasons: mode === "partial" ? ["point budget reached"] : [],
+        },
+        fields: [],
+        records: [],
+        next_cursor: null,
+        coverage: "bounded snapshot",
+        traces: body.ys.map((y: string) => ({
+          run_uid: "uid",
+          y,
+          group: null,
+          points: [
+            [1, 0.2, "5"],
+            [1, 0.3, "7"],
+          ],
+        })),
+      },
+    });
+  });
+  await page.goto("/");
+  await page.getByLabel("Access token", { exact: true }).fill("test-secret");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page
+    .getByRole("button", { name: "rx \u00b7 completion fixture", exact: true })
+    .click();
+  await page
+    .getByRole("checkbox", { name: "Select all matching runs", exact: true })
+    .check();
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await page.locator("details[data-menu=add] summary").click();
+  await page.getByRole("button", { name: "Line plot", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Add chart", exact: true });
+  await expect(editor).toBeVisible();
+  return {
+    editor,
+    requests,
+    settled,
+    setMode: (value: typeof mode) => {
+      mode = value;
+    },
+  };
+}
+
+test("direct Tab completes freshly typed X and nested Y before async hints arrive", async ({
+  page,
+}) => {
+  const { editor, requests } = await freshCompletionEditor(page);
+  const x = editor.getByLabel("Record X field", { exact: true });
+  await x.fill("epo");
+  await x.press("Tab");
+  await expect(x).toHaveValue("epoch");
+  await expect(x).toBeFocused();
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("met");
+  await y.press("Tab");
+  await expect(y).toHaveValue("metrics.");
+  await expect(y).toBeFocused();
+  await y.fill("metrics.lo");
+  await y.press("Tab");
+  await expect(y).toHaveValue("metrics.loss");
+  await expect(y).toBeFocused();
+  // A shared prefix is not an arbitrary leaf choice. A second Tab accepts the
+  // exact offered field rather than silently selecting loss_mean.
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", {
+      name: "Remove Y field metrics.loss",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(y).toHaveValue("");
+  await expect(y).toBeFocused();
+  expect(
+    requests
+      .filter(
+        (r) =>
+          r.path.endsWith("/fields") &&
+          ["epo", "met", "metrics.lo"].includes(r.body.prefix),
+      )
+      .every(
+        (r) => JSON.stringify(r.body.runs) === JSON.stringify(["uid", "uid2"]),
+      ),
+  ).toBe(true);
+  await editor.getByRole("button", { name: "Add chart", exact: true }).click();
+  await page
+    .locator(".dashboard-cell")
+    .getByLabel("Chart actions", { exact: true })
+    .click();
+  await page.getByRole("button", { name: "Edit chart", exact: true }).click();
+  const reopened = page.getByRole("dialog");
+  const rx = reopened.getByLabel("Record X field", { exact: true });
+  await rx.fill("epo");
+  await rx.press("Tab");
+  await expect(rx).toHaveValue("epoch");
+  const ry = reopened.getByLabel("Add Y field", { exact: true });
+  await ry.fill("metrics.le");
+  await ry.press("Tab");
+  await expect(
+    reopened.getByRole("button", {
+      name: "Remove Y field metrics.learning_rate",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(ry).toBeFocused();
+});
+
+test("offered sampled field completes by direct Tab without arrow selection", async ({
+  page,
+}) => {
+  const { editor } = await freshCompletionEditor(page);
+  const x = editor.getByLabel("Record X field", { exact: true });
+  await x.fill("epo");
+  await expect(
+    page.getByRole("option", { name: /^epoch number/ }),
+  ).toBeVisible();
+  await x.press("Tab");
+  await expect(x).toHaveValue("epoch");
+  await expect(x).toBeFocused();
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("metrics.le");
+  await expect(
+    page.getByRole("option", { name: /^metrics.learning_rate number/ }),
+  ).toBeVisible();
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", {
+      name: "Remove Y field metrics.learning_rate",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(y).toBeFocused();
+});
+
+test("saved record cards omit routine diagnostics but expose truncation and failures", async ({
+  page,
+}) => {
+  const { editor, setMode } = await freshCompletionEditor(page);
+  const x = editor.getByLabel("Record X field", { exact: true });
+  await x.fill("epoch");
+  await x.press("Enter");
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("metrics.loss");
+  await y.press("Enter");
+  await editor.getByRole("button", { name: "Add chart", exact: true }).click();
+  const card = page.locator(".dashboard-cell");
+  await expect(card.locator(".uplot")).toBeVisible();
+  await expect(card.locator(".card-notice")).toBeHidden();
+  await expect(card).not.toContainText(
+    /matching.*scanned|missing\/non-numeric|Repeated\/restarted|grouping uses/,
+  );
+  await page.reload();
+  await expect(card.locator(".card-notice")).toBeHidden();
+  setMode("partial");
+  await page.reload();
+  await expect(card.locator(".card-notice")).toContainText(
+    "Partial result: point budget reached",
+  );
+  await expect(card.locator(".card-notice")).not.toContainText(
+    /matching|skipped|Repeated/,
+  );
+  setMode("error");
+  await page.reload();
+  await expect(card).toContainText("Could not load chart:");
+});
+
+test("direct Y Tab accepts a nested leaf immediately without preselection", async ({
+  page,
+}) => {
+  const { editor } = await freshCompletionEditor(page);
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("metrics.le");
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", {
+      name: "Remove Y field metrics.learning_rate",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(y).toHaveValue("");
+  await expect(y).toBeFocused();
+});
+
+test("direct completion preserves no-match, ambiguity, Shift+Tab, Escape and Enter", async ({
+  page,
+}) => {
+  const { editor, requests, settled } = await freshCompletionEditor(page);
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  for (const prefix of ["missing", "metrics.l"]) {
+    await y.fill(prefix);
+    await y.press("Tab");
+    await expect(
+      editor.getByRole("button", { name: "Add Y", exact: true }),
+    ).toBeFocused();
+    await expect(y).toHaveValue(prefix);
+    await expect(
+      editor.getByRole("button", { name: /^Remove Y field/ }),
+    ).toHaveCount(0);
+  }
+  await y.fill("metrics.le");
+  await y.press("Tab");
+  await y.press("Escape");
+  await expect.poll(() => settled.includes("metrics.le")).toBe(true);
+  await expect(editor).toBeVisible();
+  await expect(y).toHaveValue("metrics.le");
+  await expect(
+    editor.getByRole("button", { name: /^Remove Y field/ }),
+  ).toHaveCount(0);
+  await y.press("Tab");
+  await expect(y).not.toBeFocused();
+  await y.fill("met");
+  await y.press("Shift+Tab");
+  await expect(y).not.toBeFocused();
+  await y.fill('$["metrics.lo');
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", {
+      name: 'Remove Y field $["metrics.loss"]',
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole("button", {
+      name: "Remove Y field metrics.loss",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  const x = editor.getByLabel("Record X field", { exact: true });
+  await x.fill("custom.field");
+  await x.press("Enter");
+  await expect
+    .poll(() => requests.filter((r) => r.path.endsWith("/plot")).at(-1)?.body.x)
+    .toBe("custom.field");
+});
+
+test("pending Tab cannot replace new input or a later focused field", async ({
+  page,
+}) => {
+  const { editor, settled } = await freshCompletionEditor(page);
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("met");
+  await y.press("Tab");
+  await y.fill("metrics.le");
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", {
+      name: "Remove Y field metrics.learning_rate",
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  const x = editor.getByLabel("Record X field", { exact: true });
+  await x.focus();
+  await expect.poll(() => settled.includes("met")).toBe(true);
+  await expect(y).toHaveValue("");
+  await expect(x).toBeFocused();
+  await expect(
+    editor.getByRole("button", { name: /^Remove Y field/ }),
+  ).toHaveCount(1);
+});
+
+test("unresponsive completion releases Tab focus without a late replacement", async ({
+  page,
+}) => {
+  const { editor } = await freshCompletionEditor(page);
+  let settled = false;
+  await page.route("**/api/rx/fields", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    await route.fulfill({
+      json: {
+        diagnostics: {
+          scanned: 1,
+          matched: 1,
+          bytes: 1,
+          partial: false,
+          reasons: [],
+        },
+        fields: [
+          {
+            path: "metrics.learning_rate",
+            types: ["number"],
+            present: 1,
+            values: [],
+          },
+        ],
+        records: [],
+        traces: [],
+        coverage: "sample",
+        next_cursor: null,
+      },
+    });
+    settled = true;
+  });
+  const y = editor.getByLabel("Add Y field", { exact: true });
+  await y.fill("metrics.le");
+  await y.press("Tab");
+  await expect(
+    editor.getByRole("button", { name: "Add Y", exact: true }),
+  ).toBeFocused();
+  await expect.poll(() => settled).toBe(true);
+  await expect(y).toHaveValue("metrics.le");
+  await expect(
+    editor.getByRole("button", { name: /^Remove Y field/ }),
+  ).toHaveCount(0);
 });

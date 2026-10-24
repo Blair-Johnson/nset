@@ -961,7 +961,7 @@ export class ChartCard {
         controller.signal.aborted
       )
         return;
-      if (recordResult) { this.notice.textContent = recordResult.notes; this.sources = recordResult.sources; }
+      if (recordResult) { this.notice.textContent = recordResult.warning; this.sources = recordResult.sources; }
       this.raw = data;
       this.data = analyze(data, this.spec.config);
       const display = this.displayConfig();

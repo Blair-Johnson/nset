@@ -102,8 +102,10 @@ export function mountRecordControls(
     filterDraft?: () => RecordFilters,
   ) {
     let hints: FieldHint[] = [],
-      suggestions: Suggestion[] = [],
-      complete = false;
+      suggestions: Suggestion[] = [];
+    let readyVersion = -1,
+      requestedVersion = -1;
+    let inFlight: Promise<void> | undefined;
     let pending: AbortController | undefined,
       timer: ReturnType<typeof setTimeout> | undefined,
       generation = 0;
@@ -126,8 +128,20 @@ export function mountRecordControls(
       input,
       () => suggestions,
       picked,
-      () => complete,
+      // Offered paths are valid even when discovery is sampled/truncated.
+      () => true,
+      ensureHints,
     );
+    function ensureHints(): Promise<void> | undefined {
+      if (!api || lifetime.signal.aborted || readyVersion === generation)
+        return;
+      clearTimeout(timer);
+      if (requestedVersion !== generation) {
+        requestedVersion = generation;
+        inFlight = refresh(generation);
+      }
+      return inFlight;
+    }
     async function refresh(version: number) {
       if (
         !api ||
@@ -137,7 +151,7 @@ export function mountRecordControls(
       )
         return;
       pending?.abort();
-      pending = new AbortController();
+      const controller = (pending = new AbortController());
       const prefix = input.value;
       const filters = structuredClone(filterDraft?.() ?? b.filters);
       if (omit !== undefined) filters.conditions.splice(omit, 1);
@@ -146,17 +160,17 @@ export function mountRecordControls(
         const result = await api.post<RecordResult>(
           "/rx/fields",
           { ...request(), filters, prefix },
-          pending.signal,
+          controller.signal,
         );
         if (
           version !== generation ||
           lifetime.signal.aborted ||
-          pending.signal.aborted ||
+          controller.signal.aborted ||
           input.value !== prefix
         )
           return;
         hints = result.fields;
-        complete = !result.diagnostics.partial;
+
         suggestions = hints.map((h) => ({
           value: h.path,
           detail: `${h.types.join("/")} · ${h.present}/${result.diagnostics.matched} sampled${h.values.length ? ` · ${h.values.map((v) => JSON.stringify(v)).join(", ")}` : ""}`,
@@ -167,10 +181,12 @@ export function mountRecordControls(
         if (
           version !== generation ||
           lifetime.signal.aborted ||
-          pending.signal.aborted
+          controller.signal.aborted
         )
           return;
         status.textContent = `Field hints unavailable: ${error instanceof Error ? error.message : String(error)}. Exact paths remain usable.`;
+      } finally {
+        if (version === generation) readyVersion = version;
       }
     }
     const schedule = () => {
@@ -178,10 +194,10 @@ export function mountRecordControls(
       pending?.abort();
       clearTimeout(timer);
       suggestions = [];
-      complete = false;
+      hints = [];
+      readyVersion = -1;
       adapter.close();
-      const version = generation;
-      timer = setTimeout(() => void refresh(version), 120);
+      timer = setTimeout(() => void ensureHints(), 120);
     };
     invalidate.push(schedule);
     input.addEventListener("input", schedule, { signal: lifetime.signal });
@@ -200,7 +216,7 @@ export function mountRecordControls(
     cleanups.push(() => {
       pending?.abort();
       clearTimeout(timer);
-      adapter.close();
+      adapter.dispose();
     });
   }
   function valueSuggestions(

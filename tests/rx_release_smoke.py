@@ -89,6 +89,14 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
                      "x": "epoch", "ys": ["train_loss", "val_loss"],
                      "filters": {"conditions": [
                          {"path": "kind", "op": "eq", "value": "epoch"}]}}
+            # Verify this executable embeds this run's UI, not a stale bundle.
+            assets = [Path("web/dist/index.html"), *Path("web/dist/assets").iterdir()]
+            for asset in assets:
+                if not asset.is_file():
+                    continue
+                route = "/" if asset.name == "index.html" else "/" + asset.relative_to("web/dist").as_posix()
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{route}", timeout=3) as response:
+                    assert response.read(asset.stat().st_size + 1) == asset.read_bytes(), asset
             result = request("/rx/plot", query)
             assert len(result["traces"]) == 2, result
             assert all(len(trace["points"]) == 6 for trace in result["traces"])
@@ -106,4 +114,4 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
                 raise
 print(json.dumps({"kind": "final", "gates": "passed", "binary": "artifacts/nset",
                   "fixture": "artifacts/rx-demo", "standalone_traces": 2,
-                  "points_per_trace": 6, "source_unchanged": True}))
+                  "points_per_trace": 6, "source_unchanged": True, "embedded_ui_current": True}))

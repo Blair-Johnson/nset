@@ -464,3 +464,28 @@ test("failed saved-view creation rolls back name, identity and view-action focus
   ).toBe(before);
   await expect(page.getByLabel("View actions", { exact: true })).toBeFocused();
 });
+
+test("native run-filter paths and values still complete with direct Tab", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "Vision study", exact: true }).click();
+  await page
+    .getByLabel("Filter runs by config or tags", { exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "+ Add condition", exact: true })
+    .click();
+  const path = page.getByLabel("Condition 1 path", { exact: true });
+  await path.fill("tag:mo");
+  await path.press("Tab");
+  await expect(path).toHaveValue("tag:model");
+  const value = page.getByLabel("Condition 1 value", { exact: true });
+  await expect(value).toBeFocused();
+  await value.fill("res");
+  await value.press("Tab");
+  await expect(value).toHaveValue("resnet");
+  await value.press("Shift+Tab");
+  await expect(value).not.toBeFocused();
+  await expect(page.locator(".run-table tbody tr")).toHaveCount(2);
+});

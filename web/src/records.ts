@@ -266,7 +266,12 @@ export async function loadRecordPlot(
   catalog: Catalog,
   selected: string[],
   signal?: AbortSignal,
-): Promise<{ data: PlotRun[]; sources: ResolvedSeries[]; notes: string }> {
+): Promise<{
+  data: PlotRun[];
+  sources: ResolvedSeries[];
+  notes: string;
+  warning: string;
+}> {
   validateRecordBinding(b);
   const response = await api.post<RecordResult>(
     "/rx/plot",
@@ -311,6 +316,9 @@ export async function loadRecordPlot(
   return {
     data,
     sources,
+    warning: response.diagnostics.partial
+      ? `Partial result: ${response.diagnostics.reasons.join(", ")}`
+      : "",
     notes: `${recordNotes(response)}${restarted ? " · Repeated/restarted X retained in event order; grouping uses only each record’s own scalar field." : ""}`,
   };
 }
