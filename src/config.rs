@@ -94,9 +94,46 @@ impl ConcurrencyOptions {
     }
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct IngestConfig {
+    /// Pending in-memory durable intake jobs, excluding the executing job.
+    #[arg(long, env = "NSET_INGEST_QUEUE_CAPACITY", default_value_t = 64, value_parser = parse_count::<4096>)]
+    pub ingest_queue_capacity: usize,
+    /// Maximum pending journal payload bytes; receipts and SQLite overhead are extra.
+    #[arg(long, env = "NSET_INGEST_MAX_PENDING_BYTES", default_value_t = 268_435_456)]
+    pub ingest_max_pending_bytes: u64,
+    #[arg(long, env = "NSET_INGEST_MAX_PENDING_BATCHES", default_value_t = 10_000, value_parser = parse_count::<1000000>)]
+    pub ingest_max_pending_batches: usize,
+    #[arg(long, env = "NSET_INGEST_POLL_INTERVAL_MS", default_value_t = 100)]
+    pub ingest_poll_interval_ms: u64,
+    /// Accept durable batches without projecting them (maintenance/recovery only).
+    #[arg(long, env = "NSET_INGEST_PAUSED", default_value_t = false)]
+    pub ingest_paused: bool,
+}
+impl IngestConfig {
+    pub fn options(&self) -> Result<crate::ingest::IngestOptions> {
+        if self.ingest_max_pending_bytes == 0
+            || self.ingest_max_pending_bytes > i64::MAX as u64
+            || !(1..=60_000).contains(&self.ingest_poll_interval_ms)
+        {
+            return Err(ApiError::bad("invalid durable ingest limits"));
+        }
+        check_count(self.ingest_queue_capacity, 4096, "invalid ingest queue capacity")?;
+        check_count(self.ingest_max_pending_batches, 1_000_000, "invalid ingest batch capacity")?;
+        Ok(crate::ingest::IngestOptions {
+            queue_capacity: self.ingest_queue_capacity,
+            max_pending_bytes: self.ingest_max_pending_bytes,
+            max_pending_batches: self.ingest_max_pending_batches,
+            poll_interval_ms: self.ingest_poll_interval_ms,
+            paused: self.ingest_paused,
+        })
+    }
+}
 #[derive(Parser)]
 #[command(name = "nset", version, about = "Local experiment tracker")]
 pub struct Config {
+    #[command(flatten)]
+    pub ingest: IngestConfig,
     #[command(flatten)]
     pub concurrency: ConcurrencyOptions,
     #[arg(long, default_value = "data")]

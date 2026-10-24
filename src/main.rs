@@ -15,6 +15,7 @@ fn main() {
 }
 fn run(config: Config) -> nset::errors::Result<()> {
     config.concurrency.validate()?;
+    config.ingest.options()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.concurrency.http_workers)
         .enable_all()
@@ -24,7 +25,9 @@ fn run(config: Config) -> nset::errors::Result<()> {
 
 async fn serve(config: Config) -> nset::errors::Result<()> {
     let token = config.load_token()?;
-    let state = AppState::open_with_options(&config.data_dir, token, &config.concurrency)?;
+    let state = AppState::open_with_ingest_options(
+        &config.data_dir, token, &config.concurrency, config.ingest.options()?,
+    )?;
     tracing::info!(
         http_workers = config.concurrency.http_workers,
         read_workers = config.concurrency.read_workers,

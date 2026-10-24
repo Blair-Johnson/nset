@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct AppState {
     pub db: db::Database,
+    pub ingest: ingest::DurableIngest,
     pub token: auth::Token,
     pub image_slots: Arc<Semaphore>,
     pub write_slots: Arc<Semaphore>,
@@ -24,14 +25,25 @@ impl AppState {
         token: auth::Token,
         options: &config::ConcurrencyOptions,
     ) -> errors::Result<Self> {
-        // Validate every option before Database::open_with_options can touch disk.
+        Self::open_with_ingest_options(path, token, options, ingest::IngestOptions::default())
+    }
+
+    pub fn open_with_ingest_options(
+        path: &Path,
+        token: auth::Token,
+        options: &config::ConcurrencyOptions,
+        ingest_options: ingest::IngestOptions,
+    ) -> errors::Result<Self> {
+        // Validate all limits before either database can touch disk.
         options.validate()?;
+        ingest_options.validate()?;
+        let db = db::Database::open_with_options(
+            path, options.read_workers, options.db_queue_capacity,
+        )?;
+        let ingest = ingest::DurableIngest::open(path, db.clone(), ingest_options)?;
         Ok(Self {
-            db: db::Database::open_with_options(
-                path,
-                options.read_workers,
-                options.db_queue_capacity,
-            )?,
+            db,
+            ingest,
             token,
             image_slots: Arc::new(Semaphore::new(options.image_concurrency)),
             write_slots: Arc::new(Semaphore::new(options.write_concurrency)),

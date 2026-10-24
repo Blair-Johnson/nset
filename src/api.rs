@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,11 +36,17 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/runs/{id}/images",
-            post(insert_image).route_layer(admission),
+            post(insert_image).route_layer(admission.clone()),
+        )
+        .route(
+            "/runs/{id}/ingest/{batch_id}",
+            put(durable_submit).route_layer(admission),
         );
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/catalog", get(catalog))
+        .route("/runs/{id}/ingest/{batch_id}", get(durable_receipt))
+        .route("/ingest/status", get(durable_status))
         .route("/experiments", get(experiments))
         .route("/runs", get(runs))
         .route("/runs/{id}", get(run))
@@ -274,4 +280,24 @@ async fn image_content(State(state): State<AppState>, Path(id): Path<String>) ->
         bytes,
     )
         .into_response())
+}
+
+async fn durable_submit(
+    State(state): State<AppState>,
+    Path((run_id, batch_id)): Path<(String, String)>,
+    Json(batch): Json<MetricBatch>,
+) -> Result<Response> {
+    let receipt = state.ingest.submit(run_id, batch_id, batch).await?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)).into_response())
+}
+
+async fn durable_receipt(
+    State(state): State<AppState>,
+    Path((run_id, batch_id)): Path<(String, String)>,
+) -> Result<Json<crate::ingest::IngestReceipt>> {
+    Ok(Json(state.ingest.receipt(run_id, batch_id).await?))
+}
+
+async fn durable_status(State(state): State<AppState>) -> Result<Json<crate::ingest::IngestStatus>> {
+    Ok(Json(state.ingest.status().await?))
 }
