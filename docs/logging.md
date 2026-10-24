@@ -4,37 +4,36 @@ Start the server as shown in the [README](../README.md). All clients use its add
 
 ## Native Python client
 
-Install `pip install ./client` from the checkout in a Python 3.10+ training environment. The [README example](../README.md#log-data) creates an experiment and run. Inside that run, log scalars and an existing PNG, JPEG, or WebP file:
+Install `pip install ./client` from the checkout in a Python 3.10+ training environment. The [README example](../README.md#log-data) creates an experiment and run:
 
 ```python
 run.log_metrics({"train/loss": 0.23, "train/accuracy": 0.94}, step=100)
 run.log_image("train/prediction", "prediction.png", step=100)
 ```
 
-`run.log_batch(rows)` accepts dictionaries with `key`, `step`, `value`, and optional `timestamp`. `client.metric_history(run.id, "train/loss")` iterates the complete paginated history. Exiting the run context marks it finished, or failed when an exception escapes.
+Scalar logging is durable by default. `log_metrics` and `log_batch` return `{"accepted": count}` after a local commit. Delivery runs automatically with retry/backoff. Lost responses and restarts reuse the same stored batch, without duplicate observations. Calling a logging method again creates new observations; do not resubmit successful calls.
 
-- Each scalar request contains 1–10,000 observations and commits atomically. Metric values must be finite; names and keys are 1–512 UTF-8 bytes.
-- Steps and timestamps are integers from 0 through 9,007,199,254,740,991. Timestamps are Unix epoch milliseconds; omission uses server acceptance time.
-- Request bodies are limited to 32 MiB. Images also undergo decoding checks, with a 32,768-pixel limit per dimension and a 256 MiB decoder allocation limit. Original image bytes are retained.
-- Ordinary logging calls are synchronous and have no automatic retries. Repeated scalar writes append observations. A lost response can leave a committed write, so blindly retrying can duplicate data.
+`run.flush()` waits for its queued scalars to reach durable server storage; `client.flush()` covers all queued runs for that destination. Query visibility follows asynchronously. `client.metric_history(run.id, "train/loss")` reads the complete currently visible history.
 
-## Durable scalar delivery
+`run.finish()` and run-context exit flush before marking the run finished (or failed if training raises). Delivery timeout raises `DeliveryTimeoutError`; permanent HTTP rejection raises `DeliveryError`. Data remains local and the run is not marked complete. An existing training exception stays primary, with a failure note. A subsequent status-request error can leave status uncertain, but scalars are already accepted.
 
-For retry-safe scalar logging, use a local outbox inside an active native run:
+Use `with Client(...) as client:` or `client.close()` to drain and stop delivery. The default wait is 30 seconds; change it with `Client(..., flush_timeout=60)` or `timeout=60` on `flush`, `finish`, or `close` (0–300 seconds). Timed-out close does not wait indefinitely on network workers. Local filesystem operations still depend on the OS and disk.
 
-```python
-with client.durable_outbox("training-outbox.sqlite3") as outbox:
-    batch_id = outbox.enqueue(run.id, [{"key": "loss", "step": 100, "value": 0.23}])
-    outbox.flush()
-```
+### Recovery and limits
 
-`enqueue` commits locally and returns a stable batch ID. `flush` sends pending batches, removes each only after a matching server receipt, and raises on delivery failure while retaining failed rows. Reopen the same spool with the same destination to resume; pending rows already contain their run IDs. Protect the spool directory: it contains plaintext observations. Run creation, completion, and image logging remain separate synchronous calls.
+Creating a `Client` with the same server URL automatically resumes retained batches from previous clients/processes. Correct authentication or validation/conflict problems before reopening. Completion is not queued: retry `finish()` on the existing run after recovery. Create a fresh client after a fork.
 
-Call `outbox.start()` for background delivery with backoff. Context entry leaves delivery stopped; `close()` and context exit stop workers without draining pending rows. Check `pending_count()` and `last_error`. Correct authentication, validation, and conflicting-ID errors before retrying. Socket timeouts bound individual socket operations; DNS resolution or a trickling peer can delay shutdown.
+`client.spool_path` locates the private SQLite spool, separated by server URL under:
 
-The underlying authenticated endpoint is `PUT /api/runs/{run_id}/ingest/{batch_id}`, with body `{"metrics":[{"key":"loss","step":100,"value":0.23}]}`. Batch IDs are 1–128 ASCII letters, digits, dots, underscores, or hyphens, scoped to a run. Retrying the same ID and canonical payload returns the original receipt; different data under that ID returns HTTP 409. Preserve timestamps, including their omission, on retries.
+- macOS: `~/Library/Application Support/nset/outbox`
+- Linux: `$XDG_STATE_HOME/nset/outbox`, defaulting to `~/.local/state/nset/outbox`
+- Windows: `%LOCALAPPDATA%\nset\outbox`
 
-HTTP 202 acknowledges a durable journal commit. Query visibility follows asynchronously. `GET` on the same path returns `state` (`pending` or `applied`), `accepted` (observation count), and `accepted_at` (milliseconds). A pending receipt is enough for the outbox to release its copy. Journal replay preserves batch identity across server restarts; durability depends on storage honoring synchronization.
+Tokens are never stored; observations and destination URLs are plaintext. Retain the spool and its SQLite sidecars on local storage that honors synchronization. Losing or deleting them can lose undelivered data. Capacity is 10,000 pending batches or 256 MiB of payloads, plus SQLite overhead. Capacity and disk-write failures raise rather than evict data or report acceptance.
+
+- `run.log_batch(rows)` accepts 1–10,000 dictionaries with `key`, `step`, `value`, and optional `timestamp`. Values must be finite; keys are 1–512 UTF-8 bytes; request bodies are at most 32 MiB.
+- Steps and timestamps are integers from 0 through 9,007,199,254,740,991. Timestamps are Unix epoch milliseconds. Omission uses the server's first acceptance time, preserved on retries.
+- Experiment/run creation requires a reachable server. Images remain synchronous uploads without the scalar retry/spool guarantee. PNG, JPEG, and WebP originals are retained after acceptance; limits are 32 MiB per request, 32,768 pixels per dimension, and 256 MiB of decoder allocation.
 
 ## MLflow
 
@@ -69,7 +68,7 @@ These adapters implement a scoped tracking subset. The locked SDK test environme
 
 ## Server storage and recovery
 
-Keep the `--db-path` directory on local storage. Stop the server before backing up the whole directory together: `nset.sqlite3`, `ingest.sqlite3`, native images, `nset.lock`, and any SQLite WAL/SHM sidecars. Restore them from the same backup. Producer outboxes and W&B offline runs also need retention until delivery is confirmed.
+Keep the `--db-path` directory on local storage. Stop the server before backing up the whole directory together: `nset.sqlite3`, `ingest.sqlite3`, native images, `nset.lock`, and any SQLite WAL/SHM sidecars. Restore them from the same backup. Native client spools and W&B offline runs also need retention until delivery is confirmed.
 
 Authenticated `GET /api/ingest/status` reports pending batches/bytes and the last projection error. A damaged batch remains pending and blocks later projection; preserve the databases while investigating. Capacity errors retain accepted batches. Retry temporary delivery failures with stable identities and backoff, honoring `Retry-After`; an HTTP error can follow acceptance. Compatibility operations split into native chunks, so a large operation can become partially visible before completion.
 
