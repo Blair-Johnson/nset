@@ -99,6 +99,38 @@ class OutboxTests(unittest.TestCase):
         byte_box.enqueue("run", METRICS, batch_id="exact")
         self.assertEqual(len(self.rows()[0][2]), size)
 
+    def test_wire_body_limit_counts_canonical_bytes_before_transaction(self):
+        box = self.box()
+        box.enqueue("run", METRICS, batch_id="existing")
+        metrics = [{"value": 1.25, "step": 0, "key": "\x00\u00e9"}]
+        expected = '{"metrics":[{"key":"\\u0000\u00e9","step":0,"value":1.25}]}'.encode("utf-8")
+        with patch("nset_client.outbox._MAX_BODY", len(expected)):
+            self.assertEqual(box.enqueue("run", metrics, batch_id="exact"), "exact")
+            self.assertEqual(self.rows()[-1][2], expected)
+            originals = self.rows()
+            statements = []
+            box._db.set_trace_callback(statements.append)
+            try:
+                # One extra ASCII byte crosses the exact canonical UTF-8 boundary.
+                oversized = [dict(metrics[0], key="\x00\u00e9a")]
+                with self.assertRaisesRegex(ValueError, "HTTP body limit"):
+                    box.enqueue("run", oversized, batch_id="oversized")
+                self.assertEqual(statements, [])  # Not even BEGIN was issued.
+            finally:
+                box._db.set_trace_callback(None)
+            self.assertEqual(self.rows(), originals)
+        box.close()
+        self.assertEqual(self.box().pending_count(), 2)
+
+    def test_native_wire_body_limit_rejects_escape_expansion(self):
+        box = self.box()
+        box.enqueue("run", METRICS, batch_id="existing")
+        originals = self.rows()
+        metrics = [{"key": "\x00" * 512, "step": 0, "value": 10**308}] * 10000
+        with self.assertRaisesRegex(ValueError, "33554432-byte HTTP body limit"):
+            box.enqueue("run", metrics, batch_id="oversized")
+        self.assertEqual(self.rows(), originals)
+
     def test_dropped_ack_replays_exact_bytes_and_id(self):
         box = self.box()
         box.enqueue("run", METRICS, batch_id="stable")
@@ -435,6 +467,116 @@ class OutboxTests(unittest.TestCase):
                 close_one.result(3)
                 close_two.result(3)
         self.assertEqual(self.box().pending_count(), 0)
+
+    def test_interrupted_close_owner_releases_concurrent_follower(self):
+        for interrupt_at in ("join", "wait"):
+            with self.subTest(interrupt_at=interrupt_at):
+                self.path = Path(self.temp.name) / f"{interrupt_at}.sqlite3"
+                box = self.client.durable_outbox(self.path)
+                box.enqueue("run", METRICS, batch_id="pending")
+                originals = self.rows()
+                entered, release = threading.Event(), threading.Event()
+                owner_blocked, follower_waiting = threading.Event(), threading.Event()
+                interrupted, successor_waiting = threading.Event(), threading.Event()
+                interruption = KeyboardInterrupt("close interrupted")
+                calls = []
+
+                def call(function):
+                    result = concurrent.futures.Future()
+                    def run():
+                        try:
+                            result.set_result(function())
+                        except BaseException as error:
+                            result.set_exception(error)
+                    thread = threading.Thread(target=run, daemon=True)
+                    calls.append(thread)
+                    return thread, result
+
+                def slow(*args, **kwargs):
+                    entered.set()
+                    if not release.wait(3):
+                        raise TimeoutError("test delivery was not released")
+                    return {}  # No valid acceptance; the row must survive close.
+
+                real_wait = box._condition.wait
+                def wait(timeout=None):
+                    current = threading.current_thread()
+                    if current is owner and interrupt_at == "wait":
+                        owner_blocked.set()
+                        if not follower_waiting.is_set():
+                            real_wait(3)  # Releases the lock for the follower.
+                        if not follower_waiting.is_set():
+                            raise TimeoutError("concurrent closer did not wait")
+                        interrupted.set()
+                        raise interruption
+                    if current is follower:
+                        if interrupted.is_set():
+                            successor_waiting.set()
+                        else:
+                            follower_waiting.set()
+                            box._condition.notify_all()
+                    return real_wait(timeout)
+
+                owner, owner_result = call(box.close)
+                follower, follower_result = call(box.close)
+                retry, retry_result = call(box.close)
+                try:
+                    with patch.object(box._http, "request", side_effect=slow):
+                        if interrupt_at == "join":
+                            box.start()
+                            worker = box._threads[0]
+                            real_join = worker.join
+                            def join(timeout=None):
+                                if threading.current_thread() is owner:
+                                    owner_blocked.set()
+                                    if not follower_waiting.wait(3):
+                                        raise TimeoutError("concurrent closer did not wait")
+                                    interrupted.set()
+                                    raise interruption
+                                successor_waiting.set()
+                                return real_join(timeout)
+                        else:
+                            delivery, delivery_result = call(box.flush)
+                            delivery.start()
+                        self.assertTrue(entered.wait(3))
+                        # In the wait case there are no workers to join.
+                        join_patch = (patch.object(worker, "join", side_effect=join)
+                                      if interrupt_at == "join" else
+                                      patch.object(box, "_threads", []))
+                        with join_patch, patch.object(box._condition, "wait", side_effect=wait):
+                            owner.start()
+                            self.assertTrue(owner_blocked.wait(3))
+                            follower.start()
+                            with self.assertRaises(KeyboardInterrupt) as caught:
+                                owner_result.result(3)
+                            self.assertIs(caught.exception, interruption)
+                            self.assertTrue(successor_waiting.wait(3))
+                            self.assertTrue(box._stop.is_set())
+                            with box._condition:
+                                self.assertEqual(box._active, 1)
+                                self.assertFalse(box._closed)
+                                self.assertEqual(box._db.execute("SELECT 1").fetchone(), (1,))
+                            self.assertFalse(follower_result.done())
+                            retry.start()
+                            release.set()
+                            follower_result.result(3)
+                            retry_result.result(3)
+                        if interrupt_at == "wait":
+                            with self.assertRaises(InvalidReceiptError):
+                                delivery_result.result(3)
+                        self.assertIsInstance(box.last_error, InvalidReceiptError)
+                        self.assertTrue(box._closed)
+                finally:
+                    release.set()
+                    # Daemon callers and bounded joins keep regressions from hanging the suite.
+                    for thread in calls:
+                        if thread.ident is not None:
+                            thread.join(3)
+                self.assertTrue(all(not thread.is_alive() for thread in calls))
+                box.close()
+                reopened = self.box()
+                self.assertEqual(reopened.pending_count(), 1)
+                self.assertEqual(self.rows(), originals)
 
     def test_close_context_and_reopen_never_imply_flush(self):
         with patch("nset_client.outbox.Transport.request") as send:

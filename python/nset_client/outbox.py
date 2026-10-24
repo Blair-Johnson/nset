@@ -21,6 +21,7 @@ import weakref
 from .transport import Transport
 
 _MAX_SAFE = 9_007_199_254_740_991
+_MAX_BODY = 32 * 1024 * 1024  # Native HTTP body limit (src/config.rs).
 _BATCH_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY = weakref.WeakValueDictionary()
@@ -84,8 +85,11 @@ def _payload(metrics):
         rows.append(row)
     if not rows:
         raise ValueError("a batch must contain 1..10000 metric observations")
-    return json.dumps({"metrics": rows}, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode("utf-8"), len(rows)
+    payload = json.dumps({"metrics": rows}, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if len(payload) > _MAX_BODY:
+        raise ValueError(f"canonical batch payload exceeds the {_MAX_BODY}-byte HTTP body limit")
+    return payload, len(rows)
 
 
 class DurableOutbox:
@@ -113,6 +117,7 @@ class DurableOutbox:
     delivery and context exit only closes, even on an exception. After close,
     reopen the same file to inspect or deliver remaining rows.
 
+    Each canonical HTTP payload must fit the native 32 MiB body limit.
     Limits bound pending canonical payload bytes/count, not physical SQLite file
     size. Same-ID different bytes are rejected locally only while pending; after
     acknowledgement, conflicts are the server's responsibility.
@@ -317,21 +322,27 @@ class DurableOutbox:
 
     def close(self):
         """Stop/join delivery and close SQLite without flushing or dropping rows."""
-        with self._condition:
-            if self._closed:
-                return
-            if self._closing:
-                self._condition.wait_for(lambda: self._closed)
-                return
-            self._closing = True
-            self._stop.set()
-        for thread in self._threads:
-            thread.join()
-        with self._condition:
-            self._condition.wait_for(lambda: self._active == 0)
-            self._db.close()
-            self._closed = True
-            self._condition.notify_all()
+        owner = False
+        try:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or not self._closing)
+                if self._closed:
+                    return
+                owner = True
+                self._closing = True
+                self._stop.set()
+            for thread in self._threads:
+                thread.join()
+            with self._condition:
+                self._condition.wait_for(lambda: self._active == 0)
+                self._db.close()
+                self._closed = True
+        finally:
+            if owner:
+                with self._condition:
+                    # An interrupted owner must let another closer finish safely.
+                    self._closing = False
+                    self._condition.notify_all()
 
     def __enter__(self):
         with self._state.lock:
