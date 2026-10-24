@@ -1,6 +1,6 @@
 # Building and contributing
 
-The serving instructions in `README.md` assume an already-built `nset`. This guide covers building that executable from source; it does not imply that published binary downloads exist.
+The README contains a quick start. This guide covers source builds and development checks in more detail.
 
 ## Locked source build
 
