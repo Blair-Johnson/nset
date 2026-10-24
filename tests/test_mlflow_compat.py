@@ -585,6 +585,76 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertEqual(len(native["points"]), 1001)
         self.assertEqual(len({(m["step"], m["timestamp"], m["value"]) for m in native["points"]}), 1001)
 
+    def test_surrogate_values_rejected_without_mutation_and_usable_after_restart(self):
+        from urllib.error import HTTPError
+        from urllib.request import Request as HTTPRequest, urlopen
+
+        eid = self.client.create_experiment("unicode-" + uuid.uuid4().hex)
+        runs = []
+        metric = {"key": "loss", "value": 2.0, "timestamp": 2, "step": 2}
+        for surrogate in ("\ud800", "\udfff"):
+            for target in ("parameter", "tag", "batch-param", "batch-tag"):
+                with self.subTest(surrogate=repr(surrogate), target=target):
+                    rid = self.client.create_run(eid).info.run_id
+                    self.client.log_metric(rid, "loss", 1.0, timestamp=1, step=1)
+                    stored = self.ctx.state.get(adapter.RUN, rid)
+                    namespace = adapter._metric_namespace(stored)
+                    index = self.ctx.state.items(namespace)
+                    native_path = f'/api/runs/{stored["native_id"]}'
+                    native = self.ctx.native.request("GET", native_path)
+                    points = self.ctx.native.request("GET", native_path + "/metrics",
+                                                     query={"key": "loss", "limit": 100})
+                    if target.startswith("batch-"):
+                        route = "runs/log-batch"
+                        payload = {"run_id": rid, "metrics": [metric],
+                                   "params": [{"key": "p", "value": "valid"}],
+                                   "tags": [{"key": "t", "value": "valid"}]}
+                        field = "params" if target == "batch-param" else "tags"
+                        payload[field][0]["value"] = surrogate
+                    else:
+                        route = "runs/log-parameter" if target == "parameter" else "runs/set-tag"
+                        payload = {"run_id": rid, "key": "invalid", "value": surrogate}
+                    # Send escaped JSON directly so SDK validation cannot hide the bug.
+                    request = HTTPRequest(self.ctx.public_url + adapter.API + route,
+                                          data=json.dumps(payload).encode("utf-8"),
+                                          headers={"Authorization": "Bearer " + self.native.token,
+                                                   "Content-Type": "application/json"})
+                    with self.assertRaises(HTTPError) as rejected:
+                        with urlopen(request, timeout=10):
+                            pass
+                    with rejected.exception as response:
+                        self.assertEqual(response.code, 400)
+                        self.assertEqual(json.load(response)["error_code"], "INVALID_PARAMETER_VALUE")
+                    self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, rid))
+                    self.assertEqual(self.ctx.state.get(adapter.RUN, rid), stored)
+                    self.assertEqual(self.ctx.state.items(namespace), index)
+                    self.assertEqual(self.ctx.native.request("GET", native_path), native)
+                    self.assertEqual(self.ctx.native.request("GET", native_path + "/metrics",
+                                                            query={"key": "loss", "limit": 100}), points)
+                    self.assertEqual(self.client.get_run(rid).data.metrics, {"loss": 1.0})
+                    runs.append(rid)
+        self.__class__._stop_gateway()
+        self.native.stop()
+        self.native.start()
+        self.__class__._start_gateway()
+        for rid in runs:
+            with self.subTest(restarted_run=rid):
+                self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, rid))
+                self.assertEqual(self.client.get_run(rid).data.metrics, {"loss": 1.0})
+                self.client.log_metric(rid, "loss", 2.0, timestamp=2, step=2)
+                # Valid non-ASCII and non-BMP values remain supported.
+                self.client.log_param(rid, "p", "caf\u00e9 \U0001f600")
+                self.client.set_tag(rid, "t", "\u754c \U0001f600")
+                run = self.client.get_run(rid)
+                self.assertEqual(run.data.params["p"], "caf\u00e9 \U0001f600")
+                self.assertEqual(run.data.tags["t"], "\u754c \U0001f600")
+                self.assertEqual(run.data.metrics, {"loss": 2.0})
+                self.assertEqual(len(self.client.get_metric_history(rid, "loss")), 2)
+                stored = self.ctx.state.get(adapter.RUN, rid)
+                self.assertNotIn("pending", stored)
+                self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 2)
+        self.assertEqual({r.info.run_id for r in self.client.search_runs([eid], "metrics.loss = 2")}, set(runs))
+
     def test_official_native_outage_recovers_pending_write_after_restart(self):
         from mlflow.exceptions import MlflowException
         eid = self.client.create_experiment("outage-" + uuid.uuid4().hex)

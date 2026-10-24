@@ -53,6 +53,10 @@ def _fields(data, allowed):
 def _text(value, label, empty=False):
     if not isinstance(value, str) or (not value and not empty) or "\x00" in value:
         _bad(label + " must be a " + ("nonempty " if not empty else "") + "string without NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        _bad(label + " must be valid UTF-8")
     return value
 
 
