@@ -7,6 +7,8 @@ Projection timing ends only when every acknowledged batch is query-visible.
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+from http.client import HTTPException
+from urllib.error import URLError
 import json
 import os
 from pathlib import Path
@@ -84,7 +86,7 @@ def measure(args, server):
         deadline = started + args.timeout
 
         def deliver(spool):
-            overloads, retries = 0, 0
+            overloads, network_retries = 0, 0
             while spool.pending_count():
                 if time.monotonic() >= deadline:
                     raise TimeoutError("delivery deadline exceeded; unacknowledged rows remain in spool")
@@ -94,9 +96,11 @@ def measure(args, server):
                     if error.status != 503:
                         raise
                     overloads += 1
-                    retries += 1
                     time.sleep(0.02)
-            return overloads, retries
+                except (URLError, OSError, HTTPException):
+                    network_retries += 1
+                    time.sleep(0.02)
+            return overloads, network_retries
 
         with ThreadPoolExecutor(max_workers=args.clients) as pool:
             retry_stats = list(pool.map(deliver, spools))
@@ -119,7 +123,8 @@ def measure(args, server):
         print(json.dumps({"kind": "final", "config": vars(args), "success": success,
                           "offered_points": args.points, "verified_points": actual_count,
                           "integrity_errors": errors, "http_503": sum(s[0] for s in retry_stats),
-                          "retries": sum(s[1] for s in retry_stats), "local_spool_seconds": local_seconds,
+                          "network_retries": sum(s[1] for s in retry_stats),
+                          "retries": sum(sum(s) for s in retry_stats), "local_spool_seconds": local_seconds,
                           "accepted_seconds": accepted_seconds, "applied_seconds": applied_seconds,
                           "acceptance_points_per_second": args.points / accepted_seconds,
                           "query_visible_points_per_second": args.points / applied_seconds,
