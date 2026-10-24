@@ -175,9 +175,9 @@ try {
   await expect(aCross).toContainText("5, 15");
   await expect(bCross).toContainText("0 – 5");
   await coordinate(loss, "Cursor B level", 3);
-  await expect(loss.locator(".card-position-readout output").last()).toHaveText(
-    "1",
-  );
+  await expect(
+    loss.locator('.card-position-group:not([data-secondary]) output').last(),
+  ).toHaveText("1");
   await screenshot("ux-04-cursors");
   await score
     .locator("canvas")
