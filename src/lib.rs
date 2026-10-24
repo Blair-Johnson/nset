@@ -8,10 +8,13 @@ pub mod db;
 pub mod errors;
 pub mod ingest;
 pub mod models;
+pub mod rx;
+mod rx_vfs;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct AppState {
+    pub rx: Option<rx::Source>,
     pub db: db::Database,
     pub ingest: ingest::DurableIngest,
     pub token: auth::Token,
@@ -46,6 +49,7 @@ impl AppState {
         let ingest = ingest::DurableIngest::open(path, db.clone(), ingest_options)?;
         let compat = compat::Compat::new(db.clone(), ingest.clone());
         Ok(Self {
+            rx: None,
             compat,
             db,
             ingest,

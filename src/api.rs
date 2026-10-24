@@ -45,6 +45,14 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/catalog", get(catalog))
+        .route("/rx/catalog", get(crate::rx::catalog))
+        .merge(
+            Router::new()
+                .route("/rx/fields", post(crate::rx::fields))
+                .route("/rx/records", post(crate::rx::records))
+                .route("/rx/plot", post(crate::rx::plot))
+                .layer(DefaultBodyLimit::max(32 * 1024)),
+        )
         .route("/runs/{id}/ingest/{batch_id}", get(durable_receipt))
         .route("/ingest/status", get(durable_status))
         .route("/experiments", get(experiments))
@@ -125,8 +133,12 @@ async fn normalize_errors(request: Request, next: Next) -> Response {
         .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
     response
 }
-async fn catalog(State(state): State<AppState>) -> Result<Json<Catalog>> {
-    Ok(Json(state.db.catalog().await?))
+async fn catalog(State(state): State<AppState>) -> Result<Json<Value>> {
+    let mut value = serde_json::to_value(state.db.catalog().await?).map_err(ApiError::internal)?;
+    if state.rx.is_some() {
+        value["rx_enabled"] = json!(true);
+    }
+    Ok(Json(value))
 }
 async fn experiments(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(json!({"experiments":state.db.experiments().await?})))

@@ -205,6 +205,9 @@ impl LogLevel {
 }
 #[derive(Args)]
 pub struct ServeConfig {
+    /// Read structured events from one local rx Git repository (read-only).
+    #[arg(long)]
+    pub rx_repo: Option<PathBuf>,
     /// Bind hostname or IP address.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
