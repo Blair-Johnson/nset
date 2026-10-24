@@ -1,53 +1,43 @@
-# Building and contributing
+# Development
 
-The README contains a quick start. This guide covers source builds and development checks in more detail.
+The [README](../README.md#set-up-and-launch) covers setup and launch. Run these commands from the repository root. Pixi manages Rust, Node, and Python; a platform C/C++ build toolchain is needed for bundled SQLite. Use the committed Pixi, Cargo, and npm lockfiles.
 
-## Locked source build
+`pixi run build` builds the UI and then the release executable, embedding `web/dist` in `target/release/nset` (`nset.exe` on Windows). Rebuild after source changes. Build for the target OS and architecture.
 
-Install Pixi and a platform C/C++ build toolchain (SQLite is compiled into the executable). From the repository root:
-
-```sh
-pixi install --locked
-pixi run web-install
-pixi run build
-```
-
-Pixi manages Rust, Node and the development Python environment. `web-install` uses `npm --prefix web ci`; the build task first builds the UI, then runs `cargo build --release --locked`. The Rust build embeds `web/dist`, so do not bypass the UI build with a direct Cargo invocation. Use the committed Pixi, Cargo and npm lockfiles.
-
-The result is `target/release/nset` (`nset.exe` on Windows). Build separately for the target OS/architecture. The built executable contains the UI and serves native, MLflow and W&B routes itself: deploying it does not require Python, Node, a compatibility process or a second HTTP port. Platform declarations are not evidence that every platform has passed the current test gates.
-
-Run the executable with the `serve` command documented in `README.md` (use `./target/release/nset` if it is not on PATH). No backward-compatibility or migration path from earlier test-data servers is provided.
-
-## Producer dependencies
-
-The dependency-free native Python client can be installed from this checkout with `pip install ./python`. Install official MLflow or W&B SDKs in the training environment when using those protocols. The optional TensorBoard collector needs Python and the `nset-client[tensorboard]` extra on the producer machine, not on the server. See `docs/client-compatibility.md`.
-
-For source-based SDK checks, the optional locked environment is installed with:
-
-```sh
-pixi install -e compat --locked
-```
-
-## Development checks
+## Checks
 
 ```sh
 pixi run check
 pixi run format-check
-NSET_BINARY="$PWD/target/release/nset" pixi run python -m unittest discover -s tests -p 'test_*.py'
+pixi run api-test
 ```
 
-`check` runs the frontend build/unit checks and locked Cargo tests. Python tests use the binary named by `NSET_BINARY`; rebuild it after server changes. The broader acceptance entry point is `bash scripts/verify.sh`, which also installs Chromium for browser checks. These are instructions, not a statement that the current source has passed them.
-
-Record exact commands, source revision, dependency versions and results for standalone-server and real-SDK gates. Keep historical native/gateway results distinct from current same-process compatibility validation. Throughput, latency and parity claims require their own matching evidence; unit tests alone do not establish them.
-
-## Example data
-
-For an isolated source-development demo, `pixi run preview` builds and launches a loopback instance and seeds example runs. It prints the address and uses ignored `artifacts/preview-data` with its token in `artifacts/preview.token`. Stop the foreground command with Ctrl-C. This is a development helper, not the deployment entry point.
-
-To seed an already-running server with a matching token file:
+`check` builds the UI and runs frontend unit tests and locked Cargo tests. `api-test` builds the debug server and runs Python tests with disposable server data. Official SDK tests require the compatibility environment:
 
 ```sh
-pixi run python examples/demo.py --token-file ./access-token
+pixi install -e compat --locked
+pixi run -e compat compat-test
 ```
 
-The examples contain irregular scalar observations and native PNG sequences; they do not exercise unsupported generic artifact uploads.
+This enables the W&B SDK cases alongside MLflow and TensorBoard checks. Inspect test output for skipped cases when running a smaller environment.
+
+For browser fixtures:
+
+```sh
+pixi run browser-install
+CI=1 pixi run npm --prefix web run test:browser
+```
+
+Playwright starts a local Vite server; `NSET_TEST_PORT` selects its port (default 4173). Failure screenshots and traces go to `web/test-results`. The broader `bash scripts/verify.sh` also builds a release binary, runs strict Clippy, installs Chromium, and exercises real-server browser journeys and performance probes. It is separate from the opt-in SDK check above.
+
+## UI development
+
+Start a server as in the README, then run:
+
+```sh
+pixi run npm --prefix web run dev
+```
+
+Vite forwards `/api` to `http://127.0.0.1:8080`; set `NSET_API` to use another backend. Enter the server token in the browser's connection dialog. For a seeded demo on a free port, run `pixi run preview --port 8081`. It builds and starts a loopback server using ignored `artifacts/preview-data`, with its token in `artifacts/preview.token`. Stop that foreground helper with Ctrl-C.
+
+Bundled browser-library license notices are in [web/public/NOTICES.txt](../web/public/NOTICES.txt); preserve them when distributing the UI or executable.
