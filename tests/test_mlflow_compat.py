@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -370,6 +370,45 @@ class MLflowProtocolUnitTests(unittest.TestCase):
             adapter.handle(self.ctx, Request("POST", adapter.API + "registered-models/create", body=b"{}"))
         self.assertEqual(self.ctx.native.calls, [])
 
+    def test_artifact_and_logged_model_routes_reject_without_storage(self):
+        state = copy.deepcopy(self.ctx.state.values)
+        native = copy.deepcopy(self.ctx.native.__dict__)
+        # No artifact service exists on FakeContext: rejection needs no backend.
+        paths = [
+            "/api/2.0/mlflow-artifacts",
+            "/api/2.0/mlflow-artifacts/artifacts",
+            "/api/2.0/mlflow-artifacts/artifacts/unsupported/sample.txt",
+            "/api/2.0/mlflow-artifacts/artifacts/../../sample.txt",
+            adapter.API + "artifacts/list",
+            adapter.API + "artifacts/download",
+            adapter.API + "logged-models/search",
+            adapter.API + "logged-models",
+        ]
+        for path in paths:
+            for method in ("GET", "PUT", "POST", "DELETE"):
+                with self.subTest(path=path, method=method):
+                    with self.assertRaises(ProtocolError) as rejected:
+                        adapter.handle(self.ctx, Request(method, path, body=b"not JSON or an artifact"))
+                    self.assertEqual(rejected.exception.status, 400)
+                    self.assertEqual(rejected.exception.code, "NOT_IMPLEMENTED")
+                    self.assertIn("not supported", str(rejected.exception))
+        self.assertEqual(self.ctx.state.values, state)
+        self.assertEqual(self.ctx.native.__dict__, native)
+
+    def test_artifact_metadata_cannot_select_an_external_or_local_store(self):
+        experiment = self.call("experiments/get", {"experiment_id": "0"})["experiment"]
+        run = self.call("runs/get", {"run_id": self.rid})["run"]
+        self.assertEqual(experiment["artifact_location"], "mlflow-artifacts:/unsupported")
+        self.assertEqual(run["info"]["artifact_uri"], "mlflow-artifacts:/unsupported")
+        state = copy.deepcopy(self.ctx.state.values)
+        for location in ("s3://bucket/path", "https://example.com/artifacts", "file:///tmp/artifacts",
+                         "/tmp/artifacts", "mlflow-artifacts://example.com/path"):
+            with self.subTest(location=location), self.assertRaises(ProtocolError) as rejected:
+                self.call("experiments/create", {"name": "external", "artifact_location": location})
+            self.assertEqual(rejected.exception.status, 400)
+            self.assertEqual(rejected.exception.code, "NOT_IMPLEMENTED")
+        self.assertEqual(self.ctx.state.values, state)
+
     def test_search_filters_order_and_bound_pagination(self):
         eid = self.call("experiments/create", {"name": "search"})["experiment_id"]
         for i in range(3):
@@ -474,7 +513,8 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         cls.native.close()
         cls.temp.cleanup()
 
-    def test_official_fluent_tracking_artifacts_search_history_restart(self):
+    def test_official_fluent_tracking_rejects_upload_search_history_restart(self):
+        from requests.exceptions import HTTPError
         from mlflow.entities import Metric, ViewType
         from mlflow.exceptions import MlflowException
         name = "sdk-" + uuid.uuid4().hex
@@ -490,13 +530,31 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
             self.mlflow.set_tag("mutable", "second")
             artifact = Path(self.temp.name) / "sample.txt"
             artifact.write_bytes(b"official SDK artifact\x00bytes\n")
-            self.mlflow.log_artifact(str(artifact), artifact_path="nested")
+            requests = Mock(wraps=adapter.handle)
+            with patch.dict(os.environ, {"MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3"}), \
+                    patch.object(self.gateway, "adapters", [requests]):
+                with self.assertRaisesRegex(HTTPError, "MLflow artifact storage is not supported") as rejected:
+                    self.mlflow.log_artifact(str(artifact), artifact_path="nested")
+            self.assertEqual(rejected.exception.response.status_code, 400)
+            self.assertEqual(rejected.exception.response.json()["error_code"], "NOT_IMPLEMENTED")
+            uploads = [call.args[1] for call in requests.call_args_list
+                       if call.args[1].path.startswith("/api/2.0/mlflow-artifacts")]
+            self.assertEqual(len(uploads), 1, "Unsupported uploads must not be retried")
+            self.assertEqual(uploads[0].method, "PUT")
+            self.assertEqual(list((Path(self.temp.name) / "blobs").rglob("*")), [])
+            # A rejected upload does not poison the run or scalar/config logging.
+            self.mlflow.log_param("after_upload", "usable")
+            self.mlflow.log_metric("after_upload", 3.0)
+            self.mlflow.set_tag("after_upload", "usable")
         run = self.client.get_run(rid)
         self.assertEqual(run.info.status, "FINISHED")
         self.assertIsNotNone(run.info.end_time)
         self.assertEqual(run.data.params["optimizer"], "adam")
         self.assertEqual(run.data.tags["mutable"], "second")
         self.assertEqual(run.data.metrics["loss"], 2.0)
+        self.assertEqual(run.data.params["after_upload"], "usable")
+        self.assertEqual(run.data.metrics["after_upload"], 3.0)
+        self.assertEqual(run.data.tags["after_upload"], "usable")
         self.client.log_batch(rid, metrics=[Metric("loss", 8.0, 100, 9), Metric("loss", 7.0, 100, 9), Metric("loss", 99.0, 999, 8)])
         self.client.log_metric(rid, "loss", 8.0, timestamp=100, step=9)
         self.assertEqual(self.client.get_run(rid).data.metrics["loss"], 8.0)
@@ -509,17 +567,11 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertNotIn("mutable", self.client.get_run(rid).data.tags)
         found = self.client.search_runs([experiment.experiment_id], "params.optimizer = 'adam' AND metrics.loss >= 8")
         self.assertEqual([r.info.run_id for r in found], [rid])
-        self.assertEqual(self.client.list_artifacts(rid)[0].path, "nested")
-        self.assertEqual(self.client.list_artifacts(rid, "nested")[0].path, "nested/sample.txt")
-        destination = Path(self.temp.name) / "downloads"
-        destination.mkdir()
-        downloaded = self.client.download_artifacts(rid, "nested/sample.txt", str(destination))
-        self.assertEqual(Path(downloaded).read_bytes(), artifact.read_bytes())
         self.client.delete_run(rid)
         self.assertEqual(self.client.search_runs([experiment.experiment_id]), [])
         self.assertEqual(self.client.search_runs([experiment.experiment_id], run_view_type=ViewType.DELETED_ONLY)[0].info.run_id, rid)
         self.client.restore_run(rid)
-        # Restart native and compatibility context; IDs, metric data and artifact bytes survive.
+        # Restart native and compatibility context; tracking IDs and scalar data survive.
         self.__class__._stop_gateway()
         self.native.stop()
         self.native.start()
@@ -528,10 +580,6 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertEqual(recovered.data.metrics["loss"], 8.0)
         self.assertEqual(recovered.data.params["optimizer"], "adam")
         self.assertEqual(len(self.client.get_metric_history(rid, "loss")), 4)
-        destination2 = Path(self.temp.name) / "downloads-restart"
-        destination2.mkdir()
-        downloaded = self.client.download_artifacts(rid, "nested/sample.txt", str(destination2))
-        self.assertEqual(Path(downloaded).read_bytes(), artifact.read_bytes())
         self.client.set_experiment_tag(experiment.experiment_id, "owner", "sdk")
         self.client.rename_experiment(experiment.experiment_id, name + "-renamed")
         self.assertEqual(self.client.get_experiment_by_name(name + "-renamed").tags["owner"], "sdk")

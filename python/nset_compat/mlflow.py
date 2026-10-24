@@ -1,10 +1,9 @@
-"""MLflow tracking and generic artifact REST adapter (no MLflow dependency).
+"""MLflow scalar tracking REST adapter (no MLflow dependency).
 
-Wire contract: upstream mlflow/protos/{service,mlflow_artifacts}.proto and
-mlflow/store/artifact/http_artifact_repo.py. Scalar storage is native; SQLite
+Wire contract: upstream mlflow/protos/service.proto. Scalar storage is native; SQLite
 compat state stores identity, lifecycle, metadata and recoverable pending writes.
 Unsupported endpoints/fields, non-finite metrics, negative or >2**53-1 steps and
-timestamps, custom artifact stores and extended model/dataset metrics fail closed.
+timestamps, artifacts and extended model/dataset metrics fail closed.
 Search deliberately supports AND comparisons, not the full MLflow SQL grammar.
 
 Metric identity/latest caches assume all metric writes for mapped runs go through
@@ -19,7 +18,6 @@ import math
 import re
 import time
 import uuid
-from urllib.parse import unquote
 
 from .common import ProtocolError, Response
 
@@ -27,7 +25,9 @@ EXP = "mlflow.experiments"
 RUN = "mlflow.runs"
 MAX_SAFE = 9007199254740991
 API = "/api/2.0/mlflow/"
-ART = "/api/2.0/mlflow-artifacts/artifacts"
+# Required SDK metadata resolves only to this gateway, where all artifact routes
+# reject requests. Empty/file URIs would accidentally enable local SDK writes.
+_ARTIFACT_URI = "mlflow-artifacts:/unsupported"
 STATUS = {"RUNNING": "running", "SCHEDULED": "running", "FINISHED": "finished",
           "FAILED": "failed", "KILLED": "failed"}
 
@@ -113,7 +113,7 @@ def _new_exp(ctx, name, eid, tags):
     native = ctx.native.request("POST", "/api/experiments", {"name": native_name})
     now = _now()
     exp = {"experiment_id": eid, "native_id": native["id"], "name": name,
-           "artifact_location": f"mlflow-artifacts:/{eid}", "lifecycle_stage": "active",
+           "artifact_location": _ARTIFACT_URI, "lifecycle_stage": "active",
            "creation_time": now, "last_update_time": now, "tags": tags, "lifecycle_epoch": 0}
     _save_exp(ctx, exp)
     return exp
@@ -485,53 +485,7 @@ def _search(ctx, data, kind):
     return {("experiments" if kind == "experiment" else "runs"): [_exp_wire(r) for r in rows] if kind == "experiment" else rows, **extra}
 
 
-def _path(path, empty=True):
-    _text(path, "artifact path", empty=empty)
-    if path.startswith("/") or "\\" in path or any(p in (".", "..", "") for p in path.split("/")) and path:
-        _bad("Unsafe artifact path")
-    return path
-
-
-def _artifact_target(ctx, path):
-    path = _path(path, empty=False)
-    parts = path.split("/", 3)
-    if len(parts) < 3 or parts[2] != "artifacts":
-        _bad("Artifact path must identify experiment/run/artifacts")
-    rid = _run_id({"run_id": parts[1]})
-    with ctx.lock_for("mlflow:run:" + rid):
-        run = _run(ctx, rid)
-        if parts[0] != run["info"]["experiment_id"]:
-            _bad("Artifact experiment/run mismatch")
-    return rid, parts[3] if len(parts) == 4 else ""
-
-
-def _artifacts(ctx, request):
-    if request.path == ART and request.method == "GET":
-        _fields(request.query, "path")
-        rid, path = _artifact_target(ctx, request.query.get("path", ""))
-        files = ctx.artifacts.list("mlflow:" + rid, path)
-        # HTTP artifact repository prepends its requested subdirectory itself.
-        return Response(body={"files": [{**f, "path": f["path"].rsplit("/", 1)[-1]} for f in files]})
-    if request.path.startswith(ART + "/"):
-        _fields(request.query, "")
-        rid, path = _artifact_target(ctx, unquote(request.path[len(ART) + 1:]))
-        _path(path, empty=False)
-        with ctx.lock_for("mlflow:run:" + rid):
-            run = _run(ctx, rid)
-            if request.method == "PUT":
-                _active(run)
-                ctx.artifacts.put("mlflow:" + rid, path, request.body,
-                                  request.headers.get("content-type", "application/octet-stream"))
-                return Response(body={})
-            if request.method == "GET":
-                data, content_type = ctx.artifacts.get("mlflow:" + rid, path)
-                return Response(body=data, headers={"Content-Type": content_type})
-        _unsupported("Unsupported artifact method: " + request.method)
-    _unsupported("Unsupported MLflow artifact route")
-
-
 _ROUTES = {
-    "logged-models/search": ("POST", "experiment_ids filter datasets max_results order_by page_token"),
     "experiments/create": ("POST", "name artifact_location tags"),
     "experiments/get": ("GET", "experiment_id"),
     "experiments/get-by-name": ("GET", "experiment_name"),
@@ -553,17 +507,20 @@ _ROUTES = {
     "runs/set-tag": ("POST", "run_id run_uuid key value"),
     "runs/delete-tag": ("POST", "run_id key"),
     "metrics/get-history": ("GET", "run_id run_uuid metric_key page_token max_results"),
-    "artifacts/list": ("GET", "run_id run_uuid path page_token"),
 }
 
 
 def handle(ctx, request):
     """Return None only for paths outside MLflow's protocol namespaces."""
     if request.path.startswith("/api/2.0/mlflow-artifacts"):
-        return _artifacts(ctx, request)
+        _bad("MLflow artifact storage is not supported", "NOT_IMPLEMENTED", 400)
     if not request.path.startswith(API):
         return None
     route = request.path[len(API):]
+    if route == "artifacts" or route.startswith("artifacts/"):
+        _bad("MLflow artifact storage is not supported", "NOT_IMPLEMENTED", 400)
+    if route == "logged-models" or route.startswith("logged-models/"):
+        _bad("MLflow logged models are not supported", "NOT_IMPLEMENTED", 400)
     if route not in _ROUTES:
         _unsupported("Unsupported MLflow route: " + route)
     method, fields = _ROUTES[route]
@@ -573,21 +530,6 @@ def handle(ctx, request):
     if not isinstance(data, dict):
         _bad("Request must be a JSON object")
     _fields(data, fields)
-    if route == "logged-models/search":
-        # MLflow 3's RunsArtifactRepository probes this even for ordinary files.
-        # No model can exist here: every model-creation endpoint is rejected.
-        ids = data.get("experiment_ids", [])
-        if not isinstance(ids, list) or not ids:
-            _bad("experiment_ids must be a nonempty array")
-        for eid in ids:
-            _experiment(ctx, eid)
-        expression = _text(data.get("filter", ""), "filter", empty=True)
-        if expression and not re.fullmatch(r"\s*name\s*=\s*'(?:[^']|'')*'\s*", expression):
-            _unsupported("Only logged-model name equality lookup is supported")
-        if any(data.get(k) for k in ("datasets", "order_by", "page_token")):
-            _unsupported("Extended logged-model search is not supported")
-        _integer(data.get("max_results", 100), "max_results", 1, 50000)
-        return Response(body={"models": []})
     if route == "experiments/search":
         return Response(body=_search(ctx, data, "experiment"))
     if route == "runs/search":
@@ -595,7 +537,7 @@ def handle(ctx, request):
     if route == "experiments/create":
         name, tags = _key(data.get("name")), _pairs(data.get("tags", []))
         if data.get("artifact_location"):
-            _unsupported("Custom artifact_location is not supported; use the managed mlflow-artifacts URI")
+            _bad("MLflow artifact storage is not supported", "NOT_IMPLEMENTED", 400)
         _default(ctx)
         with ctx.lock_for("mlflow:experiment-name:" + name):
             if any(e["name"] == name for _, e in ctx.state.items(EXP)):
@@ -665,7 +607,7 @@ def handle(ctx, request):
                    "info": {"run_id": rid, "run_uuid": rid, "run_name": run_name,
                             "experiment_id": eid, "user_id": user_id, "status": "RUNNING",
                             "start_time": start_time, "lifecycle_stage": "active",
-                            "artifact_uri": f"mlflow-artifacts:/{eid}/{rid}/artifacts"}}
+                            "artifact_uri": _ARTIFACT_URI}}
             _save_run(ctx, run)
         return Response(body={"run": _run_wire(ctx, run)})
     rid = _run_id(data)
@@ -677,12 +619,6 @@ def handle(ctx, request):
             key = _key(data.get("metric_key"))
             rows, extra = _page(_history(ctx, run, key), data, "history:" + rid)
             return Response(body={"metrics": rows, **extra})
-        if route == "artifacts/list":
-            if data.get("page_token"):
-                _bad("Artifact pagination is not supported")
-            path = _path(data.get("path", ""))
-            return Response(body={"root_uri": run["info"]["artifact_uri"],
-                                  "files": ctx.artifacts.list("mlflow:" + rid, path)})
         if route == "runs/delete":
             run["info"]["lifecycle_stage"] = "deleted"
             _save_run(ctx, run)
