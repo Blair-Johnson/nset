@@ -2,7 +2,7 @@
 
 A small experiment tracker focused on trustworthy timeseries inspection and native-resolution image timelines, with a dark experiment browser and mixed-chart dashboards. A Rust executable serves the browser UI, writes scalar observations to SQLite, and stores images as immutable files. The UI uses uPlot and OpenSeadragon; Node is a build dependency, not a runtime service.
 
-This is a new API, not an MLflow or wandb compatibility layer. It is an early implementation, not a hardened multi-tenant service.
+The native API is supplemented by an optional server-side gateway for official MLflow and W&B tracking clients, plus a TensorBoard event-file collector. Existing training instrumentation can keep its SDK; configure the endpoint and credentials instead. Compatibility is a tested subset, not a complete replacement for either vendor's service. See `docs/client-compatibility.md` for setup and limits. This is an early implementation, not a hardened multi-tenant service.
 
 ## Build
 
@@ -56,7 +56,9 @@ with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
     run.log_image("prediction", "prediction.png", step=100)
 ```
 
-For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, ...])` with up to 10,000 observations per request. Writes are synchronous and acknowledged after persistence; the client does not silently retry non-idempotent requests. A failed context marks the run failed. A client exception does not guarantee that an interrupted network write was not committed; automatic deduplication is not provided.
+For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, ...])` with up to 10,000 observations per request. These legacy writes are synchronous and acknowledged after persistence; the client does not silently retry non-idempotent requests. A failed context marks the run failed. A client exception does not guarantee that an interrupted network write was not committed.
+
+For retry-safe delivery, use `Client.durable_outbox(path)` or the native `PUT /api/runs/{id}/ingest/{batch_id}` endpoint. Stable batch IDs prevent duplicate application after lost replies; a durable receipt precedes asynchronous query visibility. Producers must retain unacknowledged data. See `docs/durable-ingestion.md` for usage, recovery, capacity limits and configurable concurrency. Official MLflow/W&B clients use the gateway described in `docs/client-compatibility.md`; TensorBoard writers use its event-file collector.
 
 ## Explore runs and charts
 
@@ -96,4 +98,4 @@ NSET_BINARY="$PWD/target/release/nset" pixi run python -m unittest discover -s t
 NSET_BINARY="$PWD/target/release/nset" pixi run python scripts/benchmark.py
 ```
 
-The server deliberately starts simple: one SQLite writer and two read workers, transactional metric batches, snapshot-bounded reads, and bounded work queues. Very large histories are complete but still consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.
+The server uses a configurable multithreaded HTTP runtime, bounded SQLite read actors, one query writer, and a separate durable journal intake worker/projector. Pending limits reject overload without evicting accepted data; raising thread counts is not a promise of higher sustained throughput. `docs/durable-ingestion-evidence.md` records recovery checks and concurrent delivery probes. Very large histories are complete but still consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.

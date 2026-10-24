@@ -1,53 +1,80 @@
-# Client compatibility: status and implementation contract
+# Official client compatibility
 
-## Current support
+nset implements selected official MLflow and W&B tracking protocols through an optional server-side Python gateway. Training programs keep their existing SDK imports and logging calls; configure their endpoint and credentials instead of installing a custom training client. TensorBoard keeps its standard event writers and uses a separate collector because its input is event files, not an HTTP tracking API. This is tracking compatibility, not a clone of either vendor's complete service.
 
-As of source `cea8ccd`, nset serves its own authenticated `/api` routes only. No MLflow tracking, W&B SDK transport or TensorBoard event ingestion is implemented or SDK-tested. The native Python client is not a substitute for those protocols. This document is a design contract, not a compatibility announcement.
+The tested SDK versions are MLflow / mlflow-skinny 3.17.2, W&B 0.31.0 and TensorBoard 2.21.0, locked in the optional Pixi `compat` environment. Other versions may work but are not claimed tested. The gateway and collector currently require POSIX file locking (Linux/macOS); this does not change the native Rust server's platform scope.
 
-The intended experience is unchanged training logging code. MLflow and W&B users should configure an endpoint and credentials; TensorBoard users should retain standard writers and make their event files available through a shared log directory or a separately deployed collector. An external collector is infrastructure, not a custom training client, but it is an additional deployment requirement that must be disclosed.
+## Start the gateway
 
-## MLflow target
+Build and start the native server as described in `README.md`, then launch the gateway with the same token. Use a token at least 40 characters long for the tested W&B client; a randomly generated 48-character hexadecimal token is suitable. The token grants access to the entire service, not an isolated tenant.
 
-Implement the documented tracking API under `/api/2.0/mlflow`, beginning with experiment lookup/create, run create/get/update, parameter/tag logging, scalar metrics and batch logging. Artifact listing, upload and download require generic file storage and a compatible artifact URI, not an alias to image uploads. Test `set_experiment`, `start_run`, logging and completion with real official clients using only tracking URI and authentication settings. Test explicit `MlflowClient` calls as well as the fluent API.
+```sh
+# NSET_TOKEN must contain the same secret used by the native server.
+pixi run compat-serve --native-url http://127.0.0.1:8080 \
+  --data-dir ./compat-data --listen 127.0.0.1:3001
+```
 
-The upstream service schema distinguishes immutable parameters from mutable tags. Native nset parameter patches overwrite values, so a sequence of native patch calls is not sufficient enforcement. Check/create must be atomic at the writer. Batch failure, metric ordering and duplicate semantics must follow the selected upstream specification rather than assume all native batch rules apply unchanged. Preserve or explicitly reject values outside native finite, nonnegative JS-safe numeric limits; never silently clamp steps or discard non-finite metrics.
+The gateway itself uses only the Python standard library and the bundled native transport. `pip install ./python` includes `nset_compat`; installed deployments can run `python -m nset_compat` with the same arguments. The official SDKs are test dependencies, not gateway runtime dependencies. Use `--public-url https://tracker.example` behind an HTTPS reverse proxy so returned artifact URLs point to the externally reachable origin. Native URLs must be origins without path prefixes. Startup resolves the configured backend hostname once; request workers use those resolved addresses. Restart the gateway after changing backend DNS.
 
-Run start/end times, lifecycle deletion, status vocabulary, names/IDs, filtering, pagination and metric summaries need protocol-specific representations. Do not encode authoritative external identity solely in user-editable tags. Model registry, tracing, logged-model APIs and framework autologging are separate compatibility surfaces; none is implied by passing basic scalar tracking tests. Record exact SDK versions and the exercised features before documenting support.
+Only one gateway process may own a compatibility data directory. Its persisted state is bound to the native URL; token rotation and public-URL changes are allowed. Do not point an existing compatibility directory at a different backend or delete it to bypass a retry failure. Request bodies and artifact transfers default to 32 MiB, with 16 bounded handler workers; configure `--max-body-bytes` and `--workers` deliberately. Native metrics still obey their own request/observation limits. Use TLS or a tunnel for remote traffic.
 
-## W&B target
+## MLflow
 
-The official SDK exposes `WANDB_BASE_URL` and API-key configuration, but a configurable URL does not imply an interchangeable REST tracking API. Upstream documentation/source includes a GraphQL control interface and file-stream transport. Investigate initialization and capability negotiation using the actual SDK, then implement run identity/resume, configuration, scalar history, summary, completion and file upload with durable acknowledgement semantics.
+On the training machine, configure the official MLflow client:
 
-History, summary, system events and terminal output are distinct streams. The SDK file-stream implementation resumes from offsets; repeated uploads must not blindly append duplicate history after lost acknowledgements. External namespace/run identity and accepted stream offsets need durable mappings committed with accepted data. Media references, general files and artifact manifests must resolve to stored content; reporting successful uploads while dropping data is forbidden.
+```sh
+export MLFLOW_TRACKING_URI=http://127.0.0.1:3001
+export MLFLOW_TRACKING_TOKEN="$NSET_TOKEN"
+```
 
-Define the first supported SDK feature subset only after a real `wandb.init`/`log`/`finish`/resume journey succeeds, including process/server restart and retry tests. Advanced artifacts, tables, sweeps, registries and public read APIs are independent requirements, not automatically covered by scalar logging. Unsupported protocol operations must produce meaningful errors rather than fabricated GraphQL fields.
+Verified workflows include `set_experiment`, `start_run`, parameter/tag logging, scalar and batch metric logging, `log_artifact`, completion, run/history lookup, search, artifact listing/download, lifecycle delete/restore, and gateway/backend restart. Parameters are immutable; tags are mutable. Exact overlapping metric observations deduplicate across retries and batches. Latest values use MLflow's step/timestamp/value ordering. Indexed logging and latest-value lookup do not reread full native histories; explicit history retrieval still reads stored observations.
 
-## TensorBoard target
+Experiments use persistent external numeric IDs, runs use persistent external hexadecimal IDs, and both map to native records. Generic artifacts use managed `mlflow-artifacts:/` locations and retain exact bytes. Search supports a fully consumed AND-separated comparison subset, supported attributes/metrics/params/tags, LIKE/ILIKE, ordering and query-bound continuation tokens. Unsupported expressions fail rather than being partly ignored; pagination is live, not a frozen snapshot across requests.
 
-Standard TensorBoard writers emit event files, and TensorBoard discovers runs from log directories. The intended integration therefore reads standard `tfevents` files from an accessible log directory or collector, rather than promising an HTTP endpoint that existing writers do not use.
+Model registry/logging, datasets/input logging, tracing/evaluation, arbitrary logged-model search, multipart artifact upload and external artifact stores are not implemented. The small read-only logged-model name lookup used by MLflow for generic nested artifacts returns an empty model catalog; model creation is rejected. Framework autologging is not claimed universally compatible, since it can invoke those unsupported APIs. Non-finite values, negative zero, negative or out-of-range steps/timestamps, missing metric timestamps, and names/keys outside native limits are rejected explicitly.
 
-Ingest both scalar encodings used by standard event records, with images next. Associate files and runs explicitly, retain original event metadata where needed, and define any conversion from wall time to native milliseconds. Checkpoint file identity and committed record position, tolerate files being actively appended and partial final records, and handle restart/rotation without duplicating acknowledged records. Account for TensorBoard restart/purge semantics instead of assuming every record is a new permanent point. Histograms, text, audio, graphs and profiling need separate storage/UI support and must remain visibly unsupported until tested.
+Mapped-run metric writes must go through the MLflow adapter to keep its identity/latest-value index authoritative; read-only use of the native UI is supported. MLflow names, lifecycle and exact status vocabulary live in compatibility metadata. Native display names retain their creation-time name after a rename, and MLflow soft deletion does not remove native observations. Generic image files are artifacts, not automatically native image-chart frames.
 
-## Shared native constraints
+## W&B
 
-Native metrics are append-only with database-assigned sequence identity; identical key/step/time/value observations are legal and retained. Run creation, metric writes and image writes are not idempotent. A request that loses its response may still commit. Replay handling belongs to a source-aware receipt or offset contract; deduplicating all equal observations would corrupt native semantics.
+On the training machine, keep the official `wandb` package and configure:
 
-Current native timestamps are integer Unix milliseconds and values are finite f64; steps/timestamps are nonnegative JS-safe integers. Native runs have only running/finished/failed status and no explicit end time. Experiments have globally unique names, with no tenant namespace. The configured token grants access to the whole database, so multiple experiments are not tenant isolation.
+```sh
+export WANDB_BASE_URL=http://127.0.0.1:3001
+export WANDB_API_KEY="$NSET_TOKEN"
+export WANDB_ENTITY=local
+```
 
-Artifacts currently mean validated PNG/JPEG/WebP images only. Image validation and decoding limits live in the HTTP handler, not wholly in the database method. New adapters must share those protections rather than calling the lower-level image writer unchecked. Generic artifact paths need traversal protection, namespacing, bounded transfers and explicit retention/durability semantics.
+Verified workflows include `wandb.init`, configuration and summary updates, scalar/image logging, console capture, `finish`, `resume="must"` after gateway restart, retry through a native-backend outage, and offline capture followed by official `wandb sync`. Repeated synchronization of the same offline run does not duplicate projected scalar observations. Scalar history is projected into native metrics; accepted raw history, events, output, summary and media are retained rather than silently dropped.
 
-Database schema version 1 does not contain external-ID mappings, replay receipts, generic artifacts or compatibility metadata. Add versioned migrations and upgrade/restart tests when these become necessary. Keep native API behavior unchanged and put source-specific translations at the edge; share bounded admission, validation and committed storage underneath.
+Streams use indexed rows and bounded resume metadata: appending a batch does not reread or serialize the run's accumulated history. The per-request size limit is not a lifetime stream limit. Raw records and metric identities remain on disk; requesting an entire stream larger than the response cap fails explicitly without preventing further ingestion. An older full-array record is converted once with replayable migration state.
 
-## Conformance gate
+Run-file uploads and signed downloads preserve image/file bytes. These are not W&B Artifact versioning or registry APIs, and images are not automatically native image-chart frames. Nested/nonrepresentable data remains raw compatibility data rather than a scalar plot. Sweeps, registries, advanced Artifact APIs, full Public API coverage, GraphQL fragments and protobuf file-stream transport are unsupported. Optional SDK analytics may report unauthorized warnings; telemetry is not falsely acknowledged. Unknown protocol operations fail explicitly.
 
-Each claimed SDK/version must pass a real-client journey, native readback, restart/resume and error-path tests. Include concurrent runs across experiments, repeated/out-of-order steps, Unicode and boundary-sized names, timestamp conversion, parameter conflicts, malformed/oversized batches, authentication, retry ambiguity and artifact path safety. Black-box HTTP tests are required alongside in-process unit tests. Mocked requests alone cannot establish drop-in compatibility.
+## TensorBoard
 
-## Evidence and next decision
+Existing TensorBoard/PyTorch/TensorFlow writers keep writing standard `tfevents` files. Run the collector where those files are accessible, preferably alongside the writer, and send to the native HTTP endpoint:
 
-Local audit anchors are `src/api.rs`, `src/models.rs`, `src/db.rs`, `src/auth.rs`, `tests/backend_api.rs` and `tests/support.py`. The separate ingestion plan defines the rollout and performance gates. No SDK packages were installed and no upstream-client conformance tests were run during this initial audit.
+```sh
+pixi run -e compat tensorboard-ingest --logdir ./training-logs \
+  --url http://127.0.0.1:8080 --state-dir ./tensorboard-state --watch
+```
 
-Upstream references inspected on October 23, 2026 are the MLflow REST API reference and `mlflow/mlflow:mlflow/protos/service.proto`; the W&B environment configuration source, file-stream implementation and GraphQL API documentation; and the TensorBoard README. These references are mutable; pin client versions and source revisions for implementation tests.
+Installed deployments can use the optional `nset-client[tensorboard]` extra and `python -m nset_compat.tensorboard`. The collector uses `NSET_TOKEN`; no change to the training writer is required. Each relative log directory maps to a native run. Legacy `simple_value` and real rank-zero tensor scalars are supported, with wall time converted to milliseconds. Tests use the official `EventFileWriter`, including tensor-content and repeated-field encodings, partial records, rotation, lost replies and server/collector restart.
 
-Reference locations: `https://mlflow.org/docs/latest/api_reference/rest-api.html`, `https://github.com/mlflow/mlflow/blob/master/mlflow/protos/service.proto`, `https://github.com/wandb/wandb/blob/main/wandb/env.py`, `https://github.com/wandb/wandb/blob/main/core/internal/filestream/filestream.go`, `https://docs.wandb.ai/platform/app/features/custom-charts/walkthrough`, and `https://github.com/tensorflow/tensorboard/blob/master/README.md`.
+Legacy images and modern images-plugin tensors are preserved in the collector's local SQLite artifacts, not uploaded as native image-chart frames. Original event protobufs are retained, including histograms, text, graphs, unsupported/nonrepresentable values and restart records; warnings and counts make this visible. Back up collector state as well as source logs. Native history is append-only: TensorBoard orphaned-step purge semantics are not reproduced.
 
-TensorBoard scalar/restart details were additionally checked against `https://github.com/pytorch/pytorch/blob/main/torch/utils/tensorboard/writer.py`, `https://github.com/pytorch/pytorch/blob/main/torch/utils/tensorboard/summary.py` and `https://github.com/tensorflow/tensorboard/blob/master/tensorboard/backend/event_processing/plugin_event_accumulator.py`.
+The collector requires append-only regular local files. It checkpoints source identity, record position and acknowledged-prefix digest only after durable receipt validation and local preservation. It detects truncation/rewrites and fails closed; missing files do not erase pending delivery state. Full prefix checking costs O(processed bytes) per scan. Do not delete or move state as a retry mechanism, and do not assume deduplication across different event files.
+
+## Durability, verification and boundaries
+
+The gateway persists protocol identities and pending operations before native metric delivery. Native durable acceptance and query visibility are distinct, and upstream-client buffering/retry behavior still matters before acceptance. Retain W&B offline files and TensorBoard source/state data until delivery is confirmed. MLflow logging failures are visible exceptions, not proof that no data reached the service. See `docs/durable-ingestion.md` for the receipt contract, local outbox, configurable concurrency, monitoring and coordinated backup.
+
+Stop the services before copying the complete native data directory, gateway SQLite/WAL/blob directory and collector state. Pending limits do not bound total disk usage; receipts, indexed identities, raw records and artifacts require monitoring and have no automatic retention/garbage collection policy. Do not mix independently timed backups of query and journal databases.
+
+```sh
+pixi install -e compat --locked
+NSET_WANDB_SDK_TEST=1 pixi run -e compat compat-test
+```
+
+The SDK gate exercises real official clients over HTTP, exact artifact/native-metric readback, restart and failure recovery. `docs/durable-ingestion-evidence.md` records the separate scalar delivery probes, including one million verified points across 32 runs and eight experiments. Those probes do not establish a production SLA or the throughput of every compatibility operation.

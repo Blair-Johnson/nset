@@ -1,5 +1,7 @@
 # Initial ingestion evidence — October 23, 2026
 
+This is a historical first-milestone report. The subsequent implementation adds durable ingestion, configurable concurrency, artifacts and tested official-client adapters; see `docs/durable-ingestion-evidence.md` and `docs/client-compatibility.md` for the current result.
+
 ## Scope
 
 This is the first implementation slice of `docs/ingestion-compatibility-plan.md`, not a capacity certification or an upstream-client compatibility release. Changes live on `feat/ingestion-compat`; main and the existing preview were not changed. The audit, load harness, admission work and independent review were delegated separately, with implementation in isolated worktrees and reviewed commits integrated on the feature branch.

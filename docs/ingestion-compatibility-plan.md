@@ -1,6 +1,6 @@
 # Concurrent ingestion and client compatibility
 
-Status: initial audit, concurrent-load harness and native write-admission hardening implemented on `feat/ingestion-compat`, based on `cea8ccd`; main and the running preview remain unchanged. MLflow, W&B and TensorBoard adapters are still planned, not implemented. Detailed protocol scope is in `docs/client-compatibility.md`; benchmark usage and limits are in `docs/concurrent-benchmark.md`.
+Status: milestones A–E are implemented and integrated on `feat/durable-ingestion`, following the initial `feat/ingestion-compat` audit based on `cea8ccd`. Main and the running preview remain unchanged. The implementation includes a concurrent-load harness, configurable bounded concurrency, durable native intake/replay, a local outbox, official MLflow/W&B tracking adapters and a TensorBoard event-file collector. Tested protocol scope is in `docs/client-compatibility.md`; recovery/load evidence and final regression results are in `docs/durable-ingestion-evidence.md`. Unsupported vendor features and operational limits remain explicit.
 
 ## Goal and acceptance contract
 
@@ -44,7 +44,9 @@ W&B's upstream `wandb/env.py` defines `WANDB_BASE_URL` and `WANDB_API_KEY`; its 
 
 TensorBoard's upstream README documents append-only `tfevents` files read from a log directory and per-directory run discovery. Treat ingestion of these files as a separate path, not a shared HTTP tracking protocol.
 
-## Initial implementation and remaining risk
+## Historical first milestone and remaining profiling targets
+
+The following records the initial admission-only slice, before the subsequent durable journal and compatibility implementation. Current guarantees and configurable defaults are in `docs/durable-ingestion.md`; the historical limitations below are not a description of the completed adapters.
 
 The feature branch limits authenticated native POST/PATCH handlers to eight simultaneous in-flight requests, acquired before body extraction and without waiting. This is not a limit on total runs or experiments. Saturation returns the existing JSON busy error with `Retry-After: 1`; reads and health remain outside this write limit. Authentication still precedes admission and unsupported methods retain their normal errors. Rejected bodies are not polled. The native client still does not automatically retry writes.
 
