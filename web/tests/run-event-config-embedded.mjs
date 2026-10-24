@@ -85,7 +85,7 @@ try {
   await page.goto(`${base}/#/experiments/${encodeURIComponent(source)}/runs`);
   await page
     .getByRole("checkbox", {
-      name: "Select nested_metric_fixture",
+      name: "Select r241 · nested_metric_fixture",
       exact: true,
     })
     .check();
@@ -116,7 +116,7 @@ try {
   await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await expect(
     page.getByRole("checkbox", {
-      name: "Select six_epoch_fixture",
+      name: "Select r859 · six_epoch_fixture",
       exact: true,
     }),
   ).toBeVisible();
@@ -135,7 +135,7 @@ try {
     .click();
   await expect(
     drawer.getByRole("checkbox", {
-      name: "Show six_epoch_fixture",
+      name: "Show r859 · six_epoch_fixture",
       exact: true,
     }),
   ).toBeChecked();
@@ -149,7 +149,7 @@ try {
   await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
   await expect(
     drawer.getByRole("checkbox", {
-      name: "Show nested_metric_fixture",
+      name: "Show r241 · nested_metric_fixture",
       exact: true,
     }),
   ).toBeChecked();
