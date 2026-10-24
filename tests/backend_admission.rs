@@ -291,16 +291,17 @@ async fn cancellation_during_extraction_releases_admission() {
 }
 
 #[test]
-fn retry_after_is_only_added_to_explicit_busy_errors() {
-    assert_eq!(
-        ApiError::busy().into_response().headers()[header::RETRY_AFTER],
-        "1"
-    );
+fn retry_after_is_added_to_service_unavailable_errors() {
+    for error in [
+        ApiError::busy(),
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, "maintenance"),
+    ] {
+        assert_eq!(error.into_response().headers()[header::RETRY_AFTER], "1");
+    }
     for error in [
         ApiError::bad("invalid input"),
         ApiError::missing(),
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
-        ApiError(StatusCode::SERVICE_UNAVAILABLE, "maintenance"),
         ApiError(StatusCode::BAD_REQUEST, "server busy; retry later"),
     ] {
         assert!(

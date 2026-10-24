@@ -74,6 +74,19 @@ class DurableHTTPTests(unittest.TestCase):
         self.applied(run.path + "/ingest/second")
         self.assertEqual([r["value"] for r in self.client.metric_history(run.id, "v")], [1, 2])
 
+    def test_invalid_durable_options_do_not_create_storage(self):
+        import subprocess
+        for flag, value in [("--ingest-queue-capacity", "0"),
+                            ("--ingest-max-pending-bytes", "0"),
+                            ("--ingest-max-pending-bytes", str(2**63)),
+                            ("--ingest-max-pending-batches", "1000001"),
+                            ("--ingest-poll-interval-ms", "60001")]:
+            directory = self.server.directory / "must-not-exist"
+            result = subprocess.run([str(self.server.binary), "--data-dir", str(directory), flag, value],
+                                    env=dict(os.environ, NSET_TOKEN=self.server.token),
+                                    capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0, flag)
+            self.assertFalse(directory.exists(), flag)
     def test_concurrent_replays_conflicts_and_authentication(self):
         self.start(NSET_WRITE_CONCURRENCY="4", NSET_READ_WORKERS="3", NSET_HTTP_WORKERS="4")
         run = self.run_record()
