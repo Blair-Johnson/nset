@@ -40,6 +40,12 @@ class State:
     def put(self, namespace, key, value):
         self.data[namespace, key] = copy.deepcopy(value)
 
+    def get_many(self, namespace, keys):
+        return {key: self.get(namespace, key) for key in keys if (namespace, key) in self.data}
+
+    def put_many(self, namespace, mapping):
+        self.data.update({(namespace, key): copy.deepcopy(value) for key, value in mapping.items()})
+
     def delete(self, namespace, key):
         self.data.pop((namespace, key), None)
 
@@ -116,6 +122,11 @@ def gql(ctx, query, variables=None):
     return wandb.handle(ctx, request("/graphql", {"query": query, "variables": variables or {}}))
 
 
+def stream_bytes(ctx, key, name):
+    response = wandb.handle(ctx, request("/compat/files/wandb/" + key + "/" + name, method="GET"))
+    return response.body, response.headers["Content-Type"]
+
+
 class WandbProtocolTests(unittest.TestCase):
     def setUp(self):
         self.ctx = Context()
@@ -139,7 +150,7 @@ class WandbProtocolTests(unittest.TestCase):
         self.assertEqual(len(self.ctx.batches), 1)
         rows = next(iter(self.ctx.batches.values()))
         self.assertEqual(rows, [{"key": "loss", "value": 2, "step": 3, "timestamp": 12500}])
-        raw, _ = self.ctx.artifacts.get(wandb._namespace(self.key), "wandb-history.jsonl")
+        raw, _ = stream_bytes(self.ctx, self.key, "wandb-history.jsonl")
         self.assertEqual(raw, ("\n".join(lines) + "\n").encode())
         self.assertEqual(len(self.ctx.attempts), 1)
 
@@ -147,7 +158,7 @@ class WandbProtocolTests(unittest.TestCase):
         self.stream("wandb-history.jsonl", ['{"loss":1,"_step":0,"_timestamp":12.5}'])
         self.stream("wandb-history.jsonl", ['{"_timestamp":12.5,"_step":0,"loss":1}'], offset=1)
         self.assertEqual(len(self.ctx.batches), 1)
-        self.assertEqual(len(self.ctx.state.get(wandb.RUNS, self.key)["streams"]["wandb-history.jsonl"]), 2)
+        self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["streams"]["wandb-history.jsonl"]["count"], 2)
         self.stream("wandb-history.jsonl", ['{"loss":1,"_step":0,"_timestamp":12.5001}'], offset=2)
         self.assertEqual(len(self.ctx.batches), 2)
 
@@ -157,7 +168,7 @@ class WandbProtocolTests(unittest.TestCase):
         values["huge"] = 10 ** 400
         self.stream("wandb-history.jsonl", [json.dumps(values)])
         self.assertEqual(sorted(map(len, self.ctx.batches.values())), [1, 10000])
-        raw, _ = self.ctx.artifacts.get(wandb._namespace(self.key), "wandb-history.jsonl")
+        raw, _ = stream_bytes(self.ctx, self.key, "wandb-history.jsonl")
         self.assertEqual(json.loads(raw)["huge"], 10 ** 400)
 
     def test_native_create_response_loss_recovers_same_run(self):
@@ -179,6 +190,7 @@ class WandbProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             wandb.handle(self.ctx, request(self.path, {"uploaded":["missing.png"],"complete":True}))
         self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
+        self.ctx.max_body_bytes = 1024
         self.stream("output.log", ["valid"])
 
     def test_offset_gap_and_conflict_are_explicit(self):
@@ -248,7 +260,170 @@ class WandbProtocolTests(unittest.TestCase):
     def test_nonfinite_bool_and_nested_values_preserved_not_projected(self):
         self.stream("wandb-history.jsonl", ['{"nan":NaN,"bool":true,"nested":{"x":1},"finite":4}'])
         self.assertEqual([r["key"] for rows in self.ctx.batches.values() for r in rows], ["finite"])
-        self.assertIn(b"NaN", self.ctx.artifacts.get(wandb._namespace(self.key), "wandb-history.jsonl")[0])
+        self.assertIn(b"NaN", stream_bytes(self.ctx, self.key, "wandb-history.jsonl")[0])
+
+
+    def test_projected_request_limit_is_validated_before_pending_intent(self):
+        self.ctx.max_body_bytes = 512
+        with self.assertRaises(ProtocolError) as error:
+            self.stream("wandb-history.jsonl", [json.dumps({"m" + str(i): i for i in range(16)})])
+        self.assertEqual(error.exception.status, 413)
+        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
+        self.assertEqual(self.ctx.attempts, [])
+        self.stream("wandb-history.jsonl", ['{"loss":1}'])
+
+    def test_large_cumulative_stream_has_bounded_index_work_and_metadata(self):
+        self.ctx.max_body_bytes = 2048
+        original_get_many = self.ctx.state.get_many
+        original_put = self.ctx.state.put
+        reads, sizes = [], []
+        def get_many(ns, keys):
+            reads.append((ns, list(keys)))
+            self.assertLessEqual(len(keys), 4)
+            return original_get_many(ns, keys)
+        def put(ns, key, value):
+            if ns in (wandb.RUNS, wandb.PENDING):
+                sizes.append((ns, len(json.dumps(value))))
+            return original_put(ns, key, value)
+        self.ctx.state.get_many = get_many
+        self.ctx.state.put = put
+        self.ctx.state.items = lambda *a: self.fail("history-wide scan")
+        for batch in range(160):
+            lines = [json.dumps({"_step": batch * 4 + i, "_timestamp": 20 + batch + i / 10,
+                                 "loss": i, "raw": "x" * 200}) for i in range(4)]
+            self.stream("wandb-history.jsonl", lines, offset=batch * 4)
+        run = self.ctx.state.get(wandb.RUNS, self.key)
+        meta = run["streams"]["wandb-history.jsonl"]
+        self.assertEqual(meta["count"], 640)
+        self.assertGreater(meta["bytes"], self.ctx.max_body_bytes * 50)
+        self.assertEqual(len(meta["tail"]), 1)
+        self.assertLess(max(size for ns, size in sizes if ns == wandb.RUNS), 1100)
+        self.assertLess(max(size for ns, size in sizes if ns == wandb.PENDING), 3600)
+        self.assertTrue(all(not keys for ns, keys in reads if ns.startswith("wandb.rows.")))
+        before = len(self.ctx.attempts)
+        self.stream("wandb-history.jsonl", lines, offset=636)
+        self.assertEqual(len(self.ctx.attempts), before)
+        self.assertEqual(reads[-2][1], ["636", "637", "638", "639"])
+        self.assertEqual(wandb._bucket(run)["historyLineCount"], 640)
+        with self.assertRaises(ProtocolError) as error:
+            stream_bytes(self.ctx, self.key, "wandb-history.jsonl")
+        self.assertEqual(error.exception.code, "RESPONSE_TOO_LARGE")
+        # Download rejection does not poison subsequent ingestion.
+        self.stream("wandb-history.jsonl", ['{"loss":9}'], offset=640)
+        print(json.dumps({"kind":"scaling", "metrics":{"rows":640,"stream_bytes":meta["bytes"],
+              "request_cap":2048,"max_run_bytes":max(n for ns,n in sizes if ns == wandb.RUNS),
+              "max_pending_bytes":max(n for ns,n in sizes if ns == wandb.PENDING)}}), flush=True)
+
+    def test_mutable_rows_and_raw_revisions_keep_exact_bytes(self):
+        self.stream("output.log", ["é", "tail"])
+        self.stream("output.log", ["changed"])
+        self.assertEqual(stream_bytes(self.ctx, self.key, "output.log")[0], b"changed\ntail\n")
+        meta = self.ctx.state.get(wandb.RUNS, self.key)["streams"]["output.log"]
+        self.assertEqual(meta, {"count":2,"bytes":13,"tail":[]})
+        envelopes = [json.loads(data) for (ns, path), (data, _) in self.ctx.artifacts.data.items()
+                     if ns == "wandb.requests." + self.key and path.startswith("filestream/")]
+        self.assertEqual([v["files"]["output.log"]["content"] for v in envelopes], [["é", "tail"], ["changed"]])
+        self.stream("wandb-summary.json", ['{"first":1}', '{"last":2}'])
+        self.stream("wandb-summary.json", ['{"first":3}'])
+        self.assertEqual(json.loads(self.ctx.state.get(wandb.RUNS, self.key)["summaryMetrics"]), {"last":2})
+
+    def test_row_and_metric_indexes_are_scoped_by_run_and_stream(self):
+        line = '{"loss":1,"_step":0,"_timestamp":12.5}'
+        self.stream("wandb-history.jsonl", [line])
+        self.stream("wandb-events.jsonl", [line])
+        result = gql(self.ctx, 'mutation { upsertBucket(input:{name:"other",modelName:"p",entityName:"e"}) { bucket { id } } }')
+        self.assertEqual(result.status, 200)
+        wandb.handle(self.ctx, request("/files/e/p/other/file_stream", {"files":{"wandb-history.jsonl":{"offset":0,"content":[line]}}}))
+        self.assertEqual(len(self.ctx.batches), 3)
+
+    def test_sqlite_crash_boundaries_reopen_without_gap_or_double_insert(self):
+        from nset_compat.context import State as DurableState
+        for stage in ("native", "rows", "identities", "offset", "clear"):
+            for after in (False, True):
+                with self.subTest(stage=stage, after=after), tempfile.TemporaryDirectory() as directory:
+                    self.setUp()
+                    run = self.ctx.state.get(wandb.RUNS, self.key)
+                    self.ctx.state = DurableState(Path(directory) / "state.sqlite")
+                    self.ctx.state.put(wandb.RUNS, self.key, run)
+                    state = self.ctx.state
+                    method = "put_many" if stage in ("rows", "identities") else "put" if stage == "offset" else "delete"
+                    target = self.ctx if stage == "native" else state
+                    if stage == "native":
+                        method = "ingest_metrics"
+                    original = getattr(target, method)
+                    fired = []
+                    def crash(*args, **kwargs):
+                        matches = (stage == "native" or stage == "rows" and args[0].startswith("wandb.rows.")
+                                   or stage == "identities" and args[0].startswith("wandb.metrics.")
+                                   or stage == "offset" and args[0] == wandb.RUNS
+                                   or stage == "clear" and args[0] == wandb.PENDING)
+                        if matches and not fired:
+                            fired.append(True)
+                            if after:
+                                original(*args, **kwargs)
+                            raise RuntimeError("simulated process death")
+                        return original(*args, **kwargs)
+                    setattr(target, method, crash)
+                    lines = ['{"loss":1,"_step":0,"_timestamp":12.5}', '{"loss":2,"_step":1,"_timestamp":13.5}']
+                    with self.assertRaises(RuntimeError):
+                        self.stream("wandb-history.jsonl", lines)
+                    setattr(target, method, original)
+                    state.close()
+                    self.ctx.state = DurableState(Path(directory) / "state.sqlite")
+                    try:
+                        self.stream("wandb-history.jsonl", lines)
+                        self.stream("wandb-history.jsonl", lines, offset=2)  # offline repeat sync
+                        self.assertEqual(len(self.ctx.batches), 2)
+                        self.assertEqual(len(self.ctx.attempts), 2 + (1 if stage == "native" and after else 2 if stage in ("rows", "identities", "offset", "clear") and not (stage == "clear" and after) else 0))
+                        self.assertEqual(stream_bytes(self.ctx, self.key, "wandb-history.jsonl")[0], ("\n".join(lines * 2) + "\n").encode())
+                        self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["streams"]["wandb-history.jsonl"]["count"], 4)
+                        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
+                    finally:
+                        self.ctx.state.close()
+
+    def test_legacy_conversion_replays_marker_and_deduplicates_sync(self):
+        for stage in ("rows", "identities", "offset", "clear"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                line = '{"loss":1,"_step":0,"_timestamp":12.5001}'
+                self.stream("wandb-history.jsonl", [line])
+                legacy = self.ctx.state.get(wandb.RUNS, self.key)
+                legacy.pop("schema")
+                legacy["streams"] = {"wandb-history.jsonl":[line], "output.log":["original"], "wandb-summary.json":['{"loss":1}']}
+                self.ctx.state = State()
+                self.ctx.state.put(wandb.RUNS, self.key, legacy)
+                method = "put_many" if stage in ("rows", "identities") else "put" if stage == "offset" else "delete"
+                original = getattr(self.ctx.state, method)
+                fired = []
+                def crash(ns, *args):
+                    result = original(ns, *args)
+                    if not fired and (stage == "rows" and ns.startswith("wandb.rows.") or stage == "identities" and ns.startswith("wandb.metrics.") or stage == "offset" and ns == wandb.RUNS or stage == "clear" and ns == wandb.MIGRATING):
+                        fired.append(True)
+                        raise RuntimeError("migration crash")
+                    return result
+                setattr(self.ctx.state, method, crash)
+                with self.assertRaises(RuntimeError):
+                    self.upsert()
+                setattr(self.ctx.state, method, original)
+                self.upsert()
+                self.stream("wandb-history.jsonl", [line], offset=1)
+                self.assertEqual(len(self.ctx.batches), 1)
+                self.assertEqual(len(self.ctx.attempts), 1)
+                self.assertEqual(stream_bytes(self.ctx, self.key, "output.log")[0], b"original\n")
+                self.assertIsNone(self.ctx.state.get(wandb.MIGRATING, self.key))
+                self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["schema"], wandb.SCHEMA)
+
+    def test_legacy_pending_native_ack_is_converted_on_replay(self):
+        run = self.ctx.state.get(wandb.RUNS, self.key)
+        run.pop("schema")
+        line = '{"loss":1,"_step":0,"_timestamp":12.5}'
+        run["streams"] = {"wandb-history.jsonl":[line]}
+        batches = wandb._projection(self.key, "wandb-history.jsonl", line, 0, run)
+        self.ctx.ingest_metrics(run["native_id"], *batches[0])
+        self.ctx.state.put(wandb.PENDING, self.key, {"run":run,"batches":batches,"files":["wandb-history.jsonl"],"complete":False})
+        self.stream("wandb-history.jsonl", [line], offset=1)
+        self.assertEqual(len(self.ctx.batches), 1)
+        self.assertEqual(stream_bytes(self.ctx, self.key, "wandb-history.jsonl")[0], (line + "\n" + line + "\n").encode())
 
 
 @unittest.skipUnless(os.environ.get("NSET_WANDB_SDK_TEST") == "1", "opt-in real SDK/native integration")
@@ -354,11 +529,11 @@ if phase == 0:
                 self.assertEqual([p["value"] for p in points], [3.0, 2.0])
                 self.assertEqual([p["step"] for p in points], [0, 1])
                 second_key = wandb._identity("sdk-entity", "sdk-project", "sdk-second")
-                console, _ = ctx.artifacts.get(wandb._namespace(second_key), "output.log")
+                console, _ = stream_bytes(ctx, second_key, "output.log")
                 self.assertIn(b"default console output", console)
                 self.assertEqual(run["state"], "finished")
                 self.assertEqual(json.loads(run["config"])["schedule"]["value"], {"kind":"cosine"})
-                raw, _ = ctx.artifacts.get(wandb._namespace(key), "wandb-history.jsonl")
+                raw, _ = stream_bytes(ctx, key, "wandb-history.jsonl")
                 self.assertIn(b"raw-string", raw)
                 self.assertEqual(len(raw.splitlines()), 2)
                 for row in map(json.loads, raw.splitlines()):
@@ -366,12 +541,67 @@ if phase == 0:
                     self.assertTrue(image.startswith(b"\x89PNG"))
                     with urlopen(wandb._url(ctx, key, row["picture"]["path"]), timeout=10) as download:
                         self.assertEqual(download.read(), image)
-                summary, _ = ctx.artifacts.get(wandb._namespace(key), "wandb-summary.json")
+                summary, _ = stream_bytes(ctx, key, "wandb-summary.json")
                 self.assertIn(b"retained summary", summary)
                 print(json.dumps({"kind":"final","sdk":"wandb","metrics":{"history_rows":len(points),"image_uploads":2,"restart_resume":1,"native_outage_retry":1}}), flush=True)
             finally:
                 server.shutdown(); server.server_close(); thread.join()
                 ctx.close()
+
+
+    def test_multiclient_http_streams_exceed_request_cap(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from urllib.error import HTTPError
+        from urllib.request import Request as HTTPRequest
+        from nset_compat.context import CompatContext
+        from nset_compat.gateway import make_server
+        from support import Server
+        native = Server().start()
+        self.addCleanup(native.close)
+        root = ROOT / "artifacts" / "wandb-sdk"
+        root.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="scaling-", dir=root))
+        ctx = CompatContext(native.url, native.token, directory / "gateway", "http://127.0.0.1:0")
+        server = make_server(ctx, max_body_bytes=16 * 1024)
+        ctx.public_url = f"http://127.0.0.1:{server.server_address[1]}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def send(path, data):
+            req = HTTPRequest(ctx.public_url + path, data=json.dumps(data).encode(),
+                              headers={"Authorization":"Bearer " + native.token, "Content-Type":"application/json"})
+            with urlopen(req, timeout=20) as response:
+                return json.load(response)
+        def client(index):
+            name = "client-" + str(index)
+            response = send("/graphql", {"query":'mutation { upsertBucket(input:{name:"' + name + '",modelName:"p",entityName:"e"}) { bucket { id } } }'})
+            self.assertNotIn("errors", response)
+            path = "/files/e/p/" + name + "/file_stream"
+            for offset in range(48):
+                line = json.dumps({"_step":offset,"_timestamp":100 + offset,"loss":offset,"raw":"x" * 8192})
+                send(path, {"files":{"wandb-history.jsonl":{"offset":offset,"content":[line]}}})
+            # Retry old source offset and repeat-sync observation at new offset.
+            send(path, {"files":{"wandb-history.jsonl":{"offset":47,"content":[line]}}})
+            send(path, {"files":{"wandb-history.jsonl":{"offset":48,"content":[line]}}})
+            key = wandb._identity("e", "p", name)
+            run = ctx.state.get(wandb.RUNS, key)
+            self.assertEqual(run["streams"]["wandb-history.jsonl"]["count"], 49)
+            self.assertGreater(run["streams"]["wandb-history.jsonl"]["bytes"], ctx.max_body_bytes * 20)
+            points = list(native.client.metric_history(run["native_id"], "loss"))
+            self.assertEqual([point["value"] for point in points], list(range(48)))
+            self.assertLess(len(json.dumps(run)), 10000)
+            with self.assertRaises(HTTPError) as error:
+                urlopen(wandb._url(ctx, key, "wandb-history.jsonl"), timeout=20)
+            self.assertEqual(error.exception.code, 413)
+            error.exception.close()
+            return run["streams"]["wandb-history.jsonl"]["bytes"]
+        try:
+            with ThreadPoolExecutor(max_workers=3) as workers:
+                sizes = list(workers.map(client, range(3)))
+            print(json.dumps({"kind":"http_scaling","metrics":{"clients":3,"rows_per_client":49,
+                  "points_per_client":48,"stream_bytes":sum(sizes),"request_cap":ctx.max_body_bytes}}), flush=True)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+            ctx.close()
 
 
     def test_offline_capture_then_sync_and_repeat_sync(self):
@@ -413,7 +643,7 @@ with wandb.init(mode="offline",entity="sdk-entity",project="sdk-project",id="off
             points = list(native.client.metric_history(run["native_id"],"offline_loss"))
             self.assertEqual([p["value"] for p in points],[7.0])
             self.assertEqual(run["state"], "finished")
-            raw, _ = ctx.artifacts.get(wandb._namespace(key), "wandb-history.jsonl")
+            raw, _ = stream_bytes(ctx, key, "wandb-history.jsonl")
             self.assertIn(b"offline raw", raw)
             row = json.loads(raw.splitlines()[0])
             image, _ = ctx.artifacts.get(wandb._namespace(key), row["picture"]["path"])

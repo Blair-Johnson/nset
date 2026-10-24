@@ -18,6 +18,9 @@ from .common import ProtocolError, Response
 RUNS = "wandb.runs"
 PENDING = "wandb.pending"
 PROJECTS = "wandb.projects"
+MIGRATING = "wandb.migrating"
+SCHEMA = 2
+ROW_CHUNK = 512
 MAX_SAFE = 9007199254740991
 
 
@@ -187,25 +190,72 @@ def _load(ctx, key):
     run = ctx.state.get(RUNS, key)
     if run is None:
         _error("NOT_FOUND", "W&B run does not exist", 404)
-    return run
+    return _migrate(ctx, key, run)
 
 
 def _namespace(key):
     return "wandb.files." + key
 
 
+def _rows_namespace(key, name):
+    return "wandb.rows." + key + "." + _digest(name)
+
+
+def _metric_namespace(key):
+    return "wandb.metrics." + key
+
+
+def _stream_meta(lines, name):
+    return {"count": len(lines), "bytes": sum(len(line.encode()) + 1 for line in lines),
+            "tail": lines[-1:] if name in ("wandb-history.jsonl", "wandb-events.jsonl", "wandb-summary.json") else []}
+
+
+def _migrate(ctx, key, run):
+    """One-time replayable conversion, always called under the run lock.
+
+    The full legacy document is journaled before index writes. A crash after
+    any index or metadata commit simply repeats the same deterministic writes.
+    No native metrics are submitted by migration.
+    """
+    legacy = ctx.state.get(MIGRATING, key)
+    if legacy is None:
+        if run.get("schema") == SCHEMA:
+            return run
+        if run.get("schema") not in (None, 1):
+            _error("UNSUPPORTED_SCHEMA", "Unsupported W&B run storage schema", 409)
+        legacy = run
+        ctx.state.put(MIGRATING, key, legacy)
+    converted = {k: v for k, v in legacy.items() if k not in ("streams", "metric_seen")}
+    converted.update(schema=SCHEMA, streams={})
+    for name, lines in legacy.get("streams", {}).items():
+        if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+            _error("UNSUPPORTED_SCHEMA", "Invalid legacy W&B stream", 409)
+        for start in range(0, len(lines), ROW_CHUNK):
+            chunk = lines[start:start + ROW_CHUNK]
+            ctx.state.put_many(_rows_namespace(key, name), {str(i): line for i, line in enumerate(chunk, start)})
+            identities = {}
+            if name in ("wandb-history.jsonl", "wandb-events.jsonl"):
+                for i, line in enumerate(chunk, start):
+                    identities.update({batch: True for batch, _ in _projection(key, name, line, i, legacy)})
+            ctx.state.put_many(_metric_namespace(key), identities)
+        converted["streams"][name] = _stream_meta(lines, name)
+    ctx.state.put(RUNS, key, converted)
+    ctx.state.delete(MIGRATING, key)
+    return converted
+
+
 def _bucket(run):
     streams = run.get("streams", {})
-    history = streams.get("wandb-history.jsonl", [])
-    events = streams.get("wandb-events.jsonl", [])
+    history = streams.get("wandb-history.jsonl", {})
+    events = streams.get("wandb-events.jsonl", {})
     # Go resume.processHistory expects a JSON-encoded array of JSON lines.
     return {"id": run["native_id"], "name": run["name"], "displayName": run.get("displayName") or run["name"],
             "description": run.get("description", ""), "notes": run.get("notes", ""),
             "config": run.get("config", "{}"), "summaryMetrics": run.get("summaryMetrics", "{}"),
-            "systemMetrics": events[-1] if events else "{}", "sweepName": None,
-            "project": run["project_record"], "historyLineCount": len(history),
-            "eventsLineCount": len(events), "logLineCount": len(streams.get("output.log", [])),
-            "historyTail": _json(history[-1:]), "eventsTail": _json(events[-1:]),
+            "systemMetrics": next(iter(events.get("tail", [])), "{}"), "sweepName": None,
+            "project": run["project_record"], "historyLineCount": history.get("count", 0),
+            "eventsLineCount": events.get("count", 0), "logLineCount": streams.get("output.log", {}).get("count", 0),
+            "historyTail": _json(history.get("tail", [])), "eventsTail": _json(events.get("tail", [])),
             "tags": run.get("tags", []), "wandbConfig": _json({"t": 1}) if run.get("started") else "{}",
             "state": run.get("state", "running"), "stopped": False}
 
@@ -214,16 +264,39 @@ def _finish_pending(ctx, key):
     pending = ctx.state.get(PENDING, key)
     if not pending:
         return
+    if pending.get("schema") not in (None, SCHEMA):
+        _error("UNSUPPORTED_SCHEMA", "Unsupported W&B pending schema", 409)
     run = pending["run"]
+    # The intent is immutable until cleared. Replay every stage after a crash;
+    # native batch IDs and bulk row/identity upserts are idempotent, even when
+    # the previous attempt committed but its acknowledgement was lost.
     for batch_id, metrics in pending["batches"]:
         ctx.ingest_metrics(run["native_id"], batch_id, metrics, wait=True)
-    for name in pending["files"]:
-        ctx.artifacts.put(_namespace(key), name, ("\n".join(run["streams"][name]) + "\n").encode(),
-                          "application/json" if name.endswith(".json") else "text/plain")
     if pending.get("complete"):
         ctx.native.request("PATCH", "/api/runs/" + quote(run["native_id"], safe=""), {"status": run["state"]})
-    ctx.state.put(RUNS, key, run)
+    if pending.get("schema") is None:
+        # Legacy pending intents already contain their proposed full run.
+        _migrate(ctx, key, run)
+    elif pending["schema"] == SCHEMA:
+        for name, rows in pending["rows"].items():
+            ctx.state.put_many(_rows_namespace(key, name), rows)
+        ctx.state.put_many(_metric_namespace(key), {batch: True for batch, _ in pending["batches"]})
+        ctx.state.put(RUNS, key, run)
     ctx.state.delete(PENDING, key)
+
+
+def _download_stream(ctx, key, run, name):
+    meta = run["streams"][name]
+    if meta["bytes"] > getattr(ctx, "max_body_bytes", 32 * 1024 * 1024):
+        _error("RESPONSE_TOO_LARGE", "W&B stream exceeds configured download limit", 413)
+    chunks = []
+    for start in range(0, meta["count"], ROW_CHUNK):
+        keys = [str(i) for i in range(start, min(start + ROW_CHUNK, meta["count"]))]
+        rows = ctx.state.get_many(_rows_namespace(key, name), keys)
+        if any(k not in rows for k in keys):
+            _error("CORRUPT_STREAM", "Committed W&B stream row missing", 500)
+        chunks.extend((rows[k] + "\n").encode() for k in keys)
+    return b"".join(chunks), "application/json" if name.endswith(".json") else "text/plain"
 
 
 def _upsert(ctx, values):
@@ -239,6 +312,8 @@ def _upsert(ctx, values):
         _finish_pending(ctx, key)
         run = ctx.state.get(RUNS, key)
         inserted = run is None
+        if not inserted:
+            run = _migrate(ctx, key, run)
         if inserted:
             project_record = _project(ctx, entity, project)
             tags = {"compat": "wandb", "wandb.entity": entity, "wandb.project": project, "wandb.run_id": name}
@@ -252,7 +327,7 @@ def _upsert(ctx, values):
                 "experiment_id": project_record["id"], "name": values.get("displayName") or name,
                 "params": {}, "tags": tags})
             run = {"native_id": native["id"], "name": name, "entity": entity, "project": project,
-                   "project_record": project_record, "streams": {}, "created_ms": int(time.time() * 1000)}
+                   "project_record": project_record, "schema": SCHEMA, "streams": {}, "created_ms": int(time.time() * 1000)}
         run = copy.deepcopy(run)
         for field in ("displayName", "description", "notes", "tags", "config", "summaryMetrics", "state"):
             if values.get(field) is not None:
@@ -318,7 +393,7 @@ def _gql(ctx, request):
                     with ctx.lock_for("wandb.run." + key):
                         _finish_pending(ctx, key)
                         run = ctx.state.get(RUNS, key)
-                        bucket = _bucket(run) if run else None
+                        bucket = _bucket(_migrate(ctx, key, run)) if run else None
                         if bucket is not None:
                             for _, child, child_args, _ in children:
                                 if child == "files":
@@ -380,8 +455,22 @@ def _metrics(line, offset, name, run):
             for k, v in sorted(row.items()) if not k.startswith("_") and k and len((prefix + k).encode()) <= 512 and _numeric(v)]
 
 
+def _projection(key, name, line, offset, run):
+    rows = _metrics(line, offset, name, run)
+    identity = "offset:" + str(offset)
+    if rows:
+        source = json.loads(line)
+        if "_step" in source and "_timestamp" in source:
+            # Preserve full source timestamp, not the rounded native millisecond.
+            identity = "observation:" + _digest(_json([source["_step"], source["_timestamp"], rows]))
+    return [("wb-" + _digest(key + ":" + name + ":" + identity + ":" + str(chunk)), rows[chunk:chunk + 10000])
+            for chunk in range(0, len(rows), 10000)]
+
+
 def _stream(ctx, request, entity, project, name):
     key = _identity(entity, project, name)
+    if len(request.body) > getattr(ctx, "max_body_bytes", 32 * 1024 * 1024):
+        _error("REQUEST_TOO_LARGE", "W&B request exceeds configured limit", 413)
     payload = request.json()
     with ctx.lock_for("wandb.run." + key):
         _finish_pending(ctx, key)
@@ -389,7 +478,7 @@ def _stream(ctx, request, entity, project, name):
         files = payload.get("files", {})
         if not isinstance(files, dict):
             _error("INVALID_PARAMETER_VALUE", "filestream files must be an object")
-        batches = []
+        candidates, changes = {}, {}
         for filename, content in files.items():
             _path(filename)
             if not isinstance(content, dict):
@@ -397,40 +486,45 @@ def _stream(ctx, request, entity, project, name):
             offset, lines = content.get("offset"), content.get("content")
             if type(offset) is not int or offset < 0 or not isinstance(lines, list) or not all(isinstance(v, str) for v in lines):
                 _error("INVALID_PARAMETER_VALUE", "Expected nonnegative offset and string lines")
-            old = run["streams"].setdefault(filename, [])
+            meta = run["streams"].setdefault(filename, _stream_meta([], filename))
+            count = meta["count"]
             mutable = filename in ("wandb-summary.json", "output.log")
-            if offset > len(old):
+            if offset > count:
                 _error("OFFSET_GAP", "Filestream offset skips uncommitted records", 409)
+            keys = [str(i) for i in range(offset, min(count, offset + len(lines)))]
+            old = ctx.state.get_many(_rows_namespace(key, filename), keys)
+            if any(k not in old for k in keys):
+                _error("CORRUPT_STREAM", "Committed W&B stream row missing", 500)
+            changed = {}
             for i, line in enumerate(lines, offset):
-                if i < len(old):
-                    if old[i] != line and not mutable:
+                if i < count:
+                    if old[str(i)] != line and not mutable:
                         _error("OFFSET_CONFLICT", "Filestream offset already contains different data", 409)
-                    if not mutable:
+                    if old[str(i)] == line:
                         continue
-                    old[i] = line
-                else:
-                    old.append(line)
+                    meta["bytes"] -= len(old[str(i)].encode()) + 1
+                changed[str(i)] = line
+                meta["bytes"] += len(line.encode()) + 1
                 if filename in ("wandb-history.jsonl", "wandb-events.jsonl"):
-                    rows = _metrics(line, i, filename, run)
-                    identity = "offset:" + str(i)
-                    if rows:
-                        source = json.loads(line)
-                        if "_step" in source and "_timestamp" in source:
-                            # `wandb sync --include-synced` advances transport
-                            # offsets while replaying identical observations.
-                            # Retain both raw rows, but bind projection identity
-                            # to explicit step/time and canonical numeric data.
-                            identity = "observation:" + _digest(_json([source["_step"], source["_timestamp"], rows]))
-                    for chunk in range(0, len(rows), 10000):
-                        batch_id = "wb-" + _digest(key + ":" + filename + ":" + identity + ":" + str(chunk))
-                        batches.append((batch_id, rows[chunk:chunk + 10000]))
-            if filename == "wandb-summary.json" and old:
-                # Raw malformed/non-object summary still survives in the stream artifact.
+                    candidates.update(_projection(key, filename, line, i, run))
+            meta["count"] = max(count, offset + len(lines))
+            if filename in ("wandb-history.jsonl", "wandb-events.jsonl", "wandb-summary.json") and lines and offset + len(lines) == meta["count"]:
+                meta["tail"] = lines[-1:]
+            if changed:
+                changes[filename] = changed
+            if filename == "wandb-summary.json" and meta["tail"]:
                 try:
-                    if isinstance(json.loads(old[-1]), dict):
-                        run["summaryMetrics"] = old[-1]
+                    if isinstance(json.loads(meta["tail"][-1]), dict):
+                        run["summaryMetrics"] = meta["tail"][-1]
                 except ValueError:
                     pass
+        seen = ctx.state.get_many(_metric_namespace(key), list(candidates))
+        batches = [(batch, rows) for batch, rows in candidates.items() if batch not in seen]
+        # Match Transport encoding; reject deterministic oversize before journaling.
+        # The limit is per native request, never cumulative stream size.
+        if any(len(json.dumps({"metrics": rows}).encode()) > getattr(ctx, "max_body_bytes", 32 * 1024 * 1024)
+               for _, rows in batches):
+            _error("REQUEST_TOO_LARGE", "Projected W&B metric request exceeds configured limit", 413)
         uploaded = payload.get("uploaded", [])
         if not isinstance(uploaded, list):
             _error("INVALID_PARAMETER_VALUE", "uploaded must be a list")
@@ -443,15 +537,10 @@ def _stream(ctx, request, entity, project, name):
             run["state"] = "finished" if payload.get("exitcode", 0) == 0 else "failed"
             run["exitcode"] = payload.get("exitcode", 0)
         run["started"] = True
-        # Check the materialized-file bound before installing a pending journal;
-        # an oversized request must not permanently block the previous valid run.
-        limit = getattr(ctx, "max_body_bytes", 32 * 1024 * 1024)
-        if any(sum(len(line.encode()) + 1 for line in run["streams"][f]) > limit for f in files):
-            _error("REQUEST_TOO_LARGE", "Materialized W&B stream exceeds configured file limit", 413)
-        # Immutable source envelopes retain ALL fields and revisions, including
-        # arbitrary nonnumeric JSON, malformed lines, heartbeats and completion.
+        # Per-request envelopes retain raw data and every mutable offset revision.
+        # They are never rebuilt from historical rows.
         ctx.artifacts.put("wandb.requests." + key, "filestream/" + hashlib.sha256(request.body).hexdigest() + ".json", request.body, "application/json")
-        ctx.state.put(PENDING, key, {"run": run, "batches": batches, "files": list(files), "complete": complete})
+        ctx.state.put(PENDING, key, {"schema": SCHEMA, "run": run, "batches": batches, "rows": changes, "complete": complete})
         _finish_pending(ctx, key)
         return Response(body={"exitcode": run.get("exitcode"), "limits": {}})
 
@@ -477,8 +566,11 @@ def handle(ctx, request):
             _error("NOT_FOUND", "Invalid W&B file URL", 404)
         key, filename = parts[0], _path(unquote(parts[1]))
         with ctx.lock_for("wandb.run." + key):
-            _load(ctx, key)
+            _finish_pending(ctx, key)
+            run = _load(ctx, key)
             if request.method == "PUT":
+                if len(request.body) > getattr(ctx, "max_body_bytes", 32 * 1024 * 1024):
+                    _error("REQUEST_TOO_LARGE", "W&B upload exceeds configured limit", 413)
                 # Preserve overwritten upload revisions too.
                 revision = _digest(filename) + "/" + hashlib.sha256(request.body).hexdigest()
                 content_type = request.headers.get("content-type", "application/octet-stream")
@@ -486,7 +578,8 @@ def handle(ctx, request):
                 ctx.artifacts.put(_namespace(key), filename, request.body, content_type)
                 return Response(body={})
             if request.method in ("GET", "HEAD"):
-                body, content_type = ctx.artifacts.get(_namespace(key), filename)
+                body, content_type = (_download_stream(ctx, key, run, filename) if filename in run["streams"]
+                                      else ctx.artifacts.get(_namespace(key), filename))
                 return Response(body=body if request.method == "GET" else b"", headers={"Content-Type": content_type})
             _error("METHOD_NOT_ALLOWED", "Run files require PUT or GET", 405)
     return None
