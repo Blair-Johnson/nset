@@ -10,7 +10,7 @@ web-build = "npm --prefix web run build"
 web-test = "npm --prefix web test"
 build = { cmd = "cargo build --release --locked", depends-on = ["web-build"] }
 check = { cmd = "cargo test --locked", depends-on = ["web-build", "web-test"] }
-serve = { cmd = "cargo run -- --data-dir ./data", depends-on = ["web-build"] }
+serve = { cmd = "cargo run --locked -- serve", depends-on = ["web-build"] }
 demo = "python examples/demo.py"
 server-debug = { cmd = "cargo build --locked", depends-on = ["web-build"] }
 api-test = { cmd = "python -m unittest discover -s tests -p 'test_*.py'", depends-on = ["server-debug"] }
@@ -20,8 +20,7 @@ format-check = "cargo fmt --all -- --check"
 verify = { depends-on = ["check", "api-test", "format-check"] }
 preview = { cmd = "python scripts/preview.py", depends-on = ["build"] }
 benchmark = { cmd = "python scripts/benchmark.py", depends-on = ["build"], env = { NSET_BINARY = "target/release/nset" } }
-compat-serve = { cmd = "python -m nset_compat", env = { PYTHONPATH = "python" } }
-compat-test = { cmd = "python -m unittest discover -s tests -p 'test_*.py'", depends-on = ["server-debug"], env = { PYTHONPATH = "python", NSET_BINARY = "target/debug/nset" } }
+compat-test = { cmd = "python -W error::ResourceWarning -m unittest discover -s tests -p 'test_*.py'", depends-on = ["server-debug"], env = { PYTHONPATH = "python", NSET_BINARY = "target/debug/nset", NSET_WANDB_SDK_TEST = "1" } }
 tensorboard-ingest = { cmd = "python -m nset_compat.tensorboard", env = { PYTHONPATH = "python" } }
 
 [dependencies]

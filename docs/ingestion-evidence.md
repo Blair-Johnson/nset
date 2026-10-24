@@ -1,5 +1,9 @@
 # Initial ingestion evidence — October 23, 2026
 
+## Pre-single-command historical evidence
+
+**The records below predate the single Rust `nset serve` integration.** They describe their recorded revisions and architectures, not current standalone-server SDK parity, performance or release acceptance. Old gateway references are historical, not setup instructions. Current source-specific gates must be recorded separately. For live setup use `README.md` and `docs/client-compatibility.md`.
+
 This is a historical first-milestone report. The subsequent implementation adds durable ingestion, configurable concurrency, artifacts and tested official-client adapters; see `docs/durable-ingestion-evidence.md` and `docs/client-compatibility.md` for the current result.
 
 ## Scope

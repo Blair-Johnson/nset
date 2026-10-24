@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nset-client"
 version = "0.1.0"
-description = "Small synchronous client for Not Shitty Experiment Tracker"
+description = "Native producer client and optional TensorBoard collector for nset"
 requires-python = ">=3.10"
 dependencies = []
 

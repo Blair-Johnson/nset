@@ -1,5 +1,9 @@
 # Concurrent ingestion and client compatibility
 
+## Pre-single-command historical implementation plan
+
+**Archived design record, not current deployment or migration instructions.** The milestones, worker ownership, gateway architecture and schema-transition work below refer to earlier test-data implementations. The current server is one Rust process with one storage root; it offers no migration or backward-compatibility promise for that earlier state. Use `README.md`, `docs/client-compatibility.md` and `docs/durable-ingestion.md` for the current contract. Earlier SDK/load results do not establish single-command parity or performance.
+
 Status: milestones A–E are implemented and integrated on `feat/durable-ingestion`, following the initial `feat/ingestion-compat` audit based on `cea8ccd`. Main and the running preview remain unchanged. The implementation includes a concurrent-load harness, configurable bounded concurrency, durable native intake/replay, a local outbox, official MLflow/W&B tracking adapters and a TensorBoard event-file collector. Tested protocol scope is in `docs/client-compatibility.md`; recovery/load evidence and final regression results are in `docs/durable-ingestion-evidence.md`. Unsupported vendor features and operational limits remain explicit.
 
 ## Goal and acceptance contract

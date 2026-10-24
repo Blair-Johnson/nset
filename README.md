@@ -1,49 +1,34 @@
 # Not Shitty Experiment Tracker
 
-A small experiment tracker focused on trustworthy timeseries inspection and native-resolution image timelines, with a dark experiment browser and mixed-chart dashboards. A Rust executable serves the browser UI, writes scalar observations to SQLite, and stores images as immutable files. The UI uses uPlot and OpenSeadragon; Node is a build dependency, not a runtime service.
-
-The native API is supplemented by an optional server-side gateway for official MLflow and W&B tracking clients, plus a TensorBoard event-file collector. Existing training instrumentation can keep its SDK; configure the endpoint and credentials instead. Compatibility is a tested tracking subset, not a complete replacement for either vendor's service. Generic artifact and run-file storage APIs are unsupported; native image logging remains supported. See `docs/client-compatibility.md` for setup and limits. This is an early implementation, not a hardened multi-tenant service.
-
-## Build
-
-Install Pixi and a platform C/C++ build toolchain (SQLite is compiled into the binary). From the repository:
-
 ```sh
-pixi install --locked
-pixi run web-install
-pixi run build
+nset serve --host 127.0.0.1 --port 8080 --token '<YOUR_LONG_RANDOM_TOKEN>' --db-path ./nset-data
 ```
 
-The executable is `target/release/nset` (`nset.exe` on Windows). Build separately for each target OS/architecture. Frontend assets are compiled into the executable; do not run Cargo directly before building `web/dist`.
+Run this with an already-built `nset` on your PATH, replacing `<YOUR_LONG_RANDOM_TOKEN>` with a private, randomly generated secret. Use at least 40 characters for the W&B SDK. Open `http://127.0.0.1:8080` and enter the same token. This documentation does not assert that published binary downloads are available; to build from source, see `docs/contributing.md`.
 
-## Launch
+One Rust executable serves the embedded browser UI, native API, MLflow tracking routes and W&B tracking routes on the same origin. Serving needs no Python or Node runtime, Python process, proxy or secondary port. SDK packages and the optional TensorBoard collector run on the producer side, not as server prerequisites.
 
-Generate a random token file with owner-only permissions on Unix:
+The tracker focuses on trustworthy timeseries inspection and native-resolution image timelines, with a dark experiment browser and mixed-chart dashboards. Compatibility is a scoped tracking contract, not a complete MLflow or W&B platform. Generic artifacts and run-file uploads/downloads are unsupported; native image logging remains supported. See `docs/client-compatibility.md` for producer setup and limits. This is not a hardened multi-tenant service.
 
-```sh
-pixi run python -c 'import os,secrets; f=os.open("access-token",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(f,(secrets.token_urlsafe(32)+"\n").encode()); os.close(f)'
-./target/release/nset --data-dir ./data --listen 127.0.0.1:8080 --token-file ./access-token
+## Launch options and storage
+
+The public command is:
+
+```text
+nset serve --host <ADDRESS> --port <PORT> --token <TOKEN> --db-path <DIR> [--token-file <FILE>] [--workers <N>] [--log-level error|warn|info|debug]
 ```
 
-Open `http://127.0.0.1:8080` and enter the token. `NSET_TOKEN` is an alternative to `--token-file`. The UI retains the token in session storage until Disconnect; it is never placed in an image URL. All API routes require a bearer token. Treat that token as full read/write access.
+`--token-file` replaces `--token`; they cannot be combined. `NSET_TOKEN` can supply the token instead of `--token`; unset it when using a token file. Protect the secret and token file: the token grants full service access. The UI retains it in session storage until Disconnect and never puts it in an image URL.
 
-Keep the database on a local filesystem. Remote training clients use HTTP, not shared SQLite files. For remote access, use HTTPS through a reverse proxy or an SSH tunnel; do not expose plaintext token traffic to an untrusted network. Copy the executable to a compatible host to deploy; no Python or Node installation is required to serve it.
+Defaults are host `127.0.0.1`, port `8080`, database root `./nset-data`, automatic worker count and log level `info`. Automatic workers use available parallelism capped at 32. `--db-path` is a directory, not a database filename. Internal capacity controls are environment tuning, not additional public CLI options; see `docs/durable-ingestion.md`.
 
-## Populate example runs
+The storage root contains `nset.sqlite3` (native and compatibility tables), `ingest.sqlite3` (durable intake), native images, the ownership lock and SQLite WAL/SHM sidecars when present. Only one server may own a root. Keep it on a local filesystem; remote producers use HTTP rather than shared SQLite files. Shut down the server and copy the whole root for backup, not individual databases at different times. Browser view exports are not data backups. This test-data-only transition provides no old-server state migration or backward-compatibility guarantee.
 
-For an isolated demo, run `pixi run preview` after installing the web dependencies. It builds the executable, starts a loopback server on port 8080, and seeds three runs. Enter the token stored in `artifacts/preview.token`; the synthetic database stays in ignored `artifacts/preview-data`. Stop the foreground command with Ctrl-C.
-
-For your own running server, populate examples from another terminal:
-
-```sh
-pixi run python examples/demo.py --token-file ./access-token
-```
-
-The demo includes three runs with irregularly spaced loss observations, narrow spikes, oscillating threshold crossings, and native PNG sequences. Select several runs and open Charts to compare their curves and scrub the image panels’ prediction sequences.
+Loopback use needs no extra service. Remote access carries credentials over plaintext HTTP unless protected externally; do not expose it to an untrusted network. TLS termination is not part of this server command.
 
 ## Log from Python
 
-Install the dependency-free client with `pip install ./python`, or add `python/` to `PYTHONPATH`:
+Install the dependency-free native client on the producer with `pip install ./python` from a source checkout, or add `python/` to `PYTHONPATH`:
 
 ```python
 import os
@@ -56,9 +41,9 @@ with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
     run.log_image("prediction", "prediction.png", step=100)
 ```
 
-For throughput, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, ...])` with up to 10,000 observations per request. These legacy writes are synchronous and acknowledged after persistence; the client does not silently retry non-idempotent requests. A failed context marks the run failed. A client exception does not guarantee that an interrupted network write was not committed.
+For batching, use `run.log_batch([{ "key": "loss", "step": 1, "value": 0.5 }, ...])` with up to 10,000 observations per request. These synchronous writes are acknowledged after persistence; the client does not silently retry non-idempotent requests. A failed context marks the run failed. A client exception does not guarantee that an interrupted network write was not committed.
 
-For retry-safe delivery, use `Client.durable_outbox(path)` or the native `PUT /api/runs/{id}/ingest/{batch_id}` endpoint. Stable batch IDs prevent duplicate application after lost replies; a durable receipt precedes asynchronous query visibility. Producers must retain unacknowledged data. See `docs/durable-ingestion.md` for usage, recovery, capacity limits and configurable concurrency. Official MLflow/W&B clients use the gateway described in `docs/client-compatibility.md`; TensorBoard writers use its event-file collector.
+For retry-safe delivery, use `Client.durable_outbox(path)` or native `PUT /api/runs/{id}/ingest/{batch_id}`. Stable batch IDs prevent duplicate application after lost replies; a durable receipt precedes asynchronous query visibility. Producers must retain unacknowledged data. See `docs/durable-ingestion.md` for recovery and capacity limits. Official MLflow/W&B clients use this same server origin; TensorBoard writers can use the optional producer-side event-file collector described in `docs/client-compatibility.md`.
 
 ## Explore runs and charts
 
@@ -90,12 +75,8 @@ Authenticated `GET /api/catalog` returns `{experiments, runs, series}` for table
 
 ## Verification and architecture
 
-The API and initial component boundaries are documented in `docs/contract.md`. The redesign specification, compact UX contract and reference survey are in `docs/ux-contract.md`, `docs/ux-refinement-contract.md` and `docs/ux-survey.md`; the detailed development checklists are retained locally in ignored `.agents/plan.md` and `.agents/ux-redesign-plan.md`. Executed checks, screenshots, performance observations, and current limitations are recorded in `docs/verification.md`. The full acceptance command is `bash scripts/verify.sh`; it also installs Chromium for the browser checks.
+`docs/contract.md` describes the native API, and `docs/compat-gateway-contract.md` describes the in-process Rust compatibility boundary (the filename is retained for existing references). Source build and development checks are in `docs/contributing.md`. The UX contracts are in `docs/ux-contract.md` and `docs/ux-refinement-contract.md`.
 
-```sh
-pixi run check
-NSET_BINARY="$PWD/target/release/nset" pixi run python -m unittest discover -s tests -p 'test_*.py'
-NSET_BINARY="$PWD/target/release/nset" pixi run python scripts/benchmark.py
-```
+`docs/verification.md` and the ingestion evidence documents retain earlier results under explicit historical headings. Those results do not establish single-command SDK parity, release readiness or measured performance. Current acceptance must identify its exact source and executed gates.
 
-The server uses a configurable multithreaded HTTP runtime, bounded SQLite read actors, one query writer, and a separate durable journal intake worker/projector. Pending limits reject overload without evicting accepted data; raising thread counts is not a promise of higher sustained throughput. `docs/durable-ingestion-evidence.md` records recovery checks and concurrent delivery probes. Very large histories are complete but still consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.
+The server uses a configurable multithreaded HTTP runtime, bounded SQLite read actors, one query writer, and a separate durable journal intake worker/projector. Pending limits reject overload without evicting accepted data; raising thread counts is not a promise of higher sustained throughput. Very large histories remain complete but consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.

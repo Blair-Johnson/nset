@@ -1,5 +1,9 @@
 # Verification record
 
+## Pre-single-command historical evidence
+
+**The records below predate the single Rust `nset serve` integration.** They describe their recorded revisions and architectures, not current standalone-server SDK parity, performance or release acceptance. Old gateway references are historical, not setup instructions. Current source-specific gates must be recorded separately. For live setup use `README.md` and `docs/client-compatibility.md`.
+
 ## Previous redesigned release (r59)
 
 Full integrated acceptance passed in rx r59 against source `7d6b8de` in 80.74 seconds. It includes 237 frontend/numerical/state tests, 64 Chromium scenarios (including dark-theme contrast and concrete plot presets), production TypeScript/Vite and Rust release builds, Rust formatting/tests/strict Clippy, 11 real HTTP/client tests, the embedded-server dashboard/image/pixel journey and both 100,000-point throughput probes. No tests were skipped. Subsequent delivery commits only update documentation.

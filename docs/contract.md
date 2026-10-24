@@ -1,11 +1,14 @@
-# Initial implementation contract
+# Native API and application contract
 
-This document coordinates independent backend, frontend, numerical, and SDK work.
-This is a new API inspired by familiar trackers, NOT MLflow/wandb wire compatibility.
+This document describes the native API and original frontend/numerical boundaries. Scoped MLflow and W&B wire protocols now run in the same Rust process; see `docs/compat-gateway-contract.md` and `docs/client-compatibility.md` for those contracts.
 
 ## Deployment and auth
 
-One Rust binary `nset` serves embedded `web/dist` and /api. CLI: --data-dir, --listen (default 127.0.0.1:8080), --token-file OR --token (env NSET_TOKEN), max body size 32 MiB. Require nonempty token, never print it. All /api endpoints including artifact bytes require Authorization: Bearer TOKEN. UI assets public; frontend keeps token in sessionStorage only and sends Authorization on fetch; no URL token. No permissive CORS. localhost defaults; HTTPS via proxy or SSH tunnel remotely.
+One Rust executable serves embedded `web/dist`, `/api` and the compatibility routes on the same origin. Launch it with `nset serve`; the approved options and defaults are in `README.md`. `--db-path` names the whole storage directory. A token is required via `--token`, `NSET_TOKEN` or a mutually exclusive `--token-file`; never print it. The body limit is 32 MiB. Native `/api` endpoints, including native image bytes, require `Authorization: Bearer TOKEN`. UI assets are public; the frontend keeps the token in sessionStorage and sends it on authenticated fetches, never in URLs. There is no permissive CORS.
+
+Loopback is the default and needs no additional service. Remote plaintext credential traffic needs external protection; the server does not add TLS termination. Serving requires no Python/Node runtime, compatibility process, proxy or secondary port. Generic artifact and run-file upload/download APIs are unsupported; native image logging remains supported.
+
+`nset.sqlite3` contains native and compatibility tables; `ingest.sqlite3` contains durable intake. Images, ownership lock and SQLite WAL/SHM sidecars share the same root. Stop the server before backing up that whole root. This transition provides no prior-test-data migration or backward-compatibility guarantee.
 
 ## Types
 
@@ -54,7 +57,9 @@ ema(points: XY[], alpha: number): XY[] alpha in (0,1], independent of viewport.
 makeInterpolator(points: XY[], kind: Interpolation): {at(x:number):number|null; crossings(y:number):{points:number[],plateaus:[number,number][]}}. Exact samples honored; no extrapolation; robust singleton/empty series; endpoint dedup and contiguous plateaus merged. PCHIP uses shape-preserving derivatives and bracketed threshold root solving per segment.
 Frontend may also export/use sampleCurve(points, interpolator, samplesPerSegment) if necessary, but raw data must remain independent. Numerical module owns numerical readouts, not uPlot cursor index.
 
-## Ownership
+## Historical initial implementation ownership
+
+The following records the original development split, not current deployment requirements.
 
 Backend agent: Cargo.toml, src/**, backend unit/integration tests, optional build.rs. No pixi or web edits.
 Frontend agent: web/** EXCEPT web/src/math.ts and web/src/math.test.ts; own package.json/config/style/components/browser test integration.

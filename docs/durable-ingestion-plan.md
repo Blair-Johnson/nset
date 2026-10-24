@@ -1,5 +1,9 @@
 # Durable ingestion and concurrency pass
 
+## Pre-single-command historical implementation plan
+
+**Archived design record, not current deployment or migration instructions.** The milestones, worker ownership, gateway architecture and schema-transition work below refer to earlier test-data implementations. The current server is one Rust process with one storage root; it offers no migration or backward-compatibility promise for that earlier state. Use `README.md`, `docs/client-compatibility.md` and `docs/durable-ingestion.md` for the current contract. Earlier SDK/load results do not establish single-command parity or performance.
+
 Base: a45df0f; integration branch feat/durable-ingestion. Main and the preview remain untouched. Implementations use isolated journal, concurrency-config and client-outbox worktrees. Coordinator owns HTTP integration, cross-cutting review, documentation and final testing. No push or merge into main without approval.
 
 ## Guarantee and scope

@@ -1,6 +1,6 @@
 # Durable ingestion and concurrency
 
-The synchronous native `POST /api/runs/{id}/metrics` endpoint still commits metrics before responding. It is not idempotent: losing its response leaves the caller uncertain whether a write committed. The new `PUT /api/runs/{id}/ingest/{batch_id}` endpoint instead commits the batch to a separate durable journal and returns HTTP 202. Query visibility follows asynchronously. A pending receipt is accepted data, not a failed write.
+The synchronous native `POST /api/runs/{id}/metrics` endpoint still commits metrics before responding. It is not idempotent: losing its response leaves the caller uncertain whether a write committed. The `PUT /api/runs/{id}/ingest/{batch_id}` endpoint instead commits the batch to a separate durable journal and returns HTTP 202. Query visibility follows asynchronously. A pending receipt is accepted data, not a failed write.
 
 Send the usual `{"metrics":[...]}` body with 1–10,000 observations and a batch ID of 1–128 ASCII letters, digits, dots, underscores or hyphens. IDs are scoped to a run. Retrying the same ID and canonical payload returns its original acceptance metadata; reusing the ID for different data returns 409. `GET` on the same path returns the receipt with `state` equal to `pending` or `applied`, the observation count in `accepted`, and millisecond `accepted_at`. Omitted observation timestamps resolve to that original acceptance time. Native numeric validation remains in force; this is not a mechanism for submitting non-finite values or negative steps.
 
@@ -24,15 +24,22 @@ A local enqueue acknowledgement and a server receipt describe different durabili
 
 The server uses a multithreaded Tokio runtime, dedicated SQLite read actors, one query writer, one journal intake worker and one projector. Increasing HTTP concurrency does not create additional SQLite writers. Tune limits with representative batch sizes and reader traffic; more threads can increase contention instead of throughput.
 
-```sh
-./target/release/nset --data-dir ./data --token-file ./access-token \
-  --http-workers 4 --read-workers 4 --db-queue-capacity 128 \
-  --write-concurrency 16 --image-concurrency 2 \
-  --ingest-queue-capacity 128 --ingest-max-pending-bytes 536870912 \
-  --ingest-max-pending-batches 20000 --ingest-poll-interval-ms 100
-```
+The public worker control is `--workers <N>` on `nset serve`. It sets HTTP runtime workers, not SQLite writers. The default is available CPU parallelism capped at 32. Other capacity controls are internal environment tuning, **not public CLI flags**:
 
-Defaults are available CPU parallelism capped at 32 HTTP workers, two readers, 64 queued jobs per DB actor, eight admitted HTTP writes, two image handlers, 64 journal intake jobs, 256 MiB of pending journal payload, 10,000 pending batches and a 100 ms idle projection interval. Every flag also accepts its uppercase `NSET_` environment form, with hyphens replaced by underscores. Invalid limits are rejected before databases are opened. `--ingest-paused` accepts journal batches but suspends projection for maintenance or recovery testing; do not leave it enabled unintentionally.
+| Internal environment variable | Default | Meaning |
+| --- | --- | --- |
+| `NSET_HTTP_WORKERS` | automatic, capped at 32 | HTTP workers when `--workers` is omitted |
+| `NSET_READ_WORKERS` | 2 | Read-only SQLite actors |
+| `NSET_DB_QUEUE_CAPACITY` | 64 | Queued jobs per DB actor |
+| `NSET_WRITE_CONCURRENCY` | 8 | Admitted write handlers |
+| `NSET_IMAGE_CONCURRENCY` | 2 | Native image handlers |
+| `NSET_INGEST_QUEUE_CAPACITY` | 64 | Journal intake jobs |
+| `NSET_INGEST_MAX_PENDING_BYTES` | 268435456 | Pending payload bytes |
+| `NSET_INGEST_MAX_PENDING_BATCHES` | 10000 | Pending journal batches |
+| `NSET_INGEST_POLL_INTERVAL_MS` | 100 | Idle projection poll interval |
+| `NSET_INGEST_PAUSED` | false | Accept journal batches without projecting |
+
+Invalid limits are rejected before databases are opened. Paused ingestion is for maintenance/recovery testing; do not leave it enabled unintentionally. The public command and storage option remain those in `README.md`.
 
 ## Recovery and operations
 
@@ -40,6 +47,6 @@ Authenticated `GET /api/ingest/status` exposes pending batches, pending payload 
 
 Pending-byte limits do not bound total disk use: SQLite overhead, WALs, free pages and retained applied-batch receipts also occupy storage. Receipt metadata is retained to preserve replay identity. Monitor disk space as well as queue depth. Socket timeouts in the standard-library client are not absolute wall-clock deadlines, so a stalled DNS lookup or trickling peer can delay shutdown.
 
-Back up the complete native data directory with the service stopped, including the query database, ingest journal and image files. Do not restore one database to a different point in time than the other. Include gateway metadata/artifacts and undelivered producer spools when backing up a compatibility deployment. Remote clients should use HTTP over TLS or a tunnel; SQLite files belong on local storage, not a shared network filesystem.
+Shut down the one server and back up its whole `--db-path` root: `nset.sqlite3` (native and compatibility tables), `ingest.sqlite3` (journal), native images, `nset.lock` and any SQLite WAL/SHM sidecars. Do not restore databases from different points in time. Undelivered producer outboxes, W&B offline records and TensorBoard source/state have separate producer-side retention needs. No old test-data migration is promised. SQLite files belong on local storage, not a shared network filesystem. Remote clients use HTTP; protect plaintext credentials before crossing an untrusted network.
 
 `scripts/benchmark_durable.py` measures local spool time, server acceptance time, query-visibility time, overload retries and exact sentinel readback with configurable clients and worker counts. It is a closed-loop fresh-database benchmark, not evidence of unlimited capacity or an open-loop production SLA.
