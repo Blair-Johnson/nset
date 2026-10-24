@@ -197,6 +197,75 @@ async fn version_one_migrates_receipts_without_recreating_legacy_objects() {
 }
 
 #[test]
+fn incompatible_known_schemas_are_rejected_before_persistent_changes() {
+    let source = tempfile::tempdir().unwrap();
+    let _db = Database::open(source.path()).unwrap();
+    let original = Connection::open(source.path().join("nset.sqlite3")).unwrap();
+    original
+        .execute_batch(
+            "INSERT INTO experiments VALUES('exp','existing',1);
+        INSERT INTO runs VALUES('run','exp','existing','running','{}','{}',1,1);",
+        )
+        .unwrap();
+    for (claimed_version, damage) in [
+        (2, "DROP TABLE ingest_receipts;"),
+        (1, "DROP TABLE ingest_receipts; DROP TABLE metrics;"),
+        (
+            2,
+            "DROP TABLE metrics; CREATE VIEW metrics AS SELECT 1 AS seq,'run' AS run_id,'loss' AS key,1 AS step,1 AS timestamp,1.0 AS value;",
+        ),
+        (2, "ALTER TABLE runs DROP COLUMN tags;"),
+        (
+            2,
+            "DROP TABLE ingest_receipts; CREATE TABLE ingest_receipts(run_id TEXT,batch_id TEXT,digest BLOB,accepted INTEGER,accepted_at INTEGER,PRIMARY KEY(batch_id));",
+        ),
+        (
+            2,
+            "DROP TABLE ingest_receipts; CREATE TABLE ingest_receipts(run_id TEXT,batch_id TEXT,digest BLOB,accepted INTEGER,accepted_at INTEGER,UNIQUE(run_id,batch_id));",
+        ),
+        (
+            2,
+            "DROP TABLE metrics; CREATE TABLE metrics(seq INTEGER NOT NULL DEFAULT 1,run_id TEXT,key TEXT,step INTEGER,timestamp INTEGER,value REAL);",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nset.sqlite3");
+        // A standalone copy of a real query DB, with an existing run and no
+        // actor connections or WAL sidecars in the rejection fixture.
+        original
+            .execute("VACUUM INTO ?", [path.to_str().unwrap()])
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        conn.execute_batch(damage).unwrap();
+        conn.pragma_update(None, "user_version", claimed_version)
+            .unwrap();
+        let before_schema = schema(&conn);
+        conn.close().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+        assert!(
+            Database::open(directory.path()).is_err(),
+            "accepted v{claimed_version}: {damage}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(version(&conn), claimed_version);
+        assert_eq!(schema(&conn), before_schema);
+        assert_eq!(
+            conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            conn.query_row("SELECT name FROM runs WHERE id='run'", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "existing"
+        );
+    }
+}
+#[test]
 fn failed_version_one_upgrade_preserves_schema_and_version() {
     let directory = tempfile::tempdir().unwrap();
     let db = Database::open(directory.path()).unwrap();

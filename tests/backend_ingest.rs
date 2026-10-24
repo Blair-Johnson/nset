@@ -478,6 +478,142 @@ fn journal_schema_corruption_and_option_guards_preserve_existing_files() {
 }
 
 #[test]
+fn incompatible_journal_identity_keys_are_rejected_without_mutation() {
+    let f = Fixture::new();
+    for (seq, constraint, extra) in [
+        (
+            "INTEGER NOT NULL DEFAULT 1",
+            ", UNIQUE(run_id,batch_id)",
+            "",
+        ),
+        ("INT PRIMARY KEY", ", UNIQUE(run_id,batch_id)", ""),
+        ("INTEGER PRIMARY KEY DESC", ", UNIQUE(run_id,batch_id)", ""),
+        (
+            "INTEGER",
+            ", PRIMARY KEY(seq,run_id), UNIQUE(run_id,batch_id)",
+            "",
+        ),
+        ("INTEGER PRIMARY KEY", "", ""),
+        ("INTEGER PRIMARY KEY", ", UNIQUE(batch_id)", ""),
+        (
+            "INTEGER PRIMARY KEY",
+            "",
+            "CREATE UNIQUE INDEX partial_scope ON inbox(run_id,batch_id) WHERE state='pending';",
+        ),
+        (
+            "INTEGER PRIMARY KEY",
+            "",
+            "CREATE UNIQUE INDEX folded_scope ON inbox(run_id,batch_id COLLATE NOCASE);",
+        ),
+        (
+            "INTEGER PRIMARY KEY",
+            ", UNIQUE(run_id,batch_id)",
+            "ALTER TABLE inbox RENAME TO backing; CREATE VIEW inbox AS SELECT * FROM backing;",
+        ),
+        (
+            "INTEGER PRIMARY KEY",
+            ", UNIQUE(run_id,batch_id)",
+            "DROP TABLE inbox; CREATE TABLE inbox(seq INTEGER PRIMARY KEY,run_id TEXT,batch_id TEXT,UNIQUE(run_id,batch_id));",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(JOURNAL_FILENAME);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE inbox(seq {seq},run_id TEXT NOT NULL,batch_id TEXT NOT NULL,
+             digest BLOB NOT NULL,payload BLOB,accepted INTEGER NOT NULL,
+             accepted_at INTEGER NOT NULL,state TEXT NOT NULL,last_error TEXT{constraint});
+             {extra} PRAGMA user_version=1;"
+        ))
+        .unwrap();
+        if seq == "INTEGER NOT NULL DEFAULT 1" {
+            // The old column-only guard admitted both rows with seq=1; completing
+            // either row then cleared both acknowledged payloads.
+            conn.execute_batch(
+                "INSERT INTO inbox(run_id,batch_id,digest,payload,accepted,accepted_at,state)
+                VALUES('run','first',zeroblob(32),x'01',1,1,'pending'),
+                      ('run','second',zeroblob(32),x'02',1,1,'pending');",
+            )
+            .unwrap();
+        }
+        let before_schema: String = conn
+            .query_row(
+                "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.close().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            DurableIngest::open(
+                dir.path(),
+                f.db.clone(),
+                IngestOptions {
+                    paused: true,
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "accepted {seq}, {constraint}, {extra}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name)",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            before_schema
+        );
+    }
+}
+
+#[test]
+fn journal_allows_missing_optional_index_and_extension_objects() {
+    let f = Fixture::new();
+    drop(f.open(true));
+    let conn = f.journal();
+    conn.execute_batch(
+        "DROP INDEX inbox_pending; CREATE TABLE extension_data(value TEXT);
+        INSERT INTO extension_data VALUES('preserved');",
+    )
+    .unwrap();
+    let ingest = f.open(false);
+    f.rt.block_on(ingest.submit(f.run.clone(), "without-index".into(), batch()))
+        .unwrap();
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(f.points().len(), 2);
+    assert_eq!(
+        conn.query_row("SELECT value FROM extension_data", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='inbox_pending'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+#[test]
 fn failed_journal_commit_is_not_acknowledged_and_can_be_retried() {
     let f = Fixture::new();
     let ingest = f.open(true);
@@ -511,7 +647,7 @@ fn failed_journal_commit_is_not_acknowledged_and_can_be_retried() {
 }
 
 #[test]
-fn finite_float_payloads_remain_replayable_and_exact() {
+fn finite_float_payloads_remain_replayable_with_native_real_signed_zero() {
     let f = Fixture::new();
     let ingest = f.open(true);
     let mut bits = 123456789_u64;
@@ -537,6 +673,7 @@ fn finite_float_payloads_remain_replayable_and_exact() {
         f64::from_bits(1),
         -f64::from_bits(1),
         0.0,
+        -0.0,
     ]
     .into_iter()
     .enumerate()
@@ -554,6 +691,18 @@ fn finite_float_payloads_remain_replayable_and_exact() {
             .unwrap();
     f.rt.block_on(ingest.submit(f.run.clone(), "floats".into(), original.clone()))
         .unwrap();
+    let mut different_zero = original.clone();
+    assert_eq!(
+        different_zero.metrics.last().unwrap().value.to_bits(),
+        (-0.0_f64).to_bits()
+    );
+    different_zero.metrics.last_mut().unwrap().value = 0.0;
+    assert_eq!(
+        f.rt.block_on(ingest.submit(f.run.clone(), "floats".into(), different_zero))
+            .unwrap_err()
+            .0,
+        StatusCode::CONFLICT
+    );
     drop(ingest);
     let ingest = f.open(false);
     f.until(|| f.status(&ingest).pending_batches == 0);
@@ -562,7 +711,13 @@ fn finite_float_payloads_remain_replayable_and_exact() {
     for (point, metric) in points.iter().zip(original.metrics.iter()) {
         assert_eq!(point.0, metric.step);
         assert_eq!(point.1, receipt.accepted_at);
-        assert_eq!(point.2.to_bits(), metric.value.to_bits());
+        // SQLite REAL affinity normalizes either signed zero to positive zero.
+        let expected = if metric.value == 0.0 {
+            0.0
+        } else {
+            metric.value
+        };
+        assert_eq!(point.2.to_bits(), expected.to_bits());
     }
 }
 

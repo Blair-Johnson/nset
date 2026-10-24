@@ -126,11 +126,138 @@ fn schema_version(connection: &Connection) -> Result<i64> {
     Ok(version)
 }
 
+// Read-only compatibility checks: optional performance indexes and extension
+// objects are deliberately ignored. Required writable columns and identity keys
+// cannot be inferred from user_version or a successfully prepared SELECT.
+pub(crate) fn require_table(
+    connection: &Connection,
+    table: &str,
+    columns: &str,
+    primary_key: &[&str],
+    integer_rowid: bool,
+) -> Result<()> {
+    let invalid = || ApiError::internal(format!("incompatible schema for table {table}"));
+    let rowid: Option<bool> = connection
+        .query_row(
+            "SELECT wr=0 FROM pragma_table_list WHERE schema='main' AND name=? AND type='table'",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if rowid.is_none() || (integer_rowid && rowid != Some(true)) {
+        return Err(invalid());
+    }
+    let info = connection
+        .prepare("SELECT name,type,pk,hidden FROM pragma_table_xinfo(?, 'main')")?
+        .query_map([table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.split(',').any(|column| {
+        !info
+            .iter()
+            .any(|(name, _, _, hidden)| name == column && *hidden == 0)
+    }) {
+        return Err(invalid());
+    }
+    let mut keys: Vec<_> = info.iter().filter(|(_, _, pk, _)| *pk != 0).collect();
+    keys.sort_by_key(|(_, _, pk, _)| *pk);
+    if keys
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect::<Vec<_>>()
+        != primary_key
+    {
+        return Err(invalid());
+    }
+    if integer_rowid {
+        // INTEGER PRIMARY KEY DESC has a separate PK index, not a rowid alias.
+        let has_pk_index: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_list(?, 'main') WHERE origin='pk')",
+            [table],
+            |row| row.get(0),
+        )?;
+        if keys.len() != 1 || !keys[0].1.eq_ignore_ascii_case("INTEGER") || has_pk_index {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_unique(connection: &Connection, table: &str, columns: &[&str]) -> Result<()> {
+    let indexes = connection
+        .prepare("SELECT name FROM pragma_index_list(?, 'main') WHERE \"unique\"=1 AND partial=0")?
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for index in indexes {
+        let keys = connection
+            .prepare("SELECT name,coll FROM pragma_index_xinfo(?, 'main') WHERE key=1")?
+            .query_map([index], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if keys.len() == columns.len()
+            && columns.iter().all(|column| {
+                keys.iter().any(|(name, coll)| {
+                    name.as_deref() == Some(*column) && coll.eq_ignore_ascii_case("BINARY")
+                })
+            })
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::internal(format!(
+        "missing identity key for table {table}"
+    )))
+}
+
+fn preflight_schema(connection: &Connection) -> Result<i64> {
+    let version = schema_version(connection)?;
+    if version > 0 {
+        for (table, columns, primary_key, integer_rowid) in [
+            ("experiments", "id,name,created_at", "id", false),
+            ("runs", RUN_COLUMNS, "id", false),
+            (
+                "metrics",
+                "seq,run_id,key,step,timestamp,value",
+                "seq",
+                true,
+            ),
+            (
+                "images",
+                "id,run_id,key,step,timestamp,content_type,byte_length,filename",
+                "id",
+                false,
+            ),
+        ] {
+            require_table(connection, table, columns, &[primary_key], integer_rowid)?;
+        }
+        require_unique(connection, "experiments", &["name"])?;
+        require_unique(connection, "images", &["filename"])?;
+    }
+    if version == 2 {
+        require_table(
+            connection,
+            "ingest_receipts",
+            "run_id,batch_id,digest,accepted,accepted_at",
+            &["run_id", "batch_id"],
+            false,
+        )?;
+        require_unique(connection, "ingest_receipts", &["run_id", "batch_id"])?;
+    }
+    Ok(version)
+}
+
 fn initialize_schema(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // Recheck under the write lock. Version zero also covers the original,
     // unversioned schema: IF NOT EXISTS preserves its tables, indexes and data.
-    let version = schema_version(&tx)?;
+    let version = preflight_schema(&tx)?;
     if version == 0 {
         tx.execute_batch("
             CREATE TABLE IF NOT EXISTS experiments(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
@@ -191,9 +318,9 @@ impl Database {
         std::fs::create_dir_all(directory)?;
         let path = directory.join("nset.sqlite3");
         let mut connection = Connection::open(&path)?;
-        // Reject unknown versions before any persistent PRAGMA, DDL, or image
-        // directory creation. In particular, do not change a newer DB to WAL.
-        schema_version(&connection)?;
+        // Reject unsupported versions and incompatible known schemas before
+        // any persistent PRAGMA, DDL, or image directory creation.
+        preflight_schema(&connection)?;
         setup(&connection)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;

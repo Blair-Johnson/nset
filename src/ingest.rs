@@ -1,5 +1,7 @@
 //! Durable scalar intake. Back up this journal and the query database together.
 //! A receipt acknowledges the FULL-synchronous journal commit, not query visibility.
+//! Journal identity preserves finite f64 bits, including signed zero. Projection
+//! uses native SQLite REAL storage, which normalizes -0.0 to +0.0.
 use crate::{
     db::Database,
     errors::{ApiError, Result},
@@ -176,6 +178,18 @@ fn digest(payload: &[u8]) -> Vec<u8> {
     Sha256::digest(payload).to_vec()
 }
 
+fn preflight_inbox(conn: &Connection) -> Result<()> {
+    crate::db::require_table(
+        conn,
+        "inbox",
+        "seq,run_id,batch_id,digest,payload,accepted,accepted_at,state,last_error",
+        &["seq"],
+        true,
+    )
+    .map_err(|_| invalid_entry())?;
+    crate::db::require_unique(conn, "inbox", &["run_id", "batch_id"]).map_err(|_| invalid_entry())
+}
+
 fn open_journal(directory: &Path) -> Result<Connection> {
     std::fs::create_dir_all(directory).map_err(storage_error)?;
     let mut conn = Connection::open(directory.join(JOURNAL_FILENAME)).map_err(storage_error)?;
@@ -209,7 +223,7 @@ fn open_journal(directory: &Path) -> Result<Connection> {
         }
     } else {
         // Check compatibility before any persistent PRAGMA or schema changes.
-        conn.prepare("SELECT seq,run_id,batch_id,digest,payload,accepted,accepted_at,state,last_error FROM inbox LIMIT 0").map_err(storage_error)?;
+        preflight_inbox(&conn)?;
     }
     let mode: String = conn
         .pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
@@ -241,6 +255,8 @@ fn open_journal(directory: &Path) -> Result<Connection> {
             .map_err(storage_error)?;
     } else if version != JOURNAL_VERSION {
         return Err(invalid_entry());
+    } else {
+        preflight_inbox(&tx)?;
     }
     tx.commit().map_err(storage_error)?;
     #[cfg(unix)]
