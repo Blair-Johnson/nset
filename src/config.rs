@@ -100,7 +100,11 @@ pub struct IngestConfig {
     #[arg(long, env = "NSET_INGEST_QUEUE_CAPACITY", default_value_t = 64, value_parser = parse_count::<4096>)]
     pub ingest_queue_capacity: usize,
     /// Maximum pending journal payload bytes; receipts and SQLite overhead are extra.
-    #[arg(long, env = "NSET_INGEST_MAX_PENDING_BYTES", default_value_t = 268_435_456)]
+    #[arg(
+        long,
+        env = "NSET_INGEST_MAX_PENDING_BYTES",
+        default_value_t = 268_435_456
+    )]
     pub ingest_max_pending_bytes: u64,
     #[arg(long, env = "NSET_INGEST_MAX_PENDING_BATCHES", default_value_t = 10_000, value_parser = parse_count::<1000000>)]
     pub ingest_max_pending_batches: usize,
@@ -118,8 +122,16 @@ impl IngestConfig {
         {
             return Err(ApiError::bad("invalid durable ingest limits"));
         }
-        check_count(self.ingest_queue_capacity, 4096, "invalid ingest queue capacity")?;
-        check_count(self.ingest_max_pending_batches, 1_000_000, "invalid ingest batch capacity")?;
+        check_count(
+            self.ingest_queue_capacity,
+            4096,
+            "invalid ingest queue capacity",
+        )?;
+        check_count(
+            self.ingest_max_pending_batches,
+            1_000_000,
+            "invalid ingest batch capacity",
+        )?;
         Ok(crate::ingest::IngestOptions {
             queue_capacity: self.ingest_queue_capacity,
             max_pending_bytes: self.ingest_max_pending_bytes,

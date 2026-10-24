@@ -298,6 +298,8 @@ async fn durable_receipt(
     Ok(Json(state.ingest.receipt(run_id, batch_id).await?))
 }
 
-async fn durable_status(State(state): State<AppState>) -> Result<Json<crate::ingest::IngestStatus>> {
+async fn durable_status(
+    State(state): State<AppState>,
+) -> Result<Json<crate::ingest::IngestStatus>> {
     Ok(Json(state.ingest.status().await?))
 }

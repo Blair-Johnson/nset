@@ -28,7 +28,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (self.0, Json(json!({"error":self.1}))).into_response();
-        if self.0 == StatusCode::SERVICE_UNAVAILABLE && self.1 == BUSY_MESSAGE {
+        if self.0 == StatusCode::SERVICE_UNAVAILABLE {
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, "1".parse().unwrap());

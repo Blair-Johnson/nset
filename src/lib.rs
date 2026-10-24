@@ -38,9 +38,8 @@ impl AppState {
         // Validate all limits before either database can touch disk.
         options.validate()?;
         ingest_options.validate()?;
-        let db = db::Database::open_with_options(
-            path, options.read_workers, options.db_queue_capacity,
-        )?;
+        let db =
+            db::Database::open_with_options(path, options.read_workers, options.db_queue_capacity)?;
         let ingest = ingest::DurableIngest::open(path, db.clone(), ingest_options)?;
         Ok(Self {
             db,

@@ -45,7 +45,7 @@ impl Default for IngestOptions {
     }
 }
 impl IngestOptions {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if !(1..=4096).contains(&self.queue_capacity)
             || self.max_pending_bytes == 0
             || self.max_pending_bytes > i64::MAX as u64

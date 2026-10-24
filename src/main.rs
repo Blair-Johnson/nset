@@ -26,7 +26,10 @@ fn run(config: Config) -> nset::errors::Result<()> {
 async fn serve(config: Config) -> nset::errors::Result<()> {
     let token = config.load_token()?;
     let state = AppState::open_with_ingest_options(
-        &config.data_dir, token, &config.concurrency, config.ingest.options()?,
+        &config.data_dir,
+        token,
+        &config.concurrency,
+        config.ingest.options()?,
     )?;
     tracing::info!(
         http_workers = config.concurrency.http_workers,
