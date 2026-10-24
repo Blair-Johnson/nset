@@ -1136,3 +1136,90 @@ async fn run_filter_batches_are_not_a_permanent_catalog_cap() {
         }
     }
 }
+
+#[tokio::test]
+async fn run_filter_cursorless_batches_identify_source_replacement_not_appends() {
+    let f = Fixture::new();
+    let q = run_filter_query(&f, json!([{"path":"new_metric","op":"missing"}]));
+    let (status, first) = f
+        .request("POST", "/api/rx/run-filter", q.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["cursor"].is_null());
+    assert_eq!(first["runs"][0]["conditions"], json!([true]));
+    assert!(!first["source_generation"].as_str().unwrap().is_empty());
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("INSERT INTO events VALUES(859,6,'now','{\"new_metric\":1}');")
+        .unwrap();
+    drop(db);
+    let (_, appended) = f
+        .request("POST", "/api/rx/run-filter", q.clone(), true)
+        .await;
+    assert_eq!(first["source_generation"], appended["source_generation"]);
+    assert_eq!(appended["runs"][0]["conditions"], json!([false]));
+    let replacement = f.path.with_extension("replacement");
+    std::fs::copy(&f.path, &replacement).unwrap();
+    std::fs::rename(replacement, &f.path).unwrap();
+    let (status, replaced) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert!(replaced["cursor"].is_null());
+    assert_ne!(first["source_generation"], replaced["source_generation"]);
+    assert_eq!(appended["runs"], replaced["runs"]); // Same UIDs/content, new generation.
+}
+
+#[tokio::test]
+async fn run_filter_compares_live_high_water_exactly_above_js_integer_range() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    let high = 9007199254760993_i64;
+    db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(9007199254740993) UNION ALL SELECT x+1 FROM n WHERE x<9007199254760993) INSERT INTO events SELECT 859,x,'now','{}' FROM n;").unwrap();
+    let base = run_filter_query(&f, json!([{"path":"appended","op":"missing"}]));
+    let (status, first) = f
+        .request("POST", "/api/rx/run-filter", base.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["cursor"].is_string());
+    let mut q = base.clone();
+    q["cursor"] = first["cursor"].clone();
+    db.execute(
+        "INSERT INTO events VALUES(859,?,'now','{\"appended\":true}')",
+        [high + 1],
+    )
+    .unwrap();
+    let mut final_page = Value::Null;
+    for _ in 0..10 {
+        let (status, page) = f
+            .request("POST", "/api/rx/run-filter", q.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if page["cursor"].is_null() {
+            final_page = page;
+            break;
+        }
+        q["cursor"] = page["cursor"].clone();
+    }
+    assert_eq!(final_page["runs"][0]["conditions"], json!([true]));
+    // Refresh includes the append, while a captured scan excludes it.
+    let mut fresh = base;
+    let mut refreshed = Value::Null;
+    for _ in 0..10 {
+        let (status, page) = f
+            .request("POST", "/api/rx/run-filter", fresh.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if page["cursor"].is_null() {
+            refreshed = page;
+            break;
+        }
+        fresh["cursor"] = page["cursor"].clone();
+    }
+    assert_eq!(refreshed["source_generation"], first["source_generation"]);
+    assert_eq!(refreshed["runs"][0]["conditions"], json!([false]));
+    // One integer below the captured high water, not merely below the last scanned seq.
+    db.execute("DELETE FROM events WHERE run_id=859 AND seq>=?", [high])
+        .unwrap();
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}

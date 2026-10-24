@@ -42,7 +42,8 @@ with sqlite3.connect(db) as c:
             rid, 1, "2026-10-24T00:00:00Z",
             json.dumps({"kind": "config", "synthetic": True, "config": {
                  "callbacks": {"on_step_end": ["save"]},
-                 "data": {"baseband": True}, "a.b": 1, "a": {"b": 2},
+                 "data": {"baseband": True}, "optimizer": {"lr": 0.001},
+                  "a.b": 1, "a": {"b": 2},
                  "\u65e5\u672c\u8a9e": "caf\u00e9 \U0001f4e1",
                  "unsafe_number": 9007199254740993,
              }}, ensure_ascii=False)))
@@ -51,7 +52,7 @@ with sqlite3.connect(db) as c:
             859, epoch + 4, "2026-10-24T00:00:00Z", json.dumps({
                 "kind": "epoch", "phase": "validation", "epoch": epoch,
                 "train_loss": 1 / epoch, "val_loss": 1.3 / epoch,
-                "model": "example"})))
+                "model": "example", "metrics": {"accuracy": 0.9}})))
         c.execute("INSERT INTO events VALUES(?,?,?,?)", (
             241, epoch + 15, "2026-10-24T00:00:00Z", json.dumps({
                 "kind": "metric", "phase": "train", "step": epoch * 1000,
@@ -113,6 +114,27 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
             raw = request("/rx/records", {**query, "limit": 1})
             assert json.loads(raw["records"][0]["raw"]) == raw["records"][0]["data"]
             assert request("/catalog")["rx_enabled"] is True
+            # Independent event witnesses: config at seq 1 and metric at seq 5+.
+            filters = {"source_id": catalog["source"]["id"],
+                       "runs": ["demo-859", "demo-241"], "conditions": [
+                           {"path": "metrics.accuracy", "op": "exists"},
+                           {"path": "config.optimizer.lr", "op": "eq", "value": 0.001},
+                       ]}
+            matches = request("/rx/run-filter", filters)
+            assert matches["runs"] == [
+                {"uid": "demo-859", "conditions": [True, True]},
+                {"uid": "demo-241", "conditions": [False, True]},
+            ], matches
+            assert matches["source_generation"] and matches["cursor"] is None
+            try:
+                unauth = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/rx/run-filter",
+                    data=json.dumps(filters).encode(),
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(unauth, timeout=3)
+                raise AssertionError("run-filter accepted an unauthenticated request")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401
             subprocess.run([
                 "node", "web/tests/run-event-config-embedded.mjs",
                 f"http://127.0.0.1:{port}", catalog["source"]["id"],
@@ -128,4 +150,4 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
                 raise
 print(json.dumps({"kind": "final", "gates": "passed", "binary": "artifacts/nset",
                   "fixture": "artifacts/rx-demo", "standalone_traces": 2,
-                  "points_per_trace": 6, "source_unchanged": True, "embedded_ui_current": True, "utf8": True, "embedded_event_config": True}))
+                  "points_per_trace": 6, "source_unchanged": True, "embedded_ui_current": True, "utf8": True, "embedded_event_config": True, "embedded_run_filters": True}))

@@ -45,6 +45,7 @@ const page = (
   values: (boolean | null)[] = [true],
   cursor: string | null = null,
 ) => ({
+  source_generation: "generation-a",
   runs: uids.map((uid) => ({ uid, conditions: values })),
   cursor,
   diagnostics: { scanned: uids.length, partial: cursor !== null },
@@ -70,6 +71,7 @@ function mockApi(
       };
       calls.push(call);
       const result = await answer(call, calls.length - 1);
+      if (result instanceof Response) return result;
       return new Response(JSON.stringify(result), {
         headers: { "Content-Type": "application/json" },
       });
@@ -118,6 +120,7 @@ test("mixed native/Event AND and OR retain unknown until evidence proves a resul
 test("multiple Event clauses combine proof independently from config and tags", async (t) => {
   const runs = [run("a"), run("b"), run("c")];
   const { api } = mockApi(() => ({
+    source_generation: "generation-a",
     runs: [
       { uid: "a", conditions: [true, null] },
       { uid: "b", conditions: [false, null] },
@@ -447,4 +450,106 @@ test("native edits and AND/OR changes reuse current Event proofs without rescann
   await session.continueScan();
   assert.equal(calls.length, 1);
   assert.equal(session.pending, 0);
+});
+
+for (const [op, value] of [
+  ["exists", true],
+  ["exists", false],
+  ["missing", true],
+  ["missing", false],
+] as const) {
+  test(`stale continuation revokes cached ${op}=${value} before explicit retry`, async (t) => {
+    const { api, calls } = mockApi(({ body }, i) => {
+      if (i === 4)
+        return new Response(
+          JSON.stringify({
+            error: "invalid/stale run filter cursor; restart filtering",
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      return page(body.runs, [value], i < 4 ? `cursor-${i}` : null);
+    });
+    const candidate = run("a");
+    const session = new RunFilterSession(filter(event({ op })), api);
+    t.after(() => session.destroy());
+    session.setRuns([candidate]);
+    await session.continueScan();
+    assert.equal(session.result(candidate), value);
+    assert.equal(session.scanned, 4);
+    await session.continueScan();
+    assert.match(session.error, /invalid\/stale/);
+    assert.equal(session.result(candidate), null);
+    assert.equal(session.matches(candidate), false);
+    assert.equal(session.count(), 0);
+    assert.equal(session.scanned, 0);
+    assert.equal(session.canContinue, false);
+    assert.equal(
+      session.result(candidate, {
+        combine: "any",
+        conditions: [
+          event({ op }),
+          event({ scope: "params", path: "seed", op: "eq", value: "1" }),
+        ],
+      }),
+      true,
+    ); // Native evidence is not revoked.
+    await session.continueScan();
+    assert.equal(calls.length, 5); // No implicit retry with discarded state.
+    session.restart();
+    await session.continueScan();
+    assert.equal(calls[5].body.cursor, undefined);
+    assert.equal(session.result(candidate), value);
+  });
+}
+
+test("cursorless batches cannot mix physical source generations or retain old absence proofs", async (t) => {
+  const runs = Array.from({ length: 160 }, (_, i) => run(`uid-${i}`));
+  const { api, calls } = mockApi(({ body }, i) => ({
+    ...page(body.runs, [true, false]),
+    source_generation: i < 4 ? "generation-a" : "generation-b",
+  }));
+  const conditions = [event({ op: "missing" }), event({ op: "exists" })];
+  const session = new RunFilterSession(filter(...conditions), api);
+  t.after(() => session.destroy());
+  session.setRuns(runs);
+  await session.continueScan();
+  assert.equal(session.result(runs[0], filter(conditions[0])), true);
+  assert.equal(session.result(runs[0], filter(conditions[1])), false);
+  assert.equal(session.scanned, 128);
+  await session.continueScan();
+  assert.ok(calls.every((c) => !c.body.cursor));
+  assert.match(session.error, /source changed/);
+  assert.ok(
+    runs.every((r) => session.result(r, filter(conditions[0])) === null),
+  );
+  assert.ok(
+    runs.every((r) => session.result(r, filter(conditions[1])) === null),
+  );
+  assert.equal(session.count(), 0);
+  assert.equal(session.scanned, 0);
+  assert.equal(session.canContinue, false);
+  session.restart();
+  await session.continueScan();
+  assert.equal(session.error, "");
+  assert.equal(session.result(runs[0], filter(conditions[0])), true);
+});
+
+test("catalog refresh clears the source generation as well as proof and scan counts", async (t) => {
+  const { api } = mockApi(({ body }, i) => ({
+    ...page(body.runs),
+    source_generation: `generation-${i}`,
+  }));
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  const candidate = run("a");
+  session.setRuns([candidate], 1);
+  await session.continueScan();
+  assert.equal(session.result(candidate), true);
+  session.setRuns([candidate, run("b")], 2);
+  assert.equal(session.scanned, 0);
+  assert.equal(session.result(candidate), null);
+  await session.continueScan();
+  assert.equal(session.error, "");
+  assert.equal(session.scanned, 2);
+  assert.equal(session.count(), 2);
 });

@@ -1952,6 +1952,13 @@ impl Source {
         } else {
             None
         };
-        Ok(json!({"runs":runs,"cursor":next,"diagnostics":d}))
+        // Every page (including a completed, cursorless batch) identifies the
+        // physical source generation. Keep filesystem identity opaque, and bind
+        // it to this process so a restarted reader also requires fresh proofs.
+        if self.generation()? != generation {
+            return Err(stale());
+        }
+        let source_generation = URL_SAFE_NO_PAD.encode(self.run_filter_mac(generation.as_bytes()));
+        Ok(json!({"runs":runs,"cursor":next,"diagnostics":d,"source_generation":source_generation}))
     }
 }

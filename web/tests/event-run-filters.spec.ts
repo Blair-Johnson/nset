@@ -93,6 +93,7 @@ async function fixture(
       };
       await route.fulfill({
         json: {
+          source_generation: "generation-a",
           runs: call.body.runs.map((run: string) => ({
             uid: run,
             conditions: call.body.conditions.map((c: any) => {
@@ -403,6 +404,7 @@ for (const teardown of ["logout", "beforeunload"] as const) {
       await route
         .fulfill({
           json: {
+            source_generation: "generation-a",
             runs: call.body.runs.map((uid: string) => ({
               uid,
               conditions: [true],
@@ -516,6 +518,7 @@ test("bounded scans expose unchecked runs, continue, and refresh committed event
     const incomplete = pages <= 4;
     await route.fulfill({
       json: {
+        source_generation: "generation-a",
         runs: call.body.runs.map((run: string) => ({
           uid: run,
           conditions: [
@@ -558,3 +561,92 @@ test("bounded scans expose unchecked runs, continue, and refresh committed event
     calls.filter((c) => c.path === "/api/rx/run-filter").at(-1)!.body.cursor,
   ).toBeUndefined();
 });
+
+for (const failure of ["stale cursor", "cursorless replacement"] as const) {
+  test(`${failure} revokes verified matches before Retry and cannot add drawer selections`, async ({
+    page,
+  }) => {
+    let pages = 0;
+    const calls = await fixture(page, async (route, call) => {
+      if (
+        failure === "cursorless replacement" &&
+        call.path === "/api/rx/catalog"
+      ) {
+        await route.fulfill({
+          json: {
+            source: { id: source, name: "Replacement fixture" },
+            next_after: null,
+            runs: Array.from({ length: 160 }, (_, i) => ({
+              id: String(i + 1),
+              run_uid: uid(i + 1),
+              state: "succeeded",
+              alias: null,
+              config: "",
+              argv: [],
+              exit_code: 0,
+              created_at: "2026-10-01T00:00:00Z",
+              started_at: null,
+              finished_at: null,
+            })),
+          },
+        });
+        return true;
+      }
+      if (call.path !== "/api/rx/run-filter") return false;
+      pages++;
+      if (failure === "stale cursor" && pages > 4) {
+        await route.fulfill({
+          status: 400,
+          json: { error: "invalid/stale run filter cursor; restart filtering" },
+        });
+      } else {
+        await route.fulfill({
+          json: {
+            source_generation: pages > 4 ? "generation-b" : "generation-a",
+            runs: call.body.runs.map((run: string) => ({
+              uid: run,
+              conditions: [run === uid(1)],
+            })),
+            cursor: failure === "stale cursor" ? `page-${pages}` : null,
+            diagnostics: {
+              scanned: call.body.runs.length,
+              partial: failure === "stale cursor",
+            },
+          },
+        });
+      }
+      return true;
+    });
+    await page
+      .getByRole("checkbox", { name: "Select r3", exact: true })
+      .check();
+    await addEvent(page, "metrics.accuracy", "exists");
+    await menu(page).locator("summary").click();
+    await expect(
+      page.getByRole("button", { name: "Continue scan", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
+    await page
+      .getByRole("button", { name: "Continue scan", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Retry scan", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
+    expect(await selected(page)).toEqual([id(3)]);
+    await page
+      .getByRole("button", { name: "View charts", exact: true })
+      .click();
+    if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
+      await page.getByLabel("Expand run list", { exact: true }).click();
+    const drawer = page.locator(".run-drawer");
+    await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(0);
+    await drawer
+      .getByRole("button", { name: "Select matching", exact: true })
+      .click();
+    expect(await selected(page)).toEqual([id(3)]);
+    expect(calls.filter((c) => c.path === "/api/rx/run-filter")).toHaveLength(
+      5,
+    );
+  });
+}

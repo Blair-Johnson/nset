@@ -18,6 +18,7 @@ interface Batch {
   cursor?: string;
 }
 interface FilterPage {
+  source_generation: string;
   runs: { uid: string; conditions: (boolean | null)[] }[];
   cursor: string | null;
   diagnostics: { scanned: number; partial: boolean };
@@ -41,6 +42,7 @@ export class RunFilterSession {
   private abort?: AbortController;
   private timer?: ReturnType<typeof setTimeout>;
   private proofs = new Map<string, (boolean | null)[]>();
+  private sourceGenerations = new Map<string, string>();
   private batches: Batch[] = [];
   private batch = 0;
   private clauses: FilterCondition[] = [];
@@ -119,6 +121,7 @@ export class RunFilterSession {
   private reset() {
     this.stop();
     this.proofs.clear();
+    this.sourceGenerations.clear();
     this.clauses = activeConditions(this.current).filter(
       (c) => c.scope === "event",
     );
@@ -131,7 +134,7 @@ export class RunFilterSession {
   }
   private schedule() {
     clearTimeout(this.timer);
-    if (this.listeners.size && this.canContinue)
+    if (this.listeners.size && this.canContinue && !this.error)
       this.timer = setTimeout(() => void this.continueScan(), 180);
   }
   subscribe(listener: () => void) {
@@ -167,7 +170,7 @@ export class RunFilterSession {
   }
 
   async continueScan() {
-    if (this.busy || !this.canContinue) return;
+    if (this.busy || this.error || !this.canContinue) return;
     const version = this.generation;
     const abort = (this.abort = new AbortController());
     this.busy = true;
@@ -203,6 +206,13 @@ export class RunFilterSession {
           abort.signal,
         );
         if (version !== this.generation || abort.signal.aborted) return;
+        const pinned = this.sourceGenerations.get(batch.source);
+        if (
+          !page.source_generation ||
+          (pinned !== undefined && pinned !== page.source_generation)
+        )
+          throw new Error("rx source changed; restart filtering");
+        this.sourceGenerations.set(batch.source, page.source_generation);
         for (const run of page.runs)
           this.proofs.set(identity(batch.source, run.uid), run.conditions);
         this.scanned += page.diagnostics.scanned;
@@ -212,6 +222,15 @@ export class RunFilterSession {
       }
     } catch (error) {
       if (version !== this.generation || abort.signal.aborted) return;
+      // Api errors are untyped: conservatively revoke all Event evidence,
+      // including cached false/absence proofs, before offering explicit retry.
+      // Native clauses and the views' plotted selections are untouched.
+      clearTimeout(this.timer);
+      this.proofs.clear();
+      this.sourceGenerations.clear();
+      this.batches = [];
+      this.batch = 0;
+      this.scanned = 0;
       this.error = error instanceof Error ? error.message : String(error);
     } finally {
       if (version === this.generation && !abort.signal.aborted) {
@@ -295,6 +314,7 @@ export class RunFilterSession {
     this.discoveryAbort?.abort();
     this.discovery = undefined;
     this.proofs.clear();
+    this.sourceGenerations.clear();
     this.listeners.clear();
     this.runs = [];
   }
