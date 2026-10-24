@@ -126,3 +126,78 @@ test("event path bounds count cumulative UTF-8 and JSON escaping without alterin
   // Native config indexing retains its existing behavior unless a bound is requested.
   assert.equal(buildConfigTree({ ["x".repeat(5000)]: 1 }).truncated, false);
 });
+
+test("namespace formatter is shared while exact event keys stay distinct", async () => {
+  const { configNamespace } = await import("./run-config");
+  const { recordPath } = await import("./records");
+  for (const path of [
+    ["config", "callbacks", "on_step_end", 0],
+    ["config", "a.b"],
+    ["config", "a", "b"],
+    ["config", "\u65e5\u672c\u8a9e"],
+    ['x"\\y', ""],
+    ["0"],
+    [0],
+  ]) {
+    assert.deepEqual(recordPath(configNamespace(path)), path);
+  }
+  const value = {
+    config: { callbacks: { on_step_end: ["save"] }, data: { baseband: true } },
+  };
+  assert.deepEqual(
+    buildConfigTree(value).nodes.map((n) => n.path),
+    buildConfigTree(value, { exact: true }).nodes.map((n) => n.path),
+  );
+  const tree = buildConfigTree(
+    { config: { "a.b": 1, a: { b: 2 } } },
+    { exact: true },
+  );
+  assert.ok(tree.nodes.some((n) => n.path === 'config["a.b"]'));
+  assert.ok(tree.nodes.some((n) => n.path === "config.a.b"));
+});
+
+test("exact Enter identity never resolves a substring or folds case", async () => {
+  const { exactEventPath, rankedEventFields } =
+    await import("./run-event-config");
+  assert.equal(exactEventPath('$["config"]["data"]'), "config.data");
+  assert.equal(exactEventPath('config["a.b"]'), 'config["a.b"]');
+  assert.equal(exactEventPath("Config"), "Config");
+  assert.equal(exactEventPath("\u65e5\u672c\u8a9e"), '["\u65e5\u672c\u8a9e"]');
+  for (const query of [
+    "",
+    "config.",
+    "a[",
+    "x.".repeat(33) + "x",
+    "\u65e5".repeat(400),
+  ])
+    assert.equal(exactEventPath(query), null);
+  const hints = [
+    "benchmark_args.config",
+    "config.b",
+    "Config",
+    "config",
+    "config.a",
+  ].map((path) => ({ path, types: [], present: 1, values: [] }));
+  assert.deepEqual(
+    rankedEventFields(hints, "config").map((h) => h.path),
+    ["config", "Config", "config.a", "config.b", "benchmark_args.config"],
+  );
+  assert.deepEqual(
+    rankedEventFields(hints, '$["config"]').map((h) => h.path),
+    rankedEventFields(hints, "config").map((h) => h.path),
+  );
+  assert.equal(rankedEventFields(hints, "Config")[0].path, "Config");
+});
+
+test("Unicode root-key prefixes rank before nested substrings", async () => {
+  const { rankedEventFields } = await import("./run-event-config");
+  const hints = [
+    'nested["\u65e5\u672c"]',
+    '$["\u65e5\u672c\u8a9e"]',
+    '$["\u65e5\u672c"]',
+  ].map((path) => ({ path, types: [], present: 1, values: [] }));
+  assert.deepEqual(
+    rankedEventFields(hints, "\u65e5\u672c").map((h) => h.path),
+    [hints[2].path, hints[1].path, hints[0].path],
+  );
+});

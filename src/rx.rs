@@ -540,6 +540,8 @@ async fn query(state: AppState, q: Request, mode: Mode) -> Result<Json<Value>> {
 #[derive(Default, Serialize)]
 struct Hint {
     path: String,
+    #[serde(skip)]
+    rank: u8,
     types: BTreeSet<&'static str>,
     present: usize,
     values: Vec<Value>,
@@ -591,8 +593,47 @@ fn add_hint(
     }
 }
 
+// Search retention favors exact identity, then prefixes, then substrings.
+// Keep the existing hint cap even when better matches arrive late in a scan.
+fn add_search_hint(
+    hints: &mut BTreeMap<String, Hint>,
+    diagnostics: &mut Diagnostics,
+    path: String,
+    value: &Value,
+    limit: usize,
+    needle: &str,
+    exact: Option<&str>,
+) {
+    let root_prefix = path.starts_with("$[") && FieldPath::parse(&path).ok().is_some_and(|p|
+        matches!(p.0.as_slice(), [Segment::Key(key)] if key.to_lowercase().starts_with(needle)));
+    let rank = if exact == Some(path.as_str()) {
+        0
+    } else if path.to_lowercase().starts_with(needle) || root_prefix {
+        1
+    } else {
+        2
+    };
+    if !hints.contains_key(&path) && hints.len() >= limit {
+        diagnostics.limit("field suggestion limit reached");
+        let worst = hints
+            .iter()
+            .max_by(|(a, av), (b, bv)| (av.rank, *a).cmp(&(bv.rank, *b)))
+            .map(|(key, hint)| (key.clone(), hint.rank))
+            .unwrap();
+        if (rank, path.as_str()) >= (worst.1, worst.0.as_str()) {
+            return;
+        }
+        hints.remove(&worst.0);
+    }
+    add_hint(hints, diagnostics, path.clone(), value, limit);
+    if let Some(hint) = hints.get_mut(&path) {
+        hint.rank = rank;
+    }
+}
+
 struct FieldSearch<'a> {
     needle: &'a str,
+    exact: Option<&'a str>,
     visits: &'a mut usize,
     hints: &'a mut BTreeMap<String, Hint>,
     diagnostics: &'a mut Diagnostics,
@@ -657,15 +698,18 @@ impl FieldSearch<'_> {
             self.diagnostics.limit("oversized field paths skipped");
             return true;
         }
-        if key.is_some_and(|k| k.to_lowercase().contains(self.needle))
-            || path.to_lowercase().contains(self.needle)
+        if self.exact != Some(path.as_str())
+            && (key.is_some_and(|k| k.to_lowercase().contains(self.needle))
+                || path.to_lowercase().contains(self.needle))
         {
-            add_hint(
+            add_search_hint(
                 self.hints,
                 self.diagnostics,
                 path.clone(),
                 value,
                 self.limit,
+                self.needle,
+                self.exact,
             );
         }
         self.walk(value, &path, depth)
@@ -716,6 +760,28 @@ impl Source {
         // Prefix completion visits only immediate children of the entered parent.
         // Arrays are containers there; search also visits their indexed children.
         let search = q.search.to_lowercase();
+        let exact = if mode == Mode::Fields && !search.is_empty() {
+            FieldPath::parse(&q.search)
+                .ok()
+                .or_else(|| {
+                    (!q.search.contains(['.', '[', ']', '$']))
+                        .then(|| FieldPath(vec![Segment::Key(q.search.clone())]))
+                })
+                .and_then(|p| {
+                    let mut name = String::new();
+                    for part in &p.0 {
+                        name = match part {
+                            Segment::Key(key) => key_path(&name, key),
+                            Segment::Index(index) => {
+                                format!("{}[{index}]", if name.is_empty() { "$" } else { &name })
+                            }
+                        };
+                    }
+                    (name.len() <= 1024).then_some((p, name))
+                })
+        } else {
+            None
+        };
         let (parent, needle) = if mode == Mode::Fields && search.is_empty() {
             if let Some(i) = completion_dot(&q.prefix) {
                 (&q.prefix[..i], &q.prefix[i + 1..])
@@ -867,8 +933,30 @@ impl Source {
                         }
                     }
                     Mode::Fields if !search.is_empty() => {
+                        // Probe explicit identity before unrelated siblings can
+                        // exhaust traversal. Charge the bounded path to visits.
+                        if let Some((path, name)) = &exact {
+                            if visits + path.0.len() > MAX_VISITS {
+                                d.limit("field visit budget reached");
+                                stopped = true;
+                                break;
+                            }
+                            visits += path.0.len();
+                            if let Some(v) = path.get(&value) {
+                                add_search_hint(
+                                    &mut hints,
+                                    &mut d,
+                                    name.clone(),
+                                    v,
+                                    q.limit.min(MAX_FIELDS),
+                                    &search,
+                                    Some(name),
+                                );
+                            }
+                        }
                         let mut searcher = FieldSearch {
                             needle: &search,
+                            exact: exact.as_ref().map(|(_, name)| name.as_str()),
                             visits: &mut visits,
                             hints: &mut hints,
                             diagnostics: &mut d,

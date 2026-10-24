@@ -27,6 +27,16 @@ export interface ConfigTree {
 export function configPath(path: ConfigPath): string {
   return "$" + path.map((part) => `[${JSON.stringify(part)}]`).join("");
 }
+function appendConfigNamespace(parent: string, key: string | number): string {
+  if (typeof key === "number") return `${parent}[${key}]`;
+  if (/^[A-Za-z_][A-Za-z_0-9]*$/.test(key))
+    return parent ? `${parent}.${key}` : key;
+  return `${parent}[${JSON.stringify(key)}]`;
+}
+/** Human-readable labels shared by native namespaces and exact event trees. */
+export function configNamespace(path: ConfigPath): string {
+  return path.reduce<string>(appendConfigNamespace, "");
+}
 export function configType(value: unknown): string {
   return value === null
     ? "null"
@@ -142,9 +152,13 @@ export function buildConfigTree(
     for (const part of parts) {
       let child = node.children.get(part);
       if (!child) {
-        const separator = typeof item.key === "number" ? "" : ".";
         child = make(
-          node === root ? part : `${node.path}${separator}${part}`,
+          options.exact
+            ? configNamespace(item.path)
+            : appendConfigNamespace(
+                node.path,
+                typeof item.key === "number" ? item.key : part,
+              ),
           node,
         );
         node.children.set(part, child);
@@ -327,13 +341,7 @@ export function renderRunConfig(
           toggle.setAttribute("aria-expanded", String(open));
           name.append(toggle);
         } else name.append(element("span", "run-config-toggle-space"));
-        const path = element(
-          "code",
-          "run-config-path",
-          (options.eventPreview ? value?.sourcePath : node.path) ||
-            node.path ||
-            '""',
-        );
+        const path = element("code", "run-config-path", node.path || '""');
         path.title = value?.sourcePath ?? node.path;
         name.append(path);
         if (node.values.length > 1 && value)

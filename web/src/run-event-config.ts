@@ -9,6 +9,7 @@ import {
 import {
   buildConfigTree,
   configPath,
+  configNamespace,
   configType,
   renderRunConfig,
   type ConfigElement,
@@ -23,24 +24,90 @@ function button(label: string, click: () => void): HTMLButtonElement {
   b.onclick = click;
   return b;
 }
+function shortText(text: string, limit: number): string {
+  let result = "";
+  let count = 0;
+  for (const char of text) {
+    if (count++ === limit) return result + "...";
+    result += char;
+  }
+  return result;
+}
 function provenance(row: RecordRow): string {
   const data = row.data as Record<string, unknown> | null;
   const kind =
     data && typeof data === "object" ? (data.kind ?? data.type) : undefined;
-  return `Event #${row.seq}${typeof kind === "string" ? ` � ${kind.slice(0, 120)}` : ""} � ${row.received_at}`;
+  return `Event #${row.seq}${typeof kind === "string" ? ` - ${shortText(kind, 120)}` : ""} - ${row.received_at}`;
 }
 function summary(value: unknown): string {
   if (value !== null && typeof value === "object")
     return Array.isArray(value)
-      ? `array � ${value.length} items`
-      : `object � ${Object.keys(value).length} keys`;
+      ? `array - ${value.length} items`
+      : `object - ${Object.keys(value).length} keys`;
   if (
     typeof value === "number" &&
     (!Number.isFinite(value) ||
       (Number.isInteger(value) && !Number.isSafeInteger(value)))
   )
-    return "number � approximate / out of range; inspect raw event";
-  return `${configType(value)} � ${(JSON.stringify(value) ?? String(value)).slice(0, 160)}`;
+    return "number - approximate / out of range; inspect raw event";
+  return `${configType(value)} - ${shortText(JSON.stringify(value) ?? String(value), 160)}`;
+}
+
+/** Enter always addresses one exact, case-sensitive path, never a sampled guess. */
+export function exactEventPath(query: string): string | null {
+  const text = query.trim();
+  if (!text) return null;
+  let path;
+  try {
+    path = recordPath(text);
+  } catch {
+    // A plain unusual/Unicode root key is unambiguous. Punctuation that could
+    // denote a path must instead be explicitly JSON-quoted by the user.
+    if (/[.\[\]$]/.test(text)) return null;
+    path = [text];
+  }
+  const display = configNamespace(path);
+  return new TextEncoder().encode(display).length <= 1024 ? display : null;
+}
+export function rankedEventFields(
+  hints: FieldHint[],
+  query: string,
+): FieldHint[] {
+  const exact = exactEventPath(query);
+  const prefix = (exact ?? query.trim()).toLowerCase();
+  const ranked = hints.map((hint) => {
+    const parts = recordPath(hint.path);
+    const display = configNamespace(parts);
+    const rootPrefix =
+      parts.length === 1 &&
+      typeof parts[0] === "string" &&
+      parts[0].toLowerCase().startsWith(query.trim().toLowerCase());
+    return {
+      hint,
+      display,
+      rank:
+        display === exact
+          ? 0
+          : display.toLowerCase().startsWith(prefix) || rootPrefix
+            ? 1
+            : 2,
+    };
+  });
+  return ranked
+    .sort(
+      (a, b) =>
+        a.rank - b.rank ||
+        (a.display < b.display
+          ? -1
+          : a.display > b.display
+            ? 1
+            : a.hint.path < b.hint.path
+              ? -1
+              : a.hint.path > b.hint.path
+                ? 1
+                : 0),
+    )
+    .map(({ hint }) => hint);
 }
 
 /** Display-only, run-scoped inspection. No metadata writes or persistent state. */
@@ -87,9 +154,11 @@ export function attachEventConfig(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let revision = 0;
   let disposed = false;
+  let enterToken: object | undefined;
   let fieldHints: FieldHint[] = [];
   let fieldLimit = FIELD_PAGE;
   let fieldCursor: unknown | null = null;
+  let fieldNotice = "";
   let activePath = "";
   let rows: RecordRow[] = [];
   let recordCursor: unknown | null = null;
@@ -98,6 +167,7 @@ export function attachEventConfig(
   const live = (version: number) =>
     !disposed && !signal?.aborted && config.isConnected && revision === version;
   const cancel = () => {
+    enterToken = undefined;
     clearTimeout(timer);
     fieldController?.abort();
     recordController?.abort();
@@ -121,24 +191,21 @@ export function attachEventConfig(
   };
   function note(result: RecordResult): string {
     return result.diagnostics.partial
-      ? `Limited scan: ${result.diagnostics.reasons.join("; ")}. Narrow the search for omitted fields.`
+      ? `Limited scan: ${result.diagnostics.reasons.join("; ")}.`
       : "";
   }
   function renderOccurrences() {
     occurrences.replaceChildren();
     if (!activePath) return;
-    occurrences.append(
-      element("p", "", `Choose an occurrence of ${activePath} (this run only)`),
-    );
+    occurrences.append(element("p", "", `Occurrences: ${activePath}`));
     for (const row of rows) {
       const choice = element("div", "run-event-choice");
       const value = recordValue(row.data, activePath);
       choice.append(
-        element("span", "", `${provenance(row)} � ${summary(value)}`),
+        element("span", "", `${provenance(row)} - ${summary(value)}`),
       );
-      const add = button(
-        isAdded(activePath, row) ? "Added" : "\uff0b Add",
-        () => addValue(activePath, row),
+      const add = button(isAdded(activePath, row) ? "Added" : "Add", () =>
+        addValue(activePath, row),
       );
       add.setAttribute(
         "aria-label",
@@ -165,7 +232,7 @@ export function attachEventConfig(
         ),
       );
   }
-  function addValue(path: string, row: RecordRow) {
+  function addValue(path: string, row: RecordRow, focusRemove = true) {
     const key = keyFor(path, row);
     if (isAdded(path, row) || selected.size >= MAX_ADDITIONS) return;
     const value = recordValue(row.data, path);
@@ -214,16 +281,7 @@ export function attachEventConfig(
       tree: indexed,
     });
     tree.setQuery(search.value);
-    section.append(
-      heading,
-      element(
-        "p",
-        "muted",
-        "Display only � parsed preview, not run parameters. Numbers may be rounded; stored event JSON is authoritative.",
-      ),
-      feedback,
-      tree,
-    );
+    section.append(heading, feedback, tree);
     if (typeof row.raw === "string") {
       const raw = element("details", "run-event-raw");
       raw.append(element("summary", "", "Stored event JSON"));
@@ -232,14 +290,7 @@ export function attachEventConfig(
           raw.append(element("pre", "", row.raw));
       });
       section.append(raw);
-    } else
-      section.append(
-        element(
-          "p",
-          "muted",
-          "Stored JSON unavailable; this is a parsed preview only.",
-        ),
-      );
+    } else section.append(element("p", "muted", "Stored JSON unavailable."));
     selected.set(key, {
       section,
       tree,
@@ -252,9 +303,14 @@ export function attachEventConfig(
     });
     additions.append(section);
     renderOccurrences();
-    remove.focus();
+    if (focusRemove) remove.focus();
   }
-  async function loadRecords(path: string, cursor: unknown = null) {
+  async function loadRecords(
+    path: string,
+    cursor: unknown = null,
+    addSingle = false,
+  ) {
+    if (!live(revision)) return;
     recordController?.abort();
     const controller = (recordController = new AbortController());
     const version = revision;
@@ -288,21 +344,34 @@ export function attachEventConfig(
         .filter(Boolean)
         .join(" ");
       renderOccurrences();
+      if (
+        addSingle &&
+        !cursor &&
+        rows.length === 1 &&
+        !recordCursor &&
+        !result.diagnostics.partial
+      ) {
+        addValue(path, rows[0], false);
+        if (isAdded(path, rows[0])) occurrences.replaceChildren();
+      }
     } catch (error) {
       if (!live(version) || controller.signal.aborted) return;
       occurrenceNotice = `Could not load occurrences: ${String(error)}`;
       renderOccurrences();
       occurrences.append(
         button("Retry occurrences", () => {
-          void loadRecords(path, cursor);
+          void loadRecords(path, cursor, addSingle);
         }),
       );
     }
   }
   function renderFields() {
     fields.replaceChildren();
-    for (const hint of fieldHints.slice(0, fieldLimit)) {
-      const choose = button(`${hint.path} � ${hint.types.join(" / ")}`, () => {
+    for (const hint of rankedEventFields(fieldHints, search.value).slice(
+      0,
+      fieldLimit,
+    )) {
+      const choose = button(`${hint.path} - ${hint.types.join(" / ")}`, () => {
         void loadRecords(hint.path);
       });
       choose.setAttribute("aria-label", `Inspect event field ${hint.path}`);
@@ -340,7 +409,13 @@ export function attachEventConfig(
       fieldHints = result.fields;
       fieldLimit = FIELD_PAGE;
       fieldCursor = result.next_cursor;
-      status.textContent = `${fieldHints.length ? "Add from logged events (display only)." : "No matching logged fields in this scan."} ${note(result)}`;
+      fieldNotice = note(result);
+      status.textContent = [
+        fieldHints.length ? "" : "No matching logged fields in this scan.",
+        fieldNotice,
+      ]
+        .filter(Boolean)
+        .join(" ");
       renderFields();
     } catch (error) {
       if (!live(version) || controller.signal.aborted) return;
@@ -352,11 +427,42 @@ export function attachEventConfig(
       );
     }
   }
+  search.addEventListener("keydown", (event) => {
+    if (
+      event.isComposing ||
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey
+    )
+      return;
+    if (event.key === "Escape") {
+      revision++;
+      cancel();
+      activePath = "";
+      occurrences.replaceChildren();
+      status.textContent = "";
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (event.repeat || enterToken || !live(revision)) return;
+    const path = exactEventPath(search.value);
+    if (!path) return;
+    clearTimeout(timer);
+    fieldController?.abort();
+    status.textContent = fieldNotice;
+    const token = (enterToken = {});
+    void loadRecords(path, null, true).finally(() => {
+      if (enterToken === token) enterToken = undefined;
+    });
+  });
   search.addEventListener("input", () => {
     revision++;
     cancel();
     activePath = "";
     fieldHints = [];
+    fieldNotice = "";
     rows = [];
     fields.replaceChildren();
     occurrences.replaceChildren();
@@ -365,12 +471,11 @@ export function attachEventConfig(
     const query = search.value.trim();
     status.textContent = query
       ? "Searching this run\u2019s logged fields\u2026"
-      : "Type to find and add fields from this run\u2019s logged events. Additions last while this detail page is open.";
+      : "";
     if (query)
       timer = setTimeout(() => {
         void discover();
       }, 180);
   });
-  status.textContent =
-    "Type to find and add fields from this run\u2019s logged events. Additions last while this detail page is open.";
+  status.textContent = "";
 }

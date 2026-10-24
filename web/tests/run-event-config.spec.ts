@@ -184,7 +184,7 @@ test("typing discovers this run's event objects; keyboard add expands nested con
   const section = await add(page, "config");
   await expect(section).toContainText("64");
   await expect(section).toContainText(
-    "Event #1 � config � 2026-10-01T00:00:01Z",
+    "Event #1 - config - 2026-10-01T00:00:01Z",
   );
   await expect(
     section.getByRole("button", { name: "Toggle config.model", exact: true }),
@@ -730,3 +730,504 @@ for (const teardown of ["logout", "beforeunload"] as const) {
     });
   }
 }
+
+async function polishFixture(
+  page: Page,
+  options: { multiple?: boolean; noHints?: boolean; delay?: number } = {},
+) {
+  const value = {
+    benchmark_args: { config: "config.yaml" },
+    config: {
+      callbacks: { on_step_end: ["save"] },
+      data: { baseband: true },
+      "a.b": "literal",
+      a: { b: "nested" },
+      "\u65e5\u672c\u8a9e": "caf\u00e9 \ud83d\udce1",
+      safe: 42,
+    },
+  };
+  const offered = [
+    "benchmark_args.config",
+    ...Array.from({ length: 45 }, (_, i) => `config.child${i}`),
+    "config.callbacks",
+    "config",
+  ];
+  const requests = await fixture(page, async (route, request) => {
+    if (request.path.endsWith("/fields")) {
+      if (options.delay)
+        await new Promise((resolve) => setTimeout(resolve, options.delay));
+      await route.fulfill({
+        json: result({
+          fields: options.noHints
+            ? []
+            : offered.map((path) => ({ ...hints[0], path })),
+        }),
+      });
+      return true;
+    }
+    if (request.path.endsWith("/records")) {
+      if (options.delay)
+        await new Promise((resolve) => setTimeout(resolve, options.delay));
+      const rows = [
+        { ...record("4"), data: value, raw: JSON.stringify(value) },
+      ];
+      if (options.multiple) rows.push({ ...rows[0], seq: "8" });
+      await route.fulfill({ json: result({ records: rows }) });
+      return true;
+    }
+    return false;
+  });
+  return { value, requests };
+}
+
+test("polish: exact config ranks before prefixes and substrings even beyond the displayed page", async ({
+  page,
+}) => {
+  await polishFixture(page);
+  await search(page).fill("config");
+  await expect(
+    page.locator(".run-event-fields button").first(),
+  ).toHaveAttribute("aria-label", "Inspect event field config");
+  const labels = await page
+    .locator(".run-event-fields button[aria-label]")
+    .allTextContents();
+  expect(labels[1]).toMatch(/^config\./);
+  expect(
+    labels.slice(0, 25).some((s) => s.startsWith("benchmark_args.config")),
+  ).toBe(false);
+});
+
+test("polish: normal event metadata has no replacement glyphs or blanket disclaimers", async ({
+  page,
+}) => {
+  await fixture(page);
+  await inspect(page, "config");
+  await add(page, "config");
+  const text = await page.locator(".run-detail").textContent();
+  expect(text).not.toContain("\ufffd");
+  expect(text).not.toMatch(
+    /Display only|display only|parsed preview|Numbers may be rounded|not run parameters|Additions last while/,
+  );
+  await expect(page.locator(".run-event-config")).toContainText(
+    "approximate / out of range",
+  );
+});
+
+for (const waitForHints of [false, true]) {
+  test(`polish: Enter alone adds single exact config ${waitForHints ? "after hints" : "immediately"}`, async ({
+    page,
+  }) => {
+    const { requests } = await polishFixture(page, { delay: 80 });
+    await search(page).fill("config");
+    if (waitForHints)
+      await expect(
+        page.locator(".run-event-fields button").first(),
+      ).toBeVisible();
+    await search(page).press("Enter");
+    await expect(
+      page.getByRole("region", { name: "config from event 4", exact: true }),
+    ).toBeVisible();
+    await search(page).press("Enter");
+    await expect(page.locator(".run-event-config")).toHaveCount(1);
+    expect(
+      requests
+        .filter((r) => r.path.endsWith("/records"))
+        .every((r) => r.body.runs[0] === "uid-one"),
+    ).toBe(true);
+  });
+}
+
+test("polish: Enter skips field click but leaves repeated occurrences as an explicit choice", async ({
+  page,
+}) => {
+  await polishFixture(page, { multiple: true });
+  await search(page).fill("config");
+  await search(page).press("Enter");
+  await expect(
+    page.getByRole("button", { name: "Add config from event 4", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Add config from event 8", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".run-event-config")).toHaveCount(0);
+  await add(page, "config", "8");
+  await expect(page.locator(".run-event-config")).toHaveCount(1);
+});
+
+test("polish: event namespace labels match native nested config and preserve Unicode and literal keys", async ({
+  page,
+}) => {
+  const { value } = await polishFixture(page);
+  await search(page).fill("config");
+  await page.getByRole("button", { name: "Show more matching fields" }).click();
+  await page
+    .getByRole("button", { name: "Inspect event field config", exact: true })
+    .click();
+  const section = await add(page, "config", "4");
+  await expect(
+    section.locator(
+      '[data-source-path=\'$["config"]["data"]["baseband"]\'] .run-config-path',
+    ),
+  ).toHaveText("config.data.baseband");
+  await expect(
+    section.locator(
+      '[data-source-path=\'$["config"]["callbacks"]["on_step_end"][0]\'] .run-config-path',
+    ),
+  ).toHaveText("config.callbacks.on_step_end[0]");
+  await expect(
+    section.locator(
+      '[data-source-path=\'$["config"]["a.b"]\'] .run-config-path',
+    ),
+  ).toHaveText('config["a.b"]');
+  await expect(
+    section.locator(
+      '[data-source-path=\'$["config"]["a"]["b"]\'] .run-config-path',
+    ),
+  ).toHaveText("config.a.b");
+  await expect(section).toContainText("caf\u00e9 \ud83d\udce1");
+  await section
+    .getByRole("button", { name: 'Copy path $["config"]["a.b"]', exact: true })
+    .click();
+  expect(await page.evaluate(() => (window as any).__copied)).toBe(
+    '$["config"]["a.b"]',
+  );
+  await section.getByRole("button", { name: "Copy raw event" }).click();
+  expect(await page.evaluate(() => (window as any).__copied)).toBe(
+    JSON.stringify(value),
+  );
+  const nativeLabels = await page.evaluate(async () => {
+    const { renderRunConfig } = await import("/src/run-config.ts");
+    const native = renderRunConfig(
+      {
+        config: {
+          data: { baseband: true },
+          callbacks: { on_step_end: ["save"] },
+        },
+      },
+      "native",
+    );
+    return Array.from(
+      native.querySelectorAll(".run-config-path"),
+      (n) => n.textContent,
+    );
+  });
+  const eventLabels = await section
+    .locator(".run-config-path")
+    .allTextContents();
+  for (const label of nativeLabels) expect(eventLabels).toContain(label);
+});
+
+test("polish: Enter resolves an exact path absent from sampled hints, but never a case-folded or substring guess", async ({
+  page,
+}) => {
+  await polishFixture(page, { noHints: true });
+  await search(page).fill("config");
+  await expect(
+    page.getByText("No matching logged fields in this scan."),
+  ).toBeVisible();
+  await search(page).press("Enter");
+  await expect(
+    page.getByRole("region", { name: "config from event 4", exact: true }),
+  ).toBeVisible();
+  for (const text of ["Config", "conf"]) {
+    await search(page).fill(text);
+    await search(page).press("Enter");
+    await expect(page.getByText("No occurrences in this page.")).toBeVisible();
+    await expect(page.locator(".run-event-config")).toHaveCount(1);
+  }
+});
+
+for (const incomplete of ["cursor", "partial"] as const) {
+  test(`polish: Enter does not infer a unique occurrence from a ${incomplete} result`, async ({
+    page,
+  }) => {
+    await fixture(page, async (route, request) => {
+      if (!request.path.endsWith("/records")) return false;
+      await route.fulfill({
+        json: result({
+          records: [record("1")],
+          ...(incomplete === "cursor"
+            ? { next_cursor: "more" }
+            : {
+                diagnostics: {
+                  ...diagnostics,
+                  partial: true,
+                  reasons: ["scan budget reached"],
+                },
+              }),
+        }),
+      });
+      return true;
+    });
+    await search(page).fill("config");
+    await search(page).press("Enter");
+    await expect(
+      page.getByRole("button", {
+        name: "Add config from event 1",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.locator(".run-event-config")).toHaveCount(0);
+    if (incomplete === "partial")
+      await expect(
+        page.getByText("Limited scan: scan budget reached."),
+      ).toBeVisible();
+    else
+      await expect(
+        page.getByRole("button", { name: "Next occurrences" }),
+      ).toBeVisible();
+  });
+}
+
+test("polish: Enter reentrancy is bounded and modifier/composition defaults are untouched", async ({
+  page,
+}) => {
+  const { requests } = await polishFixture(page, { delay: 250 });
+  await search(page).fill("config");
+  const defaults = await search(page).evaluate((input) =>
+    [
+      { shiftKey: true },
+      { ctrlKey: true },
+      { altKey: true },
+      { metaKey: true },
+      { isComposing: true },
+    ].map((modifier) => {
+      const event = new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        ...modifier,
+      });
+      input.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  );
+  expect(defaults).toEqual([false, false, false, false, false]);
+  await search(page).press("Enter");
+  await search(page).press("Enter");
+  await search(page).dispatchEvent("keydown", { key: "Enter", repeat: true });
+  await expect(
+    page.getByRole("region", { name: "config from event 4", exact: true }),
+  ).toBeVisible();
+  expect(requests.filter((r) => r.path.endsWith("/records"))).toHaveLength(1);
+  await expect(search(page)).toBeFocused();
+  const response = page.waitForResponse((r) => r.url().endsWith("/rx/records"));
+  await search(page).press("Enter");
+  await response;
+  await expect(page.locator(".run-event-config")).toHaveCount(1);
+  await expect(search(page)).toBeFocused();
+});
+
+for (const action of ["clear", "escape", "switch", "edit"] as const) {
+  test(`polish: pending Enter cannot add after ${action}`, async ({ page }) => {
+    let release: (() => void) | undefined;
+    const requests = await fixture(page, async (route, request) => {
+      if (!request.path.endsWith("/records")) return false;
+      if (request.body.filters.conditions[0].path === "config")
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      await route.fulfill({
+        json: result({
+          records: [{ ...record("1"), run_uid: request.body.runs[0] }],
+        }),
+      });
+      return true;
+    });
+    try {
+      await search(page).fill("config");
+      await search(page).press("Enter");
+      await expect
+        .poll(() => requests.filter((r) => r.path.endsWith("/records")).length)
+        .toBe(1);
+      if (action === "clear") await search(page).fill("");
+      else if (action === "escape") await search(page).press("Escape");
+      else {
+        if (action === "switch")
+          await page.evaluate(() => (window as any).__render("uid-new"));
+        await search(page).fill("scalar");
+        await search(page).press("Enter");
+        await expect(
+          page.getByRole("region", {
+            name: "scalar from event 1",
+            exact: true,
+          }),
+        ).toBeVisible();
+      }
+      release?.();
+      await page.waitForTimeout(300);
+      await expect(
+        page.getByRole("region", { name: "config from event 1", exact: true }),
+      ).toHaveCount(0);
+      await expect(page.locator(".run-event-config")).toHaveCount(
+        action === "clear" || action === "escape" ? 0 : 1,
+      );
+    } finally {
+      release?.();
+    }
+  });
+}
+
+test("polish: Enter aborts in-flight discovery without stale hints or form submission", async ({
+  page,
+}) => {
+  let release: (() => void) | undefined;
+  const requests = await fixture(page, async (route, request) => {
+    if (request.path.endsWith("/fields")) {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await route.fulfill({ json: result({ fields: hints }) });
+      return true;
+    }
+    if (request.path.endsWith("/records")) {
+      await route.fulfill({ json: result({ records: [record("1")] }) });
+      return true;
+    }
+    return false;
+  });
+  await page.evaluate(() => {
+    const config = document.querySelector(".run-config")!;
+    const form = document.createElement("form");
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      (window as any).__submitted = true;
+    };
+    config.before(form);
+    form.append(config);
+  });
+  try {
+    await search(page).fill("config");
+    await expect
+      .poll(() => requests.filter((r) => r.path.endsWith("/fields")).length)
+      .toBe(1);
+    await search(page).press("Enter");
+    await expect(
+      page.getByRole("region", { name: "config from event 1", exact: true }),
+    ).toBeVisible();
+    release?.();
+    await page.waitForTimeout(250);
+    await expect(page.locator(".run-event-fields button")).toHaveCount(0);
+    expect(
+      await page.evaluate(() => (window as any).__submitted),
+    ).toBeUndefined();
+  } finally {
+    release?.();
+  }
+});
+
+test("polish: Enter preserves Unicode root keys and values including literal replacement characters", async ({
+  page,
+}) => {
+  const value = {
+    "\u65e5\u672c\u8a9e": "caf\u00e9 \ud83d\udce1",
+    "\ufffd": "literal \ufffd data",
+    "a.b": 1,
+    a: { b: 2 },
+    Config: 3,
+    config: 4,
+  };
+  await fixture(page, async (route, request) => {
+    if (!request.path.endsWith("/records")) return false;
+    await route.fulfill({
+      json: result({
+        records: [{ ...record("1"), data: value, raw: JSON.stringify(value) }],
+      }),
+    });
+    return true;
+  });
+  for (const [query, label, expected] of [
+    [
+      "\u65e5\u672c\u8a9e",
+      '["\u65e5\u672c\u8a9e"]',
+      '"caf\u00e9 \ud83d\udce1"',
+    ],
+    ['["\ufffd"]', '["\ufffd"]', '"literal \ufffd data"'],
+    ['$["a.b"]', '["a.b"]', "1"],
+    ["a.b", "a.b", "2"],
+    ["Config", "Config", "3"],
+    ["config", "config", "4"],
+  ]) {
+    await search(page).fill(query);
+    await search(page).press("Enter");
+    const section = page.getByRole("region", {
+      name: `${label} from event 1`,
+      exact: true,
+    });
+    await expect(section).toBeVisible();
+    await search(page).fill("");
+    await expect(section.locator(".run-config-value")).toHaveText(expected);
+    await expect(section.locator(".run-config-path")).toHaveText(label);
+  }
+  await expect(page.locator(".run-event-config")).toHaveCount(6);
+});
+
+test("polish: Unicode summary boundaries do not split surrogate pairs", async ({
+  page,
+}) => {
+  const text = "x".repeat(158) + "\ud83d\udce1" + "tail";
+  const value = {
+    kind: "k".repeat(119) + "\ud83d\udce1" + "tail",
+    scalar: text,
+  };
+  await fixture(page, async (route, request) => {
+    if (!request.path.endsWith("/records")) return false;
+    await route.fulfill({
+      json: result({
+        records: [{ ...record("1"), data: value, raw: JSON.stringify(value) }],
+      }),
+    });
+    return true;
+  });
+  await inspect(page, "scalar");
+  const metadata = await page.locator(".run-event-choice span").textContent();
+  expect(metadata).toContain("\ud83d\udce1");
+  expect(metadata).not.toContain("\ufffd");
+  expect(metadata).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  const section = await add(page, "scalar");
+  await expect(section.locator(".run-config-value")).toHaveText(
+    JSON.stringify(text),
+  );
+});
+
+test("polish: Enter retains partial discovery status and never duplicates an added descendant", async ({
+  page,
+}) => {
+  await fixture(page, async (route, request) => {
+    if (request.path.endsWith("/fields")) {
+      await route.fulfill({
+        json: result({
+          fields: hints,
+          diagnostics: {
+            ...diagnostics,
+            partial: true,
+            reasons: ["field visit budget reached"],
+          },
+          next_cursor: "next",
+        }),
+      });
+      return true;
+    }
+    if (request.path.endsWith("/records")) {
+      await route.fulfill({ json: result({ records: [record("1")] }) });
+      return true;
+    }
+    return false;
+  });
+  await search(page).fill("config");
+  await expect(
+    page.getByText("Limited scan: field visit budget reached."),
+  ).toBeVisible();
+  await search(page).press("Enter");
+  await expect(
+    page.getByRole("region", { name: "config from event 1", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Limited scan: field visit budget reached."),
+  ).toBeVisible();
+  await search(page).fill("config.model");
+  const response = page.waitForResponse((r) => r.url().endsWith("/rx/records"));
+  await search(page).press("Enter");
+  await response;
+  await expect(page.locator(".run-event-config")).toHaveCount(1);
+});

@@ -40,7 +40,12 @@ with sqlite3.connect(db) as c:
             "2026-10-24T00:00:00Z", None, None, 0, "[]"))
         c.execute("INSERT INTO events VALUES(?,?,?,?)", (
             rid, 1, "2026-10-24T00:00:00Z",
-            json.dumps({"kind": "config", "synthetic": True})))
+            json.dumps({"kind": "config", "synthetic": True, "config": {
+                 "callbacks": {"on_step_end": ["save"]},
+                 "data": {"baseband": True}, "a.b": 1, "a": {"b": 2},
+                 "\u65e5\u672c\u8a9e": "caf\u00e9 \U0001f4e1",
+                 "unsafe_number": 9007199254740993,
+             }}, ensure_ascii=False)))
     for epoch in range(1, 7):
         c.execute("INSERT INTO events VALUES(?,?,?,?)", (
             859, epoch + 4, "2026-10-24T00:00:00Z", json.dumps({
@@ -96,13 +101,22 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
                     continue
                 route = "/" if asset.name == "index.html" else "/" + asset.relative_to("web/dist").as_posix()
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}{route}", timeout=3) as response:
-                    assert response.read(asset.stat().st_size + 1) == asset.read_bytes(), asset
+                    content = response.read(asset.stat().st_size + 1)
+                    assert content == asset.read_bytes(), asset
+                    if asset.suffix in {".html", ".js", ".css"}:
+                        text = content.decode("utf-8", errors="strict")
+                        assert "\ufffd" not in text, asset
+                        assert response.headers.get_content_charset() == "utf-8", response.headers
             result = request("/rx/plot", query)
             assert len(result["traces"]) == 2, result
             assert all(len(trace["points"]) == 6 for trace in result["traces"])
             raw = request("/rx/records", {**query, "limit": 1})
             assert json.loads(raw["records"][0]["raw"]) == raw["records"][0]["data"]
             assert request("/catalog")["rx_enabled"] is True
+            subprocess.run([
+                "node", "web/tests/run-event-config-embedded.mjs",
+                f"http://127.0.0.1:{port}", catalog["source"]["id"],
+            ], check=True)
             assert before == hashlib.sha256(db.read_bytes()).hexdigest()
         finally:
             process.terminate()
@@ -114,4 +128,4 @@ with tempfile.TemporaryDirectory(prefix="nset-rx-smoke-") as data:
                 raise
 print(json.dumps({"kind": "final", "gates": "passed", "binary": "artifacts/nset",
                   "fixture": "artifacts/rx-demo", "standalone_traces": 2,
-                  "points_per_trace": 6, "source_unchanged": True, "embedded_ui_current": True}))
+                  "points_per_trace": 6, "source_unchanged": True, "embedded_ui_current": True, "utf8": True, "embedded_event_config": True}))

@@ -675,3 +675,78 @@ async fn field_search_reuses_scan_and_oversized_record_caps() {
     );
     assert_eq!(before, std::fs::read(&f.path).unwrap());
 }
+
+#[tokio::test]
+async fn field_search_exact_path_survives_hint_and_visit_caps() {
+    let f = Fixture::new();
+    let mut fields: serde_json::Map<String, Value> = (0..100)
+        .map(|i| (format!("aaa_config{i:03}"), json!(i)))
+        .collect();
+    fields.insert("config".into(), json!({"data":true}));
+    fields.insert("config_prefix".into(), json!(true));
+    set_search_event(&f, Value::Object(fields));
+    let mut q = search_query(&f, "config");
+    q["limit"] = json!(2);
+    let (_, result) = f.request("POST", "/api/rx/fields", q, true).await;
+    assert!(field_paths(&result).contains(&"config"), "{result}");
+    assert!(
+        field_paths(&result).iter().all(|p| p.starts_with("config")),
+        "{result}"
+    );
+    assert_eq!(result["diagnostics"]["partial"], true);
+    let exact = result["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["path"] == "config")
+        .unwrap();
+    assert_eq!(exact["present"], 1);
+
+    set_search_event(&f, json!({"aaa":vec![0;5000],"config":{"data":true}}));
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "config"), true)
+        .await;
+    assert!(field_paths(&result).contains(&"config"), "{result}");
+    assert_eq!(result["diagnostics"]["partial"], true);
+    let (_, result) = f
+        .request(
+            "POST",
+            "/api/rx/fields",
+            search_query(&f, "$[\"config\"][\"data\"]"),
+            true,
+        )
+        .await;
+    assert!(field_paths(&result).contains(&"config.data"), "{result}");
+}
+
+#[tokio::test]
+async fn field_search_exact_identity_preserves_case_unicode_and_literal_paths() {
+    let f = Fixture::new();
+    set_search_event(
+        &f,
+        json!({
+            "Config": 1, "config": {"data": 2}, "config.data": 3,
+            "\u{65e5}\u{672c}": 4, "\u{65e5}\u{672c}\u{8a9e}": 5,
+            "nested": {"\u{65e5}\u{672c}": 6}
+        }),
+    );
+    for (query, expected) in [
+        ("Config", "Config"),
+        ("config.data", "config.data"),
+        ("$[\"config.data\"]", "$[\"config.data\"]"),
+        ("$[\"config\"][\"data\"]", "config.data"),
+    ] {
+        let mut q = search_query(&f, query);
+        q["limit"] = json!(1);
+        let (status, result) = f.request("POST", "/api/rx/fields", q, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(field_paths(&result), vec![expected]);
+    }
+    let mut q = search_query(&f, "\u{65e5}\u{672c}");
+    q["limit"] = json!(2);
+    let (_, result) = f.request("POST", "/api/rx/fields", q, true).await;
+    assert_eq!(
+        field_paths(&result),
+        vec!["$[\"\u{65e5}\u{672c}\"]", "$[\"\u{65e5}\u{672c}\u{8a9e}\"]"]
+    );
+}

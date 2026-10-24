@@ -40,6 +40,11 @@ pub async fn serve(request: Request) -> Response {
     let mime = mime_guess::from_path(served_path)
         .first_or_octet_stream()
         .to_string();
+    let mime = if mime.starts_with("text/") || mime == "application/javascript" {
+        format!("{mime}; charset=utf-8")
+    } else {
+        mime
+    };
     let length = asset.data.len();
     let body = if request.method() == Method::HEAD {
         Body::empty()
