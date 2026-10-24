@@ -9,6 +9,6 @@ description = "Native producer client for nset"
 requires-python = ">=3.10"
 dependencies = []
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["nset_client*"]
+[tool.setuptools]
+packages = ["nset_client"]
+package-dir = { nset_client = "src" }

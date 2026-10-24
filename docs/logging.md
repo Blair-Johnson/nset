@@ -4,7 +4,7 @@ Start the server as shown in the [README](../README.md). All clients use its add
 
 ## Native Python client
 
-Install `pip install ./python` from the checkout in a Python 3.10+ training environment. The [README example](../README.md#log-data) creates an experiment and run. Inside that run, log scalars and an existing PNG, JPEG, or WebP file:
+Install `pip install ./client` from the checkout in a Python 3.10+ training environment. The [README example](../README.md#log-data) creates an experiment and run. Inside that run, log scalars and an existing PNG, JPEG, or WebP file:
 
 ```python
 run.log_metrics({"train/loss": 0.23, "train/accuracy": 0.94}, step=100)

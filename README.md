@@ -41,7 +41,7 @@ Use `--host 0.0.0.0` for remote clients, with HTTPS or a secure tunnel on untrus
 Install the native client in your training environment from this checkout:
 
 ```sh
-pip install ./python
+pip install ./client
 ```
 
 Set `NSET_TOKEN` to the server's token in that environment, then:

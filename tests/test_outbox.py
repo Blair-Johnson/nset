@@ -13,7 +13,6 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from support import ROOT
 from nset_client import (APIError, BatchConflictError, Client, DurableOutbox,
                          InvalidReceiptError, OutboxFullError)
 
@@ -602,8 +601,7 @@ box.enqueue('run', [{'key': 'loss', 'step': 0, 'value': 1.25}], batch_id='crash-
 box._http.request = lambda *args, **kwargs: os._exit(0)
 box.flush()
 """
-        env = dict(os.environ, PYTHONPATH=str(ROOT / "python"))
-        subprocess.run([sys.executable, "-c", script, str(self.path)], env=env,
+        subprocess.run([sys.executable, "-c", script, str(self.path)],
                        check=True, timeout=10)
         box = Client(token="replacement-secret").durable_outbox(self.path)
         self.addCleanup(box.close)

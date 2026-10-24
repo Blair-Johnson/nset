@@ -2,6 +2,8 @@
 
 The [README](../README.md#set-up-and-launch) covers setup and launch. Run these commands from the repository root. Pixi manages Rust, Node, and Python; a platform C/C++ build toolchain is needed for bundled SQLite. Use the committed Pixi, Cargo, and npm lockfiles.
 
+Pixi installs the client in editable mode from [client/src](../client/src); outside Pixi, run `pip install -e ./client` before running Python tests, examples, or scripts. Import it as `nset_client`.
+
 `pixi run build` builds the UI and then the release executable, embedding `web/dist` in `target/release/nset` (`nset.exe` on Windows). Rebuild after source changes. Build for the target OS and architecture.
 
 ## Checks

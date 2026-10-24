@@ -5,9 +5,7 @@ import math
 import os
 from pathlib import Path
 import random
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from nset_client import Client
 from images import frame_png
 
