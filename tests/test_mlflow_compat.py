@@ -5,6 +5,7 @@ An isolated adapter worktree may set NSET_COMPAT_SHARED_PATH to the gateway
 worker's python directory. That is a test-only package-path overlay, not a mock.
 """
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
@@ -43,6 +44,12 @@ class MemoryState:
     def put(self, namespace, key, value):
         self.values[namespace, key] = copy.deepcopy(value)
 
+    def get_many(self, namespace, keys):
+        return {k: self.get(namespace, k) for k in keys if (namespace, k) in self.values}
+
+    def put_many(self, namespace, mapping):
+        self.values.update({(namespace, k): copy.deepcopy(v) for k, v in mapping.items()})
+
     def items(self, namespace):
         return [(k, copy.deepcopy(v)) for (n, k), v in self.values.items() if n == namespace]
 
@@ -56,6 +63,8 @@ class FakeNative:
     """Protocol unit helper only; NOT SDK conformance evidence."""
     def __init__(self):
         self.runs = {}
+        self.experiments = {}
+        self.history_calls = 0
         self.metrics = {}
         self.receipts = {}
         self.calls = []
@@ -64,6 +73,8 @@ class FakeNative:
     def request(self, method, path, payload=None, *, query=None):
         if method == "POST":
             value = dict(payload, id=str(uuid.uuid4()))
+            if path == "/api/experiments":
+                self.experiments[value["id"]] = value
             if path == "/api/runs":
                 self.runs[value["id"]] = value
                 self.metrics[value["id"]] = []
@@ -81,6 +92,7 @@ class FakeNative:
                     self.runs[rid][key] = value
             return self.runs[rid]
         if method == "GET" and path.endswith("/metrics"):
+            self.history_calls += 1
             rows = self.metrics[rid]
             snapshot = query.get("snapshot", len(rows))
             rows = [dict(m, seq=i + 1) for i, m in enumerate(rows[:snapshot])
@@ -188,6 +200,147 @@ class MLflowProtocolUnitTests(unittest.TestCase):
         self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, self.rid))
         self.assertEqual(len(self.ctx.native.metrics[calls[0][0]]), 10001)
         self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["params"], [{"key": "fixed", "value": "v"}])
+
+    def test_named_native_experiments_preserve_external_names_and_byte_bound(self):
+        for name in ("training-loss", "界" * 170 + "ab"):
+            with self.subTest(name=name):
+                eid = self.call("experiments/create", {"name": name})["experiment_id"]
+                stored = self.ctx.state.get(adapter.EXP, eid)
+                native_name = self.ctx.native.experiments[stored["native_id"]]["name"]
+                self.assertTrue(native_name.startswith(f"mlflow:{eid}:"))
+                self.assertLessEqual(len(native_name.encode("utf-8")), 512)
+                if name == "training-loss":
+                    self.assertEqual(native_name, f"mlflow:{eid}:training-loss")
+                self.assertEqual(stored["name"], name)
+                self.assertEqual(self.call("experiments/get-by-name", {"experiment_name": name})["experiment"]["name"], name)
+                self.call("experiments/update", {"experiment_id": eid, "new_name": name + "r" if len(name) < 100 else "renamed"})
+                self.assertEqual(self.ctx.native.experiments[stored["native_id"]]["name"], native_name)
+
+    def test_indexed_many_logs_gets_and_search_never_read_native_history(self):
+        with patch.object(self.ctx.state, "get_many", wraps=self.ctx.state.get_many) as lookup:
+            for i in range(100):
+                metrics = [{"key": key, "value": i, "timestamp": i, "step": i} for key in ("x", "y")]
+                self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
+                self.assertEqual(len(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"]), 2)
+                found = self.call("runs/search", {"experiment_ids": ["0"], "filter": f"metrics.x = {i}"})
+                self.assertEqual([r["info"]["run_id"] for r in found["runs"]], [self.rid])
+            self.assertEqual(lookup.call_count, 100)
+            self.assertTrue(all(len(call.args[1]) == 2 for call in lookup.call_args_list))
+        run = self.ctx.state.get(adapter.RUN, self.rid)
+        self.assertEqual(run["metric_index_version"], 1)
+        self.assertEqual(len(run["latest_metrics"]), 2)
+        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(run))), 200)
+        self.assertEqual(self.ctx.native.history_calls, 0)
+        self.assertEqual(len(self.call("metrics/get-history", {"run_id": self.rid, "metric_key": "x"})["metrics"]), 100)
+        self.assertEqual(self.ctx.native.history_calls, 1)
+
+    def test_concurrent_overlapping_batches_deduplicate_native_observations(self):
+        count, width, stride = 8, 400, 100
+        barrier = threading.Barrier(count)
+
+        def log(index):
+            metrics = [{"key": "x", "value": float(i), "timestamp": i, "step": i}
+                       for i in range(index * stride, index * stride + width)]
+            barrier.wait(timeout=10)
+            self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
+            self.call("runs/get", {"run_id": self.rid})
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            list(pool.map(log, range(count)))
+        run = self.ctx.state.get(adapter.RUN, self.rid)
+        native = self.ctx.native.metrics[run["native_id"]]
+        expected = (count - 1) * stride + width
+        self.assertEqual(len(native), expected)
+        self.assertEqual(len({adapter._metric_tuple(m) for m in native}), expected)
+        self.assertEqual(run["latest_metrics"]["x"]["step"], expected - 1)
+        self.assertEqual(self.ctx.native.history_calls, 0)
+
+    def test_recovery_between_index_and_metadata_commits_replays_original_ids(self):
+        metrics = [{"key": "x", "value": i, "timestamp": i, "step": i} for i in range(3)]
+        payload = {"run_id": self.rid, "metrics": metrics,
+                   "params": [{"key": "p", "value": "fixed"}], "tags": [{"key": "t", "value": "yes"}]}
+        original_put = self.ctx.state.put
+
+        def fail_metadata(namespace, key, value):
+            if namespace == adapter.RUN and "pending" not in value:
+                raise RuntimeError("injected after index commit, before metadata commit")
+            original_put(namespace, key, value)
+
+        with patch.object(self.ctx.state, "put", side_effect=fail_metadata), self.assertRaises(RuntimeError):
+            self.call("runs/log-batch", payload)
+        stored = self.ctx.state.get(adapter.RUN, self.rid)
+        self.assertIn("pending", stored)
+        self.assertEqual(stored["latest_metrics"], {})
+        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 3)
+        fresh = FakeContext()
+        fresh.state, fresh.native = self.ctx.state, self.ctx.native
+        fresh.ingest_metrics = fresh.native.ingest
+        self.ctx = fresh
+        # The retry overlaps the interrupted write but has a different payload.
+        extra = {"key": "x", "value": 3, "timestamp": 3, "step": 3}
+        self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics[1:] + [extra]})
+        calls = self.ctx.native.calls
+        self.assertEqual(calls[0][1:], calls[1][1:])
+        self.assertEqual(calls[2][2], [extra])
+        stored = self.ctx.state.get(adapter.RUN, self.rid)
+        self.assertNotIn("pending", stored)
+        self.assertEqual(stored["params"], {"p": "fixed"})
+        self.assertEqual(stored["tags"]["t"], "yes")
+        self.assertEqual(stored["latest_metrics"]["x"], extra)
+        self.assertEqual(len(self.ctx.native.metrics[stored["native_id"]]), 4)
+        self.assertEqual(self.ctx.native.history_calls, 0)
+
+    def test_one_time_legacy_backfill_and_interrupted_migration(self):
+        metrics = [{"key": "x", "value": v, "timestamp": t, "step": s}
+                   for v, t, s in [(1, 100, 2), (9, 20, 3), (8, 20, 3)]]
+        run = self.ctx.state.get(adapter.RUN, self.rid)
+        # Old-format persisted metadata + native data, with no index/cache.
+        run.pop("metric_index_version")
+        run.pop("latest_metrics")
+        run["metric_keys"] = ["x"]
+        self.ctx.native.metrics[run["native_id"]] = copy.deepcopy(metrics)
+        self.ctx.state.put(adapter.RUN, self.rid, run)
+        original_put = self.ctx.state.put
+
+        def fail_marker(namespace, key, value):
+            if namespace == adapter.RUN and "metric_index_version" in value:
+                raise RuntimeError("injected before migration marker")
+            original_put(namespace, key, value)
+
+        with patch.object(self.ctx.state, "put", side_effect=fail_marker), self.assertRaises(RuntimeError):
+            self.call("runs/get", {"run_id": self.rid})
+        self.assertNotIn("metric_index_version", self.ctx.state.get(adapter.RUN, self.rid))
+        self.assertEqual(self.ctx.native.history_calls, 1)
+        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"], [metrics[1]])
+        self.assertEqual(self.ctx.native.history_calls, 2)
+        stored = self.ctx.state.get(adapter.RUN, self.rid)
+        self.assertEqual(stored["metric_index_version"], 1)
+        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 3)
+        for _ in range(3):
+            self.call("runs/get", {"run_id": self.rid})
+            self.call("runs/search", {"experiment_ids": ["0"]})
+            self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
+        self.assertEqual(self.ctx.native.history_calls, 2)
+        self.assertEqual(self.ctx.native.calls, [])
+        self.assertEqual(len(self.ctx.native.metrics[run["native_id"]]), 3)
+
+    def test_legacy_pending_replays_stable_id_after_native_backfill(self):
+        metric = {"key": "x", "value": 2, "timestamp": 5, "step": 1}
+        self.ctx.native.fail_after_commit = True
+        with self.assertRaises(ProtocolError):
+            self.call("runs/log-batch", {"run_id": self.rid, "metrics": [metric]})
+        run = self.ctx.state.get(adapter.RUN, self.rid)
+        run.pop("metric_index_version")
+        run.pop("latest_metrics")
+        run["metric_keys"] = ["x"]
+        self.ctx.state.put(adapter.RUN, self.rid, run)
+        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"], [metric])
+        self.assertEqual(self.ctx.native.calls[0][1:], self.ctx.native.calls[1][1:])
+        self.assertEqual(len(self.ctx.native.metrics[run["native_id"]]), 1)
+        self.assertEqual(self.ctx.native.history_calls, 1)
+        self.call("runs/log-batch", {"run_id": self.rid, "metrics": [metric]})
+        self.assertEqual(len(self.ctx.native.calls), 2)
+        self.assertEqual(self.ctx.native.history_calls, 1)
 
     def test_params_are_immutable_and_batch_validated_before_write(self):
         self.call("runs/log-parameter", {"run_id": self.rid, "key": "p", "value": "first"})
@@ -308,8 +461,8 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         cls.gateway.shutdown()
         cls.gateway.server_close()
         cls.thread.join(timeout=5)
-        if hasattr(cls.ctx, "close"):
-            cls.ctx.close()
+        # CompatContext owns the lifetime directory lock; close before reopening.
+        cls.ctx.close()
 
     @classmethod
     def tearDownClass(cls):
@@ -388,6 +541,49 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertEqual(self.client.get_experiment(experiment.experiment_id).lifecycle_stage, "deleted")
         self.client.restore_experiment(experiment.experiment_id)
         self.assertEqual(self.client.get_run(rid).info.lifecycle_stage, "active")
+
+    def test_official_index_commit_crash_bulk_overlap_and_cached_reads_after_restart(self):
+        from mlflow.entities import Metric
+        from mlflow.exceptions import MlflowException
+        name = "indexed-" + uuid.uuid4().hex
+        eid = self.client.create_experiment(name)
+        exp = self.ctx.state.get(adapter.EXP, eid)
+        native_exp = next(e for e in self.ctx.native.request("GET", "/api/experiments")["experiments"]
+                          if e["id"] == exp["native_id"])
+        self.assertEqual(native_exp["name"], f"mlflow:{eid}:{name}")
+        rid = self.client.create_run(eid).info.run_id
+        metrics = [Metric("bulk", float(i), i, i) for i in range(1000)]
+        original_put = self.ctx.state.put
+
+        def fail_metadata(namespace, key, value):
+            if namespace == adapter.RUN and key == rid and "pending" not in value:
+                raise ProtocolError(503, "TEMPORARILY_UNAVAILABLE", "injected after index commit")
+            original_put(namespace, key, value)
+
+        with patch.object(self.ctx.state, "put", side_effect=fail_metadata), self.assertRaises(MlflowException):
+            self.client.log_batch(rid, metrics=metrics)
+        stored = self.ctx.state.get(adapter.RUN, rid)
+        self.assertIn("pending", stored)
+        self.assertEqual(stored["latest_metrics"], {})
+        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 1000)
+        self.__class__._stop_gateway()
+        self.__class__._start_gateway()
+        # Real SQLite persists the index ahead of latest metadata. Recovery must
+        # still replay the original pending batch, not silently omit its metrics.
+        with patch.object(adapter, "_history", side_effect=AssertionError("indexed read scanned history")):
+            self.assertEqual(self.client.get_run(rid).data.metrics["bulk"], 999.0)
+            self.client.log_batch(rid, metrics=metrics[100:] + [Metric("bulk", 1000.0, 1000, 1000)])
+            self.assertEqual(self.client.get_run(rid).data.metrics["bulk"], 1000.0)
+            found = self.client.search_runs([eid], "metrics.bulk = 1000")
+            self.assertEqual([r.info.run_id for r in found], [rid])
+        stored = self.ctx.state.get(adapter.RUN, rid)
+        self.assertNotIn("pending", stored)
+        self.assertEqual(len(stored["latest_metrics"]), 1)
+        self.assertEqual(len(self.client.get_metric_history(rid, "bulk")), 1001)
+        native = self.native.client.http.request("GET", f'/api/runs/{stored["native_id"]}/metrics',
+                                                  query={"key": "bulk", "limit": 10000})
+        self.assertEqual(len(native["points"]), 1001)
+        self.assertEqual(len({(m["step"], m["timestamp"], m["value"]) for m in native["points"]}), 1001)
 
     def test_official_native_outage_recovers_pending_write_after_restart(self):
         from mlflow.exceptions import MlflowException

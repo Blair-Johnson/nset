@@ -6,6 +6,11 @@ compat state stores identity, lifecycle, metadata and recoverable pending writes
 Unsupported endpoints/fields, non-finite metrics, negative or >2**53-1 steps and
 timestamps, custom artifact stores and extended model/dataset metrics fail closed.
 Search deliberately supports AND comparisons, not the full MLflow SQL grammar.
+
+Metric identity/latest caches assume all metric writes for mapped runs go through
+this adapter. Mixing direct native metric edits is unsupported; read-only native
+UI access is unaffected. Explicit history still reads native storage. Legacy runs
+backfill once under their run lock; new runs need no native history scan.
 """
 import base64
 import hashlib
@@ -97,8 +102,11 @@ def _save_run(ctx, run):
 
 
 def _new_exp(ctx, name, eid, tags):
-    # Native names are private immutable identities; MLflow names remain renameable.
-    native = ctx.native.request("POST", "/api/experiments", {"name": "mlflow-" + uuid.uuid4().hex})
+    # Native names remain immutable; preserve the exact, renameable external name
+    # in compat metadata. Truncate only the native display suffix on UTF-8 bounds.
+    prefix = f"mlflow:{eid}:"
+    native_name = prefix + name.encode("utf-8")[:512 - len(prefix)].decode("utf-8", errors="ignore")
+    native = ctx.native.request("POST", "/api/experiments", {"name": native_name})
     now = _now()
     exp = {"experiment_id": eid, "native_id": native["id"], "name": name,
            "artifact_location": f"mlflow-artifacts:/{eid}", "lifecycle_stage": "active",
@@ -148,6 +156,7 @@ def _run(ctx, rid):
     run = ctx.state.get(RUN, rid)
     if run is None:
         _bad("Run not found: " + rid, "RESOURCE_DOES_NOT_EXIST", 404)
+    _ensure_metric_index(ctx, run)
     _recover(ctx, run)
     exp = _experiment(ctx, run["info"]["experiment_id"])
     epoch = exp.get("lifecycle_epoch", 0)
@@ -178,12 +187,46 @@ def _history(ctx, run, key):
     return sorted(result.values(), key=lambda m: (m["step"], m["timestamp"], m["value"]))
 
 
+def _metric_namespace(run):
+    return "mlflow.metric-identities.v1:" + run["info"]["run_id"]
+
+
+def _metric_identity(metric):
+    # Exact, unambiguous identity rather than a digest with collision assumptions.
+    # Native JSON may encode integral values as integers; normalize to the same
+    # double used by _metrics before serializing both old and new observations.
+    return json.dumps([metric["key"], metric["step"], metric["timestamp"], float(metric["value"])],
+                      ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+
+
+def _update_latest(latest, metrics):
+    for metric in metrics:
+        old = latest.get(metric["key"])
+        if old is None or _metric_tuple(metric)[1:] > _metric_tuple(old)[1:]:
+            latest[metric["key"]] = metric
+
+
+def _ensure_metric_index(ctx, run):
+    """One-time migration under the run lock; publish marker only after indexing."""
+    version = run.get("metric_index_version")
+    if version == 1:
+        return
+    if version is not None:
+        _unsupported("Unsupported persisted metric index version")
+    latest = {}
+    for key in run["metric_keys"]:
+        metrics = _history(ctx, run, key)
+        ctx.state.put_many(_metric_namespace(run), {_metric_identity(m): True for m in metrics})
+        _update_latest(latest, metrics)
+    run["latest_metrics"] = latest
+    run["metric_index_version"] = 1
+    # A crash before this atomic metadata write repeats a safe, idempotent
+    # backfill. Pending legacy payloads remain intact for stable native replay.
+    _save_run(ctx, run)
+
+
 def _run_wire(ctx, run):
-    latest = []
-    for key in sorted(run["metric_keys"]):
-        history = _history(ctx, run, key)
-        if history:
-            latest.append(max(history, key=lambda m: (m["step"], m["timestamp"], m["value"])))
+    latest = [run["latest_metrics"][key] for key in sorted(run["latest_metrics"])]
     return {"info": run["info"], "data": {"metrics": latest,
             "params": _wire_pairs(run["params"]), "tags": _wire_pairs(run["tags"])}}
 
@@ -199,6 +242,10 @@ def _recover(ctx, run):
         canonical = json.dumps(chunk, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         batch_id = "mlflow-" + hashlib.sha256(canonical).hexdigest()
         ctx.ingest_metrics(run["native_id"], batch_id, chunk, wait=True)
+    # Never filter a pending payload through the index: an interrupted commit
+    # must replay the original chunks/IDs, including after the index persisted.
+    ctx.state.put_many(_metric_namespace(run), {_metric_identity(m): True for m in metrics})
+    _update_latest(run["latest_metrics"], metrics)
     patch = pending.get("patch", {})
     if patch:
         ctx.native.request("PATCH", f'/api/runs/{run["native_id"]}', patch)
@@ -211,6 +258,8 @@ def _recover(ctx, run):
     run["info"].update(pending.get("info", {}))
     run["metric_keys"] = sorted(set(run["metric_keys"]) | {m["key"] for m in metrics})
     run.pop("pending")
+    # Latest values, params/tags/info and intent removal publish atomically.
+    # Until this succeeds, durable pending still drives replay (not index hits).
     _save_run(ctx, run)
 
 
@@ -258,11 +307,9 @@ def _log(ctx, run, data):
         if key in run["params"] and run["params"][key] != value:
             _bad("Changing param values is not allowed: " + key)
     # MLflow SQL stores exact duplicate observations once, even across batch boundaries.
-    existing = set()
-    for key in {m["key"] for m in metrics}:
-        if key in run["metric_keys"]:
-            existing.update(_metric_tuple(m) for m in _history(ctx, run, key))
-    metrics = [m for m in metrics if _metric_tuple(m) not in existing]
+    identities = {_metric_identity(m): m for m in metrics}
+    existing = ctx.state.get_many(_metric_namespace(run), identities)
+    metrics = [m for identity, m in identities.items() if identity not in existing]
     info = {"run_name": tags["mlflow.runName"]} if "mlflow.runName" in tags else {}
     _commit(ctx, run, metrics=metrics, params=params, tags=tags, info=info,
             patch={k: v for k, v in (("params", params), ("tags", tags)) if v})
@@ -609,6 +656,7 @@ def handle(ctx, request):
             _active(exp)
             native = ctx.native.request("POST", "/api/runs", {"experiment_id": exp["native_id"], "name": run_name, "params": {}, "tags": tags})
             run = {"native_id": native["id"], "params": {}, "tags": tags, "metric_keys": [],
+                   "metric_index_version": 1, "latest_metrics": {},
                    "experiment_epoch": exp.get("lifecycle_epoch", 0),
                    "info": {"run_id": rid, "run_uuid": rid, "run_name": run_name,
                             "experiment_id": eid, "user_id": user_id, "status": "RUNNING",
