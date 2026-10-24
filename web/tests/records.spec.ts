@@ -670,7 +670,7 @@ test("raw inspector does not coerce object keys into array indices", async ({
     ["arr.length", "missing"],
     ["arr[1]", "null"],
   ]) {
-    const x = page.getByLabel("Record X path", { exact: true });
+    const x = page.getByLabel("Record X field", { exact: true });
     await x.fill(path);
     await x.press("Enter");
     await page
