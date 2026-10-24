@@ -8,6 +8,11 @@ class Client:
     def __init__(self, url="http://127.0.0.1:8080", *, token, timeout=30):
         self.http = Transport(url, token, timeout)
 
+    def durable_outbox(self, path, **options):
+        """Open an explicit plaintext, locally durable scalar spool (not started)."""
+        from .outbox import DurableOutbox
+        return DurableOutbox(self, path, **options)
+
     def experiment(self, name):
         return self.http.request("POST", "/api/experiments", {"name": name})
 
