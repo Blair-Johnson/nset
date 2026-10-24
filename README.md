@@ -60,4 +60,4 @@ with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
 
 Refresh the experiment list, select your runs, and open Charts to compare them.
 
-[Logging, supported SDKs, and delivery](docs/logging.md) · [Chart controls](docs/browser.md) · [Development](docs/contributing.md)
+[Logging, supported SDKs, and delivery](docs/logging.md) · [Development](docs/contributing.md)
