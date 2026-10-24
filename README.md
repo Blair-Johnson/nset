@@ -1,16 +1,17 @@
 # Not Shitty Experiment Tracker
 
-NSET is a self-hosted experiment tracker focused on logging and comparing scalar metrics and images. It has a native Python client and scoped MLflow and W&B tracking support.
+NSET is a self-hosted experiment tracker compatible with existing logging clients like MLflow and WandB. It is narrowly focused on providing a high-quality user experience for logging and analyzing scalar metrics and images.
 
 ![Four training runs compared in nset, showing accuracy, gradient norm, learning rate, and loss.](docs/images/training-comparison.png)
 
 NSET addresses many of my frustrations with existing tools:
-- Compare complete metric histories with configurable interpolation and smoothing.
-- Measure curves at interpolated positions with vertical and horizontal cursors.
-- Save, name, and export chart layouts.
-- Keep chart zoom while adjusting styles or resizing cards.
-- Scrub logged images while keeping the same crop and zoom.
-- Join metrics by step or time and plot them against each other.
+- Curves are plotted at full resolution with configurable interpolation settings.
+- Cursors enable easy comparative measurements between curves.
+- Curves can be measured at interpolated positions, rather than only where logged data exists.
+- Layouts can be saved, named, and exported.
+- Chart zoom and layout is preserved across content setting changes.
+- Logged images can easily be scrubbed through without resetting crop or zoom.
+- Metrics can be joined on a common axis with interpolation and plotted against each other.
 
 ## Set up and launch
 
