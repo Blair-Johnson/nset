@@ -104,6 +104,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 async fn normalize_errors(request: Request, next: Next) -> Response {
+    let rx_query = request.uri().path().contains("/rx/");
     let mut response = next.run(request).await;
     if (response.status().is_client_error() || response.status().is_server_error())
         && response
@@ -116,6 +117,7 @@ async fn normalize_errors(request: Request, next: Next) -> Response {
         response = ApiError(
             status,
             match status {
+                StatusCode::PAYLOAD_TOO_LARGE if rx_query => "rx request body exceeds 32 KiB",
                 StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds 32 MiB",
                 StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
                 StatusCode::NOT_FOUND => "resource not found",

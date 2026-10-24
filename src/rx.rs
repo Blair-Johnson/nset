@@ -9,6 +9,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -373,14 +374,50 @@ impl Filters {
             .collect()
     }
 }
+fn scalar_group(value: &Value) -> Value {
+    if value.is_number() && value.as_i64().is_none() && value.as_u64().is_none() {
+        let f = value.as_f64().unwrap();
+        if f.fract() == 0.0 {
+            if f >= 0.0 && f < 18446744073709551616.0 {
+                return json!(f as u64);
+            }
+            if f >= i64::MIN as f64 && f < 0.0 {
+                return json!(f as i64);
+            }
+        }
+    }
+    value.clone()
+}
+fn scalar_equal(a: &Value, b: &Value) -> bool {
+    if !a.is_number() || !b.is_number() {
+        return a == b;
+    }
+    let integer = |v: &Value| {
+        v.as_i64()
+            .map(i128::from)
+            .or_else(|| v.as_u64().map(i128::from))
+    };
+    match (integer(a), integer(b)) {
+        (Some(a), Some(b)) => a == b,
+        (Some(i), None) | (None, Some(i)) => {
+            let f = if integer(a).is_some() {
+                b.as_f64().unwrap()
+            } else {
+                a.as_f64().unwrap()
+            };
+            f.fract() == 0.0 && f >= i64::MIN as f64 && f < 18446744073709551616.0 && f as i128 == i
+        }
+        _ => a.as_f64() == b.as_f64(),
+    }
+}
 fn matches(value: &Value, filters: &[(FieldPath, &Condition)], any: bool) -> bool {
     let test = |(p, c): &(FieldPath, &Condition)| {
         let v = p.get(value);
         match c.op.as_str() {
             "exists" => v.is_some(),
             "missing" => v.is_none(),
-            "eq" => v.is_some_and(|v| v == &c.value),
-            "ne" => v.is_some_and(|v| v != &c.value),
+            "eq" => v.is_some_and(|v| scalar_equal(v, &c.value)),
+            "ne" => v.is_some_and(|v| !scalar_equal(v, &c.value)),
             op => match (v.and_then(Value::as_f64), c.value.as_f64()) {
                 (Some(a), Some(b)) => match op {
                     "lt" => a < b,
@@ -424,7 +461,7 @@ pub struct Request {
     #[serde(default)]
     prefix: String,
     #[serde(default)]
-    cursor: Option<Cursor>,
+    cursor: Option<String>,
     #[serde(default = "page_size")]
     limit: usize,
 }
@@ -484,6 +521,8 @@ struct Hint {
 }
 #[derive(Serialize)]
 struct Trace {
+    id: String,
+    group_label: Option<String>,
     run_uid: String,
     y: String,
     group: Option<Value>,
@@ -572,12 +611,23 @@ impl Source {
             ids.push(id);
             highs.push(high);
         }
-        let mut cursor = q.cursor.clone().unwrap_or(Cursor {
-            scope: scope.clone(),
-            run: 0,
-            seq: 0,
-            high: highs.clone(),
-        });
+        let mut cursor = if let Some(encoded) = &q.cursor {
+            if encoded.len() > 4096 {
+                return Err(ApiError::bad("record cursor exceeds its size limit"));
+            }
+            let bytes = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| ApiError::bad("invalid record cursor"))?;
+            serde_json::from_slice::<Cursor>(&bytes)
+                .map_err(|_| ApiError::bad("invalid record cursor"))?
+        } else {
+            Cursor {
+                scope: scope.clone(),
+                run: 0,
+                seq: 0,
+                high: highs.clone(),
+            }
+        };
         if cursor.scope != scope
             || cursor.run >= ids.len()
             || cursor.seq < 0
@@ -710,7 +760,7 @@ impl Source {
                                         && !v.is_object()
                                         && v.to_string().len() <= 1024 =>
                                 {
-                                    Some(v.clone())
+                                    Some(scalar_group(v))
                                 }
                                 _ => {
                                     d.skipped_groups += 1;
@@ -743,6 +793,15 @@ impl Source {
                             traces
                                 .entry(key)
                                 .or_insert_with(|| Trace {
+                                    id: serde_json::to_string(&(
+                                        &self.id,
+                                        &q.runs[cursor.run],
+                                        &q.ys[index],
+                                        &q.group,
+                                        &g,
+                                    ))
+                                    .unwrap(),
+                                    group_label: g.as_ref().map(Value::to_string),
                                     run_uid: q.runs[cursor.run].clone(),
                                     y: q.ys[index].clone(),
                                     group: g.clone(),
@@ -765,7 +824,7 @@ impl Source {
             cursor.seq = 0;
         }
         let next = if stopped && mode == Mode::Records {
-            Some(cursor)
+            Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).unwrap()))
         } else {
             None
         };
@@ -1048,5 +1107,82 @@ mod tests {
         assert_eq!(result["fields"].as_array().unwrap().len(), 64);
         assert_eq!(result["diagnostics"]["oversized"], 1);
         assert_eq!(result["diagnostics"]["partial"], true);
+    }
+    #[test]
+    fn typed_numeric_equality_and_group_limits() {
+        assert!(scalar_equal(&json!(1), &json!(1.0)));
+        assert!(!scalar_equal(&json!(1), &json!(true)));
+        assert!(!scalar_equal(&json!(1), &json!("1")));
+        assert!(!scalar_equal(
+            &json!(9007199254740993u64),
+            &json!(9007199254740992.0)
+        ));
+        let f = fixture(false);
+        for i in 1..=130 {
+            add(
+                &f,
+                859,
+                i,
+                json!({"kind":"epoch","epoch":i,"train_loss":i,"g":i}),
+            );
+        }
+        let result = f
+            .source
+            .query(
+                request(json!({"group":"g","ys":["train_loss"]})),
+                Mode::Plot,
+            )
+            .unwrap();
+        assert_eq!(result["traces"].as_array().unwrap().len(), 128);
+        assert_eq!(result["diagnostics"]["omitted_traces"], 2);
+        assert_eq!(result["diagnostics"]["partial"], true);
+    }
+    #[test]
+    fn groups_normalize_numbers_but_retain_large_integer_identity() {
+        let f = fixture(false);
+        for (i, g) in [
+            json!(1),
+            json!(1.0),
+            json!("1"),
+            json!(9007199254740992u64),
+            json!(9007199254740993u64),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            add(
+                &f,
+                859,
+                i as i64 + 1,
+                json!({"kind":"epoch","epoch":i,"train_loss":i,"g":g}),
+            );
+        }
+        let result = f
+            .source
+            .query(
+                request(json!({"group":"g","ys":["train_loss"]})),
+                Mode::Plot,
+            )
+            .unwrap();
+        let traces = result["traces"].as_array().unwrap();
+        assert_eq!(traces.len(), 4);
+        assert_eq!(
+            traces
+                .iter()
+                .map(|v| v["id"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(
+            traces
+                .iter()
+                .any(|v| v["group_label"] == "9007199254740993")
+        );
+        assert!(
+            traces
+                .iter()
+                .any(|v| v["points"].as_array().unwrap().len() == 2)
+        );
     }
 }
