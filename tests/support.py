@@ -1,5 +1,7 @@
 """Black-box server fixture; no direct database access in API assertions."""
 import os
+import hashlib
+from unittest.mock import patch
 from pathlib import Path
 import secrets
 import socket
@@ -10,7 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples"))
-from nset_client import Client
+from nset_client import Client, DeliveryError
 
 
 class Server:
@@ -23,6 +25,9 @@ class Server:
             self.port = sock.getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}"
         self.binary = Path(os.environ.get("NSET_BINARY", ROOT / "target/debug/nset")).resolve()
+        self.spool_patch = patch("nset_client.client._spool_path", side_effect=lambda url:
+            self.directory / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.sqlite3")
+        self.spool_patch.start()
         self.client = Client(self.url, token=self.token)
         self.process = None
 
@@ -54,6 +59,22 @@ class Server:
         if getattr(self, "log", None):
             self.log.close()
 
+    def project(self):
+        """Wait explicitly for scalar acceptance and eventual test readback."""
+        self.client.flush(timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.client.http.request("GET", "/api/ingest/status")["pending_batches"] == 0:
+                return
+            time.sleep(.02)
+        raise AssertionError("scalar projection did not drain")
+
     def close(self):
-        self.stop()
-        self.temp.cleanup()
+        try:
+            self.client.close(timeout=.5)
+        except DeliveryError:
+            pass  # Failure tests deliberately retain data in this disposable fixture.
+        finally:
+            self.stop()
+            self.spool_patch.stop()
+            self.temp.cleanup()

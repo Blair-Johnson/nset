@@ -19,6 +19,7 @@ class HistoryTests(unittest.TestCase):
         for start, end in ((0, 10000), (10000, 10023)):
             run.log_batch([{"key": "loss", "step": step, "value": step / 10023}
                            for step in range(start, end)])
+        self.server.project()
         points = list(self.client.metric_history(run.id, "loss", page_size=10000))
         self.assertEqual(len(points), 10023)
         self.assertEqual([p["step"] for p in points], list(range(10023)))
@@ -27,12 +28,14 @@ class HistoryTests(unittest.TestCase):
     def test_snapshot_does_not_drift_during_pagination(self):
         run = self.client.start_run(self.client.experiment("history"), "snapshot")
         run.log_batch([{"key": "loss", "step": i, "value": i} for i in range(7)])
+        self.server.project()
         query = {"key": "loss", "limit": 3}
         page = self.client.http.request("GET", run.path + "/metrics", query=query)
         points = page["points"]
         snapshot = page["snapshot"]
         self.assertEqual(page["total"], 7)
         run.log_metrics({"loss": 999}, step=0)  # Duplicate x remains a stored observation.
+        self.server.project()
         while page["next_after"] is not None:
             query.update(after=page["next_after"], snapshot=snapshot)
             page = self.client.http.request("GET", run.path + "/metrics", query=query)
@@ -49,7 +52,9 @@ class HistoryTests(unittest.TestCase):
             run = client.start_run(exp, f"worker {index}")
             run.log_batch([{"key": "loss", "step": i, "value": i / 1000} for i in range(1000)])
             run.finish()
-            return len(list(client.metric_history(run.id, "loss")))
+            client.close()
+            self.server.project()
+            return len(list(self.client.metric_history(run.id, "loss")))
         with ThreadPoolExecutor(max_workers=8) as pool:
             self.assertEqual(list(pool.map(submit, range(8))), [1000] * 8)
 
