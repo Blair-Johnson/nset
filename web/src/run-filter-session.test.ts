@@ -488,7 +488,7 @@ for (const [op, value] of [
         combine: "any",
         conditions: [
           event({ op }),
-          event({ scope: "params", path: "seed", op: "eq", value: "1" }),
+          event({ scope: "params", path: '$["seed"]', op: "eq", value: "1" }),
         ],
       }),
       true,
