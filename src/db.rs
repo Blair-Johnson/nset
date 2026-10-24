@@ -17,7 +17,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
@@ -130,7 +130,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // Recheck under the write lock. Version zero also covers the original,
     // unversioned schema: IF NOT EXISTS preserves its tables, indexes and data.
-    if schema_version(&tx)? == 0 {
+    let version = schema_version(&tx)?;
+    if version == 0 {
         tx.execute_batch("
             CREATE TABLE IF NOT EXISTS experiments(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(id), name TEXT NOT NULL,
@@ -145,6 +146,14 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
                 step INTEGER NOT NULL, timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, byte_length INTEGER NOT NULL,
                 filename TEXT NOT NULL UNIQUE);
             CREATE INDEX IF NOT EXISTS images_stream ON images(run_id,key,step,timestamp,id);")?;
+    }
+    if version < 2 {
+        tx.execute_batch(
+            "CREATE TABLE ingest_receipts(
+            run_id TEXT NOT NULL REFERENCES runs(id), batch_id TEXT NOT NULL,
+            digest BLOB NOT NULL, accepted INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
+            PRIMARY KEY(run_id,batch_id));",
+        )?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     tx.commit()?;
@@ -490,6 +499,54 @@ impl Database {
             })
             .await
     }
+    /// The replay receipt and all observations commit together. Replaying a query
+    /// commit whose journal completion was interrupted is therefore a no-op.
+    pub(crate) async fn apply_ingest(
+        &self,
+        id: String,
+        batch_id: String,
+        digest: Vec<u8>,
+        accepted_at: i64,
+        batch: MetricBatch,
+    ) -> Result<()> {
+        fn storage_error(_: rusqlite::Error) -> ApiError {
+            ApiError(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "materialization failed; pending data retained; retrying",
+            )
+        }
+        crate::ingest::validate_batch(&batch)?;
+        safe(accepted_at)?;
+        self.writer.call(move |conn| {
+            let tx = conn.transaction().map_err(storage_error)?;
+            let receipt: Option<(Vec<u8>, i64, i64)> = tx.query_row(
+                "SELECT digest,accepted,accepted_at FROM ingest_receipts WHERE run_id=? AND batch_id=?",
+                params![id, batch_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).optional().map_err(storage_error)?;
+            if let Some((prior, count, time)) = receipt {
+                if prior != digest || count != batch.metrics.len() as i64 || time != accepted_at {
+                    return Err(ApiError(axum::http::StatusCode::CONFLICT, "ingest receipt conflict"));
+                }
+                return Ok(());
+            }
+            if tx.query_row("SELECT 1 FROM runs WHERE id=?", [&id], |_| Ok(())).optional().map_err(storage_error)?.is_none() {
+                return Err(ApiError::missing());
+            }
+            tx.execute("INSERT INTO ingest_receipts(run_id,batch_id,digest,accepted,accepted_at) VALUES(?,?,?,?,?)",
+                params![id,batch_id,digest,batch.metrics.len() as i64,accepted_at]).map_err(storage_error)?;
+            {
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO metrics(run_id,key,step,timestamp,value) VALUES(?,?,?,?,?)").map_err(storage_error)?;
+                for metric in batch.metrics {
+                    insert.execute(params![id,metric.key,metric.step,metric.timestamp.unwrap_or(accepted_at),metric.value]).map_err(storage_error)?;
+                }
+            }
+            tx.execute("UPDATE runs SET updated_at=MAX(updated_at,?) WHERE id=?", params![accepted_at,id]).map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            Ok(())
+        }).await
+    }
+
     pub async fn metric_keys(&self, id: String) -> Result<Vec<String>> {
         self.reader()
             .call(move |conn| {

@@ -118,13 +118,17 @@ pub struct PatchRun {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub tags: Option<Object>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricInput {
     pub key: String,
     pub step: i64,
     pub value: f64,
-    #[serde(default, deserialize_with = "optional_non_null")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_non_null"
+    )]
     pub timestamp: Option<i64>,
 }
 impl MetricInput {
@@ -140,7 +144,7 @@ impl MetricInput {
         Ok(())
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricBatch {
     pub metrics: Vec<MetricInput>,

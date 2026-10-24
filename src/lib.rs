@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod errors;
+pub mod ingest;
 pub mod models;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
