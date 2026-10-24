@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import time
 import unittest
+from unittest.mock import patch
 
 from support import Server
 
@@ -141,6 +142,46 @@ class CompatibilityBoundaryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"already owned", result.stderr)
         self.assertEqual(self.request("/api/health", method="GET")[0], 200)
+
+    def test_shutdown_drains_disconnected_write_before_releasing_root(self):
+        self.server.stop()
+        with patch.dict(os.environ, {"NSET_WRITE_CONCURRENCY": "1"}):
+            self.server.start()
+        status, _, raw = self.request("/api/2.0/mlflow/experiments/create", {"name": "shutdown"})
+        self.assertEqual(status, 200, raw)
+        eid = json.loads(raw)["experiment_id"]
+        status, _, raw = self.request("/api/2.0/mlflow/runs/create", {"experiment_id": eid, "start_time": 100})
+        self.assertEqual(status, 200, raw)
+        rid = json.loads(raw)["run"]["info"]["run_id"]
+        root = self.server.directory / "data"
+        with closing(sqlite3.connect(root / "nset.sqlite3")) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                payload = json.dumps({"run_id": rid, "params": [{"key": "shutdown", "value": "committed"}]}).encode()
+                with socket.create_connection(("127.0.0.1", self.server.port), timeout=5) as lost:
+                    header = ("POST /api/2.0/mlflow/runs/log-batch HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + self.server.token + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)) + "\r\n\r\n")
+                    lost.sendall(header.encode() + payload)
+                    for _ in range(50):
+                        if self.request("/graphql", {})[0] == 503:
+                            break
+                        time.sleep(0.01)
+                    else:
+                        self.fail("write was not admitted")
+                self.assertEqual(self.request("/graphql", {})[0], 503)
+                self.server.process.terminate()
+                time.sleep(0.1)
+                self.assertIsNone(self.server.process.poll(), "shutdown returned with an accepted actor write still blocked")
+                result = subprocess.run([str(self.server.binary), "serve", "--port", "0", "--db-path", str(root)], env=dict(os.environ, NSET_TOKEN=self.server.token), capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"already owned", result.stderr)
+            finally:
+                connection.rollback()
+        self.server.process.wait(timeout=10)
+        self.assertEqual(self.server.process.returncode, 0)
+        self.server.stop()
+        self.server.start()
+        runs = self.server.client.http.request("GET", "/api/runs")["runs"]
+        self.assertEqual(runs[0]["params"]["shutdown"], "committed")
 
     def test_compat_state_and_native_data_share_database(self):
         status, _, raw = self.request("/api/2.0/mlflow/experiments/create", {"name": "storage"})
