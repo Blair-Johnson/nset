@@ -27,6 +27,7 @@ def arguments():
     parser.add_argument("--points", type=int, default=100000)
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--clients", type=int, default=32)
+    parser.add_argument("--experiments", type=int, default=1)
     parser.add_argument("--write-concurrency", type=int, default=8)
     parser.add_argument("--read-workers", type=int, default=2)
     parser.add_argument("--http-workers", type=int, default=4)
@@ -36,6 +37,8 @@ def arguments():
         parser.error("points must be 1..10000000, batch-size 1..10000")
     if not 1 <= args.clients <= 128 or args.clients > args.points:
         parser.error("clients must be 1..128 and no greater than points")
+    if not 1 <= args.experiments <= args.clients:
+        parser.error("experiments must be 1..clients")
     if not 1 <= args.write_concurrency <= 1024 or not 1 <= args.read_workers <= 64 or not 1 <= args.http_workers <= 256:
         parser.error("concurrency out of range")
     if not 1 <= args.timeout <= 3600:
@@ -62,8 +65,8 @@ def main():
 # Workload and verification helpers follow.
 def measure(args, server):
     client = server.client
-    exp = client.experiment("durable-load")
-    runs = [client.start_run(exp, f"producer-{i}") for i in range(args.clients)]
+    experiments = [client.experiment(f"durable-load-{i}") for i in range(args.experiments)]
+    runs = [client.start_run(experiments[i % len(experiments)], f"producer-{i}") for i in range(args.clients)]
     spools, expected, paths = [], [], []
     local_start = time.monotonic()
     try:
