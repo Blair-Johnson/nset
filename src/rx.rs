@@ -484,6 +484,8 @@ pub struct Request {
     #[serde(default)]
     prefix: String,
     #[serde(default)]
+    search: String,
+    #[serde(default)]
     cursor: Option<String>,
     #[serde(default = "page_size")]
     limit: usize,
@@ -511,7 +513,7 @@ impl Diagnostics {
         self.reasons.insert(reason);
     }
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize)]
 enum Mode {
     Fields,
     Records,
@@ -561,6 +563,115 @@ fn value_type(v: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+fn add_hint(
+    hints: &mut BTreeMap<String, Hint>,
+    diagnostics: &mut Diagnostics,
+    path: String,
+    value: &Value,
+    limit: usize,
+) {
+    if !hints.contains_key(&path) && hints.len() >= limit {
+        diagnostics.limit("field suggestion limit reached");
+        return;
+    }
+    let hint = hints.entry(path.clone()).or_insert_with(|| Hint {
+        path,
+        ..Hint::default()
+    });
+    hint.present += 1;
+    hint.types.insert(value_type(value));
+    if !value.is_array()
+        && !value.is_object()
+        && safe_hint_value(value)
+        && value.to_string().len() <= 256
+        && hint.values.len() < 8
+        && !hint.values.contains(value)
+    {
+        hint.values.push(value.clone());
+    }
+}
+
+struct FieldSearch<'a> {
+    needle: &'a str,
+    visits: &'a mut usize,
+    hints: &'a mut BTreeMap<String, Hint>,
+    diagnostics: &'a mut Diagnostics,
+    limit: usize,
+    started: Instant,
+}
+impl FieldSearch<'_> {
+    // Iterate children lazily: memory and call depth depend on the depth cap,
+    // never on an object's width or an array's length. False stops the scan.
+    fn walk(&mut self, value: &Value, parent: &str, depth: usize) -> bool {
+        if depth >= 32 {
+            if value.as_object().is_some_and(|v| !v.is_empty())
+                || value.as_array().is_some_and(|v| !v.is_empty())
+            {
+                self.diagnostics.limit("field depth limit reached");
+            }
+            return true;
+        }
+        if let Some(object) = value.as_object() {
+            for (key, child) in object {
+                if !self.child(child, parent, Some(key), 0, depth + 1) {
+                    return false;
+                }
+            }
+        } else if let Some(array) = value.as_array() {
+            for (index, child) in array.iter().enumerate() {
+                if !self.child(child, parent, None, index, depth + 1) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn child(
+        &mut self,
+        value: &Value,
+        parent: &str,
+        key: Option<&str>,
+        index: usize,
+        depth: usize,
+    ) -> bool {
+        if *self.visits >= MAX_VISITS {
+            self.diagnostics.limit("field visit budget reached");
+            return false;
+        }
+        if self.started.elapsed() > Duration::from_millis(500) {
+            self.diagnostics.limit("scan budget reached");
+            return false;
+        }
+        *self.visits += 1;
+        // Bound allocation before escaping an arbitrary object key.
+        if key.is_some_and(|k| k.len() > 1024) {
+            self.diagnostics.limit("oversized field paths skipped");
+            return true;
+        }
+        let path = match key {
+            Some(key) => key_path(parent, key),
+            None => format!("{}[{index}]", if parent.is_empty() { "$" } else { parent }),
+        };
+        if path.len() > 1024 {
+            self.diagnostics.limit("oversized field paths skipped");
+            return true;
+        }
+        if key.is_some_and(|k| k.to_lowercase().contains(self.needle))
+            || path.to_lowercase().contains(self.needle)
+        {
+            add_hint(
+                self.hints,
+                self.diagnostics,
+                path.clone(),
+                value,
+                self.limit,
+            );
+        }
+        self.walk(value, &path, depth)
+    }
+}
+
 impl Source {
     fn query(&self, q: Request, mode: Mode) -> Result<Value> {
         if q.source_id != self.id {
@@ -575,7 +686,12 @@ impl Source {
         {
             return Err(ApiError::bad("select 1–32 distinct rx run identities"));
         }
-        if q.limit == 0 || q.limit > 100 || q.prefix.len() > 1024 || q.ys.len() > 16 {
+        if q.limit == 0
+            || q.limit > 100
+            || q.prefix.len() > 1024
+            || q.search.len() > 1024
+            || q.ys.len() > 16
+        {
             return Err(ApiError::bad("rx request exceeds its field/page bounds"));
         }
         let filters = q.filters.compiled()?;
@@ -597,9 +713,10 @@ impl Source {
             .filter(|s| !s.is_empty())
             .map(FieldPath::parse)
             .transpose()?;
-        // Completion visits only immediate children of the entered parent. Arrays
-        // are containers; explicit [index] paths remain queryable without hints.
-        let (parent, needle) = if mode == Mode::Fields {
+        // Prefix completion visits only immediate children of the entered parent.
+        // Arrays are containers there; search also visits their indexed children.
+        let search = q.search.to_lowercase();
+        let (parent, needle) = if mode == Mode::Fields && search.is_empty() {
             if let Some(i) = completion_dot(&q.prefix) {
                 (&q.prefix[..i], &q.prefix[i + 1..])
             } else {
@@ -615,7 +732,17 @@ impl Source {
         };
         let scope = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&json!([q.source_id, q.runs, q.filters])).unwrap())
+            Sha256::digest(
+                serde_json::to_vec(&json!([
+                    q.source_id,
+                    q.runs,
+                    q.filters,
+                    mode,
+                    q.prefix,
+                    q.search
+                ]))
+                .unwrap(),
+            )
         );
         // File identity is distinct from the stable repository source ID. Pin
         // before opening and recheck after SQLite has read the file to catch a
@@ -739,6 +866,27 @@ impl Source {
                             break;
                         }
                     }
+                    Mode::Fields if !search.is_empty() => {
+                        let mut searcher = FieldSearch {
+                            needle: &search,
+                            visits: &mut visits,
+                            hints: &mut hints,
+                            diagnostics: &mut d,
+                            limit: q.limit.min(MAX_FIELDS),
+                            started,
+                        };
+                        if !searcher.walk(&value, "", 0) {
+                            stopped = true;
+                            break;
+                        }
+                        // Do not consume the next event when this one exhausted
+                        // the visit budget exactly; scan-more must still see it.
+                        if visits >= MAX_VISITS {
+                            d.limit("field visit budget reached");
+                            stopped = true;
+                            break;
+                        }
+                    }
                     Mode::Fields => {
                         let value = parent_path.as_ref().map_or(Some(&value), |p| p.get(&value));
                         if let Some(object) = value.and_then(Value::as_object) {
@@ -756,25 +904,7 @@ impl Source {
                                 if !(key.starts_with(needle) || path.starts_with(&q.prefix)) {
                                     continue;
                                 }
-                                if !hints.contains_key(&path) && hints.len() >= MAX_FIELDS {
-                                    d.limit("field suggestion limit reached");
-                                    continue;
-                                }
-                                let hint = hints.entry(path.clone()).or_insert_with(|| Hint {
-                                    path,
-                                    ..Hint::default()
-                                });
-                                hint.present += 1;
-                                hint.types.insert(value_type(v));
-                                if !v.is_array()
-                                    && !v.is_object()
-                                    && safe_hint_value(v)
-                                    && v.to_string().len() <= 256
-                                    && hint.values.len() < 8
-                                    && !hint.values.contains(v)
-                                {
-                                    hint.values.push(v.clone());
-                                }
+                                add_hint(&mut hints, &mut d, path, v, MAX_FIELDS);
                             }
                         }
                         if visits > MAX_VISITS {
@@ -863,7 +993,8 @@ impl Source {
             cursor.run += 1;
             cursor.seq = 0;
         }
-        let next = if stopped && mode == Mode::Records {
+        // Fields cursors continue at the next event, not within a truncated event.
+        let next = if stopped && matches!(mode, Mode::Records | Mode::Fields) {
             Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).unwrap()))
         } else {
             None

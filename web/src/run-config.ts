@@ -20,6 +20,7 @@ export interface ConfigTree {
   root: ConfigNode;
   nodes: ConfigNode[];
   fields: number;
+  truncated: boolean;
 }
 
 /** Exact source addressing: literal dots in keys never become nested lookups. */
@@ -44,7 +45,26 @@ function preview(value: unknown): string {
 }
 
 /** Params are JSON data already parsed by the API, not YAML source text. */
-export function buildConfigTree(params: Record<string, unknown>): ConfigTree {
+export interface ConfigTreeOptions {
+  maxFields?: number;
+  maxDepth?: number;
+  /** Event subtrees retain exact keys rather than grouping literal dots. */
+  exact?: boolean;
+  sourcePath?: ConfigPath;
+}
+function* configEntries(value: object): Generator<[string | number, unknown]> {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) yield [i, value[i]];
+  } else {
+    for (const key in value)
+      if (Object.hasOwn(value, key))
+        yield [key, (value as Record<string, unknown>)[key]];
+  }
+}
+export function buildConfigTree(
+  params: Record<string, unknown>,
+  options: ConfigTreeOptions = {},
+): ConfigTree {
   let nextId = 0;
   const make = (path: string, parent: ConfigNode | null): ConfigNode => ({
     id: nextId++,
@@ -56,20 +76,46 @@ export function buildConfigTree(params: Record<string, unknown>): ConfigTree {
   });
   const root = make("", null);
   const nodes: ConfigNode[] = [];
-  const pending = Object.entries(params)
-    .reverse()
-    .map(([key, value]) => ({
+  const pending = [
+    {
       parent: root,
-      key: key as string | number,
-      value,
-      path: [key] as ConfigPath,
-    }));
+      entries: configEntries(params),
+      path: [] as ConfigPath,
+      depth: 0,
+    },
+  ];
   let fields = 0;
+  let truncated = false;
+  const maxFields = options.maxFields ?? Infinity;
+  const maxDepth = options.maxDepth ?? Infinity;
   while (pending.length) {
-    const item = pending.pop()!;
+    const frame = pending[pending.length - 1];
+    const next = frame.entries.next();
+    if (next.done) {
+      pending.pop();
+      continue;
+    }
+    if (fields >= maxFields) {
+      truncated = true;
+      break;
+    }
+    const [key, entryValue] = next.value;
+    const item = {
+      parent: frame.parent,
+      key,
+      value: entryValue,
+      path:
+        frame.depth === 0 && options.sourcePath
+          ? options.sourcePath
+          : [...frame.path, key],
+    };
     let node = item.parent;
     const parts =
-      typeof item.key === "number" ? [`[${item.key}]`] : item.key.split(".");
+      typeof item.key === "number"
+        ? [`[${item.key}]`]
+        : options.exact
+          ? [item.key]
+          : item.key.split(".");
     for (const part of parts) {
       let child = node.children.get(part);
       if (!child) {
@@ -93,24 +139,29 @@ export function buildConfigTree(params: Record<string, unknown>): ConfigTree {
     node.values.push(value);
     fields++;
     if (item.value !== null && typeof item.value === "object") {
-      const entries = Array.isArray(item.value)
-        ? item.value.map((value, key) => [key, value] as const)
-        : Object.entries(item.value);
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const [key, value] = entries[i];
-        pending.push({ parent: node, key, value, path: [...item.path, key] });
-      }
+      if (frame.depth >= maxDepth) truncated = true;
+      else
+        pending.push({
+          parent: node,
+          entries: configEntries(item.value),
+          path: item.path,
+          depth: frame.depth + 1,
+        });
     }
   }
   for (const node of nodes) {
     node.search = [
       node.path,
-      ...node.values.flatMap((v) => [v.sourcePath, v.preview]),
+      ...node.values.flatMap((v) => [
+        v.sourcePath,
+        v.preview,
+        ...(options.exact ? v.path.map(String) : []),
+      ]),
     ]
       .join("\n")
       .toLocaleLowerCase();
   }
-  return { root, nodes, fields };
+  return { root, nodes, fields, truncated };
 }
 
 /** Return matches plus their ancestors; never rewrite source objects. */
@@ -144,12 +195,17 @@ function action(
   return button;
 }
 
+export interface ConfigElement extends HTMLElement {
+  setQuery(query: string): void;
+  setExpanded(open: boolean): void;
+}
 export function renderRunConfig(
   params: Record<string, unknown>,
   runId: string,
-): HTMLElement {
-  const tree = buildConfigTree(params);
-  const section = element("section", "run-config");
+  options: { tree?: ConfigTree; eventPreview?: boolean } = {},
+): ConfigElement {
+  const tree = options.tree ?? buildConfigTree(params);
+  const section = element("section", "run-config") as ConfigElement;
   section.setAttribute("aria-label", "Run configuration");
   const heading = element("div", "run-config-heading");
   heading.append(element("h2", "", "Configuration"));
@@ -160,7 +216,9 @@ export function renderRunConfig(
       await navigator.clipboard.writeText(text);
       status.textContent = "Copied";
     } catch {
-      status.textContent = "Copy unavailable. Select text or export JSON.";
+      status.textContent = options.eventPreview
+        ? "Copy unavailable. Select the path text."
+        : "Copy unavailable. Select text or export JSON.";
     }
   };
   const exportJSON = () => {
@@ -246,7 +304,13 @@ export function renderRunConfig(
           toggle.setAttribute("aria-expanded", String(open));
           name.append(toggle);
         } else name.append(element("span", "run-config-toggle-space"));
-        const path = element("code", "run-config-path", node.path || '""');
+        const path = element(
+          "code",
+          "run-config-path",
+          (options.eventPreview ? value?.sourcePath : node.path) ||
+            node.path ||
+            '""',
+        );
         path.title = value?.sourcePath ?? node.path;
         name.append(path);
         if (node.values.length > 1 && value)
@@ -259,7 +323,14 @@ export function renderRunConfig(
         const content = element(
           "pre",
           "run-config-value",
-          value?.preview ?? `${node.children.size} groups / fields`,
+          value &&
+            options.eventPreview &&
+            typeof value.value === "number" &&
+            (!Number.isFinite(value.value) ||
+              (Number.isInteger(value.value) &&
+                !Number.isSafeInteger(value.value)))
+            ? `${String(value.value)} (approximate / out of range; see raw event)`
+            : (value?.preview ?? `${node.children.size} groups / fields`),
         );
         content.dataset.type = value?.type ?? "namespace";
         const actions = element("div", "run-config-actions");
@@ -283,7 +354,8 @@ export function renderRunConfig(
             "aria-label",
             `Copy value ${value.sourcePath}`,
           );
-          actions.append(pathCopy, valueCopy);
+          actions.append(pathCopy);
+          if (!options.eventPreview) actions.append(valueCopy);
         }
         row.append(name, type, content, actions);
         fragment.append(row);
@@ -307,34 +379,47 @@ export function renderRunConfig(
         .querySelector<HTMLButtonElement>(`[data-node-id="${focusId}"]`)
         ?.focus();
   }
-  search.oninput = () => {
-    matches = matchingConfigNodes(tree, search.value);
+  section.setQuery = (query: string) => {
+    matches = matchingConfigNodes(tree, query);
     collapsedMatches.clear();
     limit = pageSize;
     render();
   };
-  tools.append(
-    search,
-    action("Expand all", () => {
+  search.oninput = () => section.setQuery(search.value);
+  section.setExpanded = (open: boolean) => {
+    if (open) {
       for (const node of tree.nodes) expanded.add(node.id);
       collapsedMatches.clear();
-      render();
-    }),
-    action("Collapse all", () => {
+    } else {
       expanded.clear();
       if (matches) for (const node of tree.nodes) collapsedMatches.add(node.id);
       limit = pageSize;
-      render();
-    }),
-    count,
-  );
+    }
+    render();
+  };
+  const expand = action("Expand all", () => section.setExpanded(true));
+  expand.dataset.configExpand = "true";
+  const collapse = action("Collapse all", () => section.setExpanded(false));
+  collapse.dataset.configExpand = "false";
+  tools.append(search, expand, collapse, count);
   const hint = element(
     "p",
     "run-config-hint",
     "Paths copy as exact JSONPath, preserving literal dots in keys. Values copy as JSON.",
   );
   hint.append(status);
-  section.append(heading, tools, hint, rows, more);
+  if (options.eventPreview) {
+    section.setAttribute("aria-label", "Event field values");
+    section.append(rows, count, status, more);
+    if (tree.truncated)
+      section.append(
+        element(
+          "p",
+          "muted",
+          "Tree preview limited to 1,000 values / 16 levels. Copy or inspect raw event for all values.",
+        ),
+      );
+  } else section.append(heading, tools, hint, rows, more);
   render();
   return section;
 }

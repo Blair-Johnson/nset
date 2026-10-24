@@ -305,7 +305,10 @@ function viewSwitch(experimentId: string, view: "runs" | "charts" | null) {
   }
   return group;
 }
+let detailRequest: AbortController | undefined;
 function renderPage() {
+  detailRequest?.abort();
+  detailRequest = undefined;
   if (!connected) return;
   activeEditor?.close();
   activeEditor = undefined;
@@ -342,9 +345,12 @@ function renderPage() {
         (r) => r.id === route.runId && r.experiment_id === experiment.id,
       );
       pageHeader(experiment.id, "runs");
+      detailRequest = new AbortController();
       const detail = run
         ? renderRunDetail(run, {
             catalog,
+            api,
+            signal: detailRequest.signal,
             onBack: () => navigate(experiment.id),
             onCharts: () => {
               if (updateSelection(workspace, [run.id]))

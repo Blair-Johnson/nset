@@ -334,3 +334,344 @@ async fn exact_integer_filters_and_decimal_string_catalog_page_boundaries() {
     let (_, fields) = f.request("POST", "/api/rx/fields", query, true).await;
     assert_eq!(fields["fields"][0]["values"], json!([]));
 }
+
+fn search_query(f: &Fixture, search: &str) -> Value {
+    json!({"source_id":f.source_id,"runs":["u859"],"search":search,"limit":25})
+}
+
+fn field_paths(result: &Value) -> Vec<&str> {
+    result["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hint| hint["path"].as_str().unwrap())
+        .collect()
+}
+
+fn set_search_event(f: &Fixture, value: Value) {
+    Connection::open(&f.path)
+        .unwrap()
+        .execute("UPDATE events SET data=?", [value.to_string()])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn field_search_nested_scalars_arrays_literal_paths_and_prefix_compatibility() {
+    let f = Fixture::new();
+    set_search_event(
+        &f,
+        json!({
+            "metrics":{"loss":0.3,"other":false}, "metrics.loss":7,
+            "arr":[{"Loss":0.4},8], "loss_box":{"detail":3},
+            "ordinary":"loss", "Loss_text":"x".repeat(257)
+        }),
+    );
+    let before = std::fs::read(&f.path).unwrap();
+    let (status, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "LoSs"), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        field_paths(&result),
+        vec![
+            "$[\"metrics.loss\"]",
+            "Loss_text",
+            "arr[0].Loss",
+            "loss_box",
+            "loss_box.detail",
+            "metrics.loss"
+        ]
+    );
+    assert_eq!(result["fields"][0]["values"], json!([7]));
+    assert_eq!(result["fields"][1]["values"], json!([]));
+    assert_eq!(result["fields"][3]["types"], json!(["object"]));
+    assert_eq!(result["fields"][3]["values"], json!([]));
+    assert_eq!(result["fields"][5]["values"], json!([0.3]));
+    assert_eq!(result["records"], json!([]));
+    assert_eq!(result["traces"], json!([]));
+    let (_, result) = f
+        .request(
+            "POST",
+            "/api/rx/fields",
+            search_query(&f, "$[\"metrics.loss\"]"),
+            true,
+        )
+        .await;
+    assert_eq!(field_paths(&result), vec!["$[\"metrics.loss\"]"]);
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "ARR"), true)
+        .await;
+    assert_eq!(
+        field_paths(&result),
+        vec!["arr", "arr[0]", "arr[0].Loss", "arr[1]"]
+    );
+    assert_eq!(result["fields"][0]["types"], json!(["array"]));
+    assert_eq!(result["fields"][0]["values"], json!([]));
+    assert_eq!(result["fields"][3]["values"], json!([8]));
+
+    let mut prefix = search_query(&f, "");
+    prefix["prefix"] = json!("metrics.");
+    let (_, with_empty_search) = f
+        .request("POST", "/api/rx/fields", prefix.clone(), true)
+        .await;
+    prefix.as_object_mut().unwrap().remove("search");
+    let (_, without_search) = f
+        .request("POST", "/api/rx/fields", prefix.clone(), true)
+        .await;
+    assert_eq!(with_empty_search, without_search);
+    assert_eq!(
+        field_paths(&without_search),
+        vec!["metrics.loss", "metrics.other"]
+    );
+    prefix["prefix"] = json!("metrics.L");
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", prefix.clone(), true)
+        .await;
+    assert!(
+        field_paths(&result).is_empty(),
+        "prefix remains case-sensitive"
+    );
+    prefix["search"] = json!("LoSs");
+    prefix["prefix"] = json!("invalid..prefix.");
+    assert_eq!(
+        f.request("POST", "/api/rx/fields", prefix, true).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+
+    set_search_event(&f, json!(["needle", {"Needle":true}]));
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "needle"), true)
+        .await;
+    assert_eq!(field_paths(&result), vec!["$[1].Needle"]);
+}
+
+#[tokio::test]
+async fn field_search_run_scope_cursor_scope_and_explicit_scan_more() {
+    let f = Fixture::new();
+    // Width exceeds the shared visit budget without exceeding the record cap.
+    set_search_event(&f, json!({"wide":vec![0; 5000]}));
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("INSERT INTO runs VALUES(241,'u241','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]'); INSERT INTO events VALUES(241,1,'now','{\"other_run_target\":2}'); INSERT INTO events VALUES(859,6,'now','{\"late_target\":1}');").unwrap();
+    drop(db);
+    let before = std::fs::read(&f.path).unwrap();
+    let q = search_query(&f, "target");
+    let (status, first) = f.request("POST", "/api/rx/fields", q.clone(), true).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(field_paths(&first).is_empty());
+    assert_eq!(first["diagnostics"]["scanned"], 1);
+    assert_eq!(first["diagnostics"]["partial"], true);
+    assert!(
+        first["diagnostics"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("field visit budget reached"))
+    );
+    assert!(first["next_cursor"].is_string());
+    let mut more = q.clone();
+    more["cursor"] = first["next_cursor"].clone();
+    let (status, second) = f
+        .request("POST", "/api/rx/fields", more.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(field_paths(&second), vec!["late_target"]);
+    assert!(second["next_cursor"].is_null());
+    for (key, value) in [
+        ("search", json!("other")),
+        ("runs", json!(["u241"])),
+        ("source_id", json!("rx:other")),
+        ("prefix", json!("different")),
+        (
+            "filters",
+            json!({"conditions":[{"path":"x","op":"exists"}]}),
+        ),
+    ] {
+        let mut invalid = more.clone();
+        invalid[key] = value;
+        assert_eq!(
+            f.request("POST", "/api/rx/fields", invalid, true).await.0,
+            StatusCode::BAD_REQUEST,
+            "{key}"
+        );
+    }
+    assert_eq!(
+        f.request("POST", "/api/rx/records", more, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut other_run = q;
+    other_run["runs"] = json!(["u241"]);
+    let (_, result) = f.request("POST", "/api/rx/fields", other_run, true).await;
+    assert_eq!(field_paths(&result), vec!["other_run_target"]);
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+
+    // Exactly 4096 visits (the array plus its elements) must not consume
+    // the following event before yielding its continuation cursor.
+    Connection::open(&f.path)
+        .unwrap()
+        .execute(
+            "UPDATE events SET data=? WHERE run_id=859 AND seq=5",
+            [json!({"wide":vec![0; 4095]}).to_string()],
+        )
+        .unwrap();
+    let mut query = search_query(&f, "target");
+    let (_, first) = f
+        .request("POST", "/api/rx/fields", query.clone(), true)
+        .await;
+    assert_eq!(first["diagnostics"]["scanned"], 1);
+    assert!(first["next_cursor"].is_string());
+    query["cursor"] = first["next_cursor"].clone();
+    let (_, next) = f.request("POST", "/api/rx/fields", query, true).await;
+    assert_eq!(field_paths(&next), vec!["late_target"]);
+}
+
+#[tokio::test]
+async fn field_search_enforces_depth_path_suggestion_and_value_bounds() {
+    let f = Fixture::new();
+    let mut deep = json!({"hidden":true});
+    for _ in 0..32 {
+        deep = json!({"node":deep});
+    }
+    let mut fields: serde_json::Map<String, Value> = (0..100)
+        .map(|i| (format!("target{i:03}"), json!(i)))
+        .collect();
+    fields.insert("deep".into(), deep);
+    fields.insert(format!("target{}", "x".repeat(1024)), json!({"hidden":1}));
+    fields.insert("path".into(), json!({"x".repeat(1018): {"target":1}}));
+    set_search_event(&f, Value::Object(fields));
+    let (status, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "target"), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(field_paths(&result).len(), 25);
+    assert_eq!(result["diagnostics"]["partial"], true);
+    for reason in [
+        "field depth limit reached",
+        "oversized field paths skipped",
+        "field suggestion limit reached",
+    ] {
+        assert!(
+            result["diagnostics"]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason)),
+            "{result}"
+        );
+    }
+    let mut query = search_query(&f, "target");
+    query["limit"] = json!(100);
+    let (_, result) = f.request("POST", "/api/rx/fields", query, true).await;
+    assert_eq!(field_paths(&result).len(), 64);
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "hidden"), true)
+        .await;
+    assert!(field_paths(&result).is_empty());
+    let mut query = search_query(&f, "deep");
+    query["limit"] = json!(100);
+    let (_, result) = f.request("POST", "/api/rx/fields", query, true).await;
+    assert_eq!(field_paths(&result).len(), 32);
+    assert!(
+        field_paths(&result)
+            .iter()
+            .all(|path| path.len() <= 1024 && path.split('.').count() <= 32)
+    );
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/rx/fields",
+            search_query(&f, &"x".repeat(1025)),
+            true
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/rx/fields",
+            search_query(&f, &"x".repeat(1024)),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Scalar examples keep the existing eight-value cap and precise-number policy.
+    let db = Connection::open(&f.path).unwrap();
+    db.execute("DELETE FROM events", []).unwrap();
+    for seq in 1..=12 {
+        db.execute(
+            "INSERT INTO events VALUES(859,?,'now',?)",
+            rusqlite::params![
+                seq,
+                json!({"target":seq,"target_big":9007199254740993u64}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let (_, result) = f
+        .request("POST", "/api/rx/fields", search_query(&f, "target"), true)
+        .await;
+    assert_eq!(result["fields"][0]["present"], 12);
+    assert_eq!(result["fields"][0]["values"].as_array().unwrap().len(), 8);
+    assert_eq!(result["fields"][1]["values"], json!([]));
+}
+
+#[tokio::test]
+async fn field_search_reuses_scan_and_oversized_record_caps() {
+    let f = Fixture::new();
+    let mut db = Connection::open(&f.path).unwrap();
+    let transaction = db.transaction().unwrap();
+    transaction.execute("DELETE FROM events", []).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO events VALUES(859,1,'now',?)",
+            [json!({"target":"x".repeat(256 * 1024)}).to_string()],
+        )
+        .unwrap();
+    for seq in 2..=2001 {
+        transaction
+            .execute("INSERT INTO events VALUES(859,?,'now','{}')", [seq])
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "INSERT INTO events VALUES(859,2002,'now','{\"target\":1}')",
+            [],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    drop(db);
+    let before = std::fs::read(&f.path).unwrap();
+    let mut query = search_query(&f, "target");
+    let (status, first) = f
+        .request("POST", "/api/rx/fields", query.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["diagnostics"]["scanned"].as_u64().unwrap() <= 2000);
+    assert_eq!(first["diagnostics"]["oversized"], 1);
+    assert_eq!(first["diagnostics"]["partial"], true);
+    assert!(field_paths(&first).is_empty());
+    assert!(first["next_cursor"].is_string());
+    query["cursor"] = first["next_cursor"].clone();
+    let mut found = false;
+    for _ in 0..10 {
+        let (status, page) = f
+            .request("POST", "/api/rx/fields", query.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if field_paths(&page) == vec!["target"] {
+            found = true;
+            break;
+        }
+        assert!(page["next_cursor"].is_string(), "{page}");
+        query["cursor"] = page["next_cursor"].clone();
+    }
+    assert!(
+        found,
+        "explicit scan-more must reach the later matching event"
+    );
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+}

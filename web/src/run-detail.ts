@@ -1,12 +1,15 @@
-import type { Run } from "./api";
+import type { Api, Run } from "./api";
 import type { Catalog } from "./workspace-types";
 import { runSwatch } from "./run-drawer";
 import { element } from "./utils";
 import { configJSON, configType, renderRunConfig } from "./run-config";
 import { plotIcon } from "./plot-icons";
 import "./run-detail.css";
+import { attachEventConfig } from "./run-event-config";
 
 export interface RunDetailOptions {
+  api?: Api;
+  signal?: AbortSignal;
   onBack: () => void;
   catalog?: Catalog;
   /** Open the charts view showing only this run. */
@@ -191,6 +194,8 @@ export function renderRunDetail(
     (key ? valueInput : keyInput).focus();
   };
   renderTags();
-  page.append(header, metadata, tags, renderRunConfig(run.params, run.id));
+  const config = renderRunConfig(run.params, run.id);
+  if (run.rx && options.api) attachEventConfig(config, options.api, run.rx, options.signal);
+  page.append(header, metadata, tags, config);
   return page;
 }
