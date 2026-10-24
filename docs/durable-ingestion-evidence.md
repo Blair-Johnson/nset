@@ -22,7 +22,7 @@ These are single fresh-database, closed-loop stress trials on a development work
 
 The first attempt, r280, stopped on a connection reset because the benchmark retried only HTTP 503. The local outbox retained the failed batch; the harness was corrected to retry transport failures with stable IDs and report them separately. Its failure is retained in rx and is not presented as a successful delivery measurement. Temporary benchmark databases are removed on exit; rx retains source snapshots, configuration, binary digests, output and result events.
 
-## Final integrated verification
+## Pre-removal integrated verification
 
 rx r305 (independent root, command c302, tags durable/nset/validation) passed the integrated Rust test suite, web unit tests, strict all-target Clippy and formatting in 34.27 seconds. It supersedes r302, which passed tests and Clippy but caught a formatting-only difference in an existing backend test.
 
@@ -33,3 +33,8 @@ W&B stream follow-up r304 passed 22 tests, including real SDK init/log/image/fin
 Final W&B review found that an interrupted legacy migration could overwrite a newer pending snapshot. Regression r308 reproduced all six failing cases; r309 fixed and passed the focused cases, and r310 passed all 23 W&B tests with SDKs enabled. The fix drains pending work before file registration/completion and makes the pending legacy snapshot authoritative during migration. The focused fault cases use real SQLite close/reopen with a native receipt test double; the full suite separately exercises the real native service.
 
 Final combined gate rx r311 (independent root, c311, tags compat/nset/sdk/validation) passed all 166 Python tests with no skips in 35.942 seconds (36.80 seconds wall). It enabled the real W&B SDK tests, used the locked compatibility Python environment and the release binary identified above, and promoted ResourceWarning to errors. The suite includes native HTTP/outbox/gateway, MLflow 3.17.2, W&B 0.31.0 and TensorBoard 2.21.0 tests. r311 supersedes r299, whose only failures were gateway fixtures still assuming pre-hash batch IDs and path-prefixed backend URLs. Source snapshot, exact command and retained SDK artifacts are available through `rx show 311`; `rx status -r 305,311` reports both final gates. Browser end-to-end checks and production-scale mixed artifact/load profiling were not rerun for this backend/adapter pass.
+
+
+## Artifact-removal verification
+
+rx r320 (independent root, c320, tags compat/no-artifacts/regression/sdk) passed all 165 Python tests with no skips in 34.406 seconds (35.32 seconds wall), with ResourceWarning promoted to errors. This integrated both adapters after deleting the shared blob store and signed-file authentication. MLflow artifact APIs and W&B file/media uploads now reject explicitly; official-client scalar/configuration/summary tracking, completion, resume and offline sync remain tested. W&B may emit expected file-upload rejection warnings. Native image logging and TensorBoard event collection are unchanged. No Rust or browser build was needed for this Python-only removal; the earlier artifact and migration results above describe the pre-removal implementation.

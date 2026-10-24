@@ -1,15 +1,13 @@
-"""Durable gateway metadata, opaque artifact storage, and native ingest bridge."""
+"""Durable gateway metadata and native ingest bridge."""
 import hashlib
-import hmac
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
-import tempfile
 import threading
 import time
-from urllib.parse import quote, urlencode, urlsplit, unquote
+from urllib.parse import quote, urlsplit
 import weakref
 
 from .upstream import NativeTransport as Transport
@@ -179,102 +177,6 @@ class State:
             self._db.close()
 
 
-def artifact_path(path, *, allow_empty=False):
-    if not isinstance(path, str) or "\x00" in path or "\\" in path or path.startswith("/"):
-        raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Artifact path must be relative POSIX")
-    if allow_empty:
-        path = path.rstrip("/")
-    if not path and allow_empty:
-        return path
-    if not path or any(part in ("", ".", "..") for part in path.split("/")):
-        raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Unsafe artifact path")
-    return path
-
-
-class Artifacts:
-    def __init__(self, ctx, root):
-        self.ctx = ctx
-        self.root = _mkdir(root)
-
-    @staticmethod
-    def _namespace(namespace):
-        if not isinstance(namespace, str) or not namespace:
-            raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Artifact namespace is required")
-        return "gateway:artifacts:" + namespace
-
-    def put(self, namespace, path, data, content_type="application/octet-stream"):
-        path = artifact_path(path)
-        ns = self._namespace(namespace)
-        if not isinstance(data, bytes):
-            raise TypeError("artifact data must be bytes")
-        if len(data) > self.ctx.max_body_bytes:
-            raise ProtocolError(413, "REQUEST_TOO_LARGE", "Artifact exceeds body limit")
-        if not isinstance(content_type, str) or any(c in content_type for c in "\r\n\x00"):
-            raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Invalid artifact content type")
-        digest = hashlib.sha256(data).hexdigest()
-        # Persist content before metadata. Orphan blobs after a crash are harmless;
-        # deleting blobs inline would race other logical paths sharing a digest.
-        fd, name = tempfile.mkstemp(prefix=".upload-", dir=self.root)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, self.root / digest)
-            _fsync_dir(self.root)
-            self.ctx.state.put(ns, path, {"digest": digest, "content_type": content_type, "file_size": len(data)})
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
-
-    def get(self, namespace, path):
-        path = artifact_path(path)
-        info = self.ctx.state.get(self._namespace(namespace), path)
-        if info is None:
-            raise ProtocolError(404, "RESOURCE_DOES_NOT_EXIST", "Artifact not found")
-        if info["file_size"] > self.ctx.max_body_bytes:
-            raise ProtocolError(413, "REQUEST_TOO_LARGE", "Artifact exceeds body limit")
-        digest = info["digest"]
-        if not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ProtocolError(500, "DATA_LOSS", "Invalid artifact metadata")
-        try:
-            with open(self.root / digest, "rb") as stream:
-                data = stream.read(self.ctx.max_body_bytes + 1)
-        except FileNotFoundError:
-            raise ProtocolError(500, "DATA_LOSS", "Artifact content is missing") from None
-        if len(data) != info["file_size"] or hashlib.sha256(data).hexdigest() != digest:
-            raise ProtocolError(500, "DATA_LOSS", "Artifact content integrity failure")
-        return data, info["content_type"]
-
-    def list(self, namespace, path=""):
-        path = artifact_path(path, allow_empty=True)
-        prefix = path + "/" if path else ""
-        children = {}
-        for key, info in self.ctx.state.items(self._namespace(namespace)):
-            if not key.startswith(prefix):
-                continue
-            rest = key[len(prefix):]
-            child = prefix + rest.split("/", 1)[0]
-            is_dir = "/" in rest
-            if child not in children or is_dir:
-                children[child] = {"path": child, "is_dir": is_dir, "file_size": 0 if is_dir else info["file_size"]}
-        return [children[key] for key in sorted(children)]
-
-    def delete(self, namespace, path):
-        self.ctx.state.delete(self._namespace(namespace), artifact_path(path))
-
-
-def _signed_path(path):
-    parsed = urlsplit(path)
-    decoded = unquote(parsed.path)
-    if (not path.startswith("/compat/files/") or parsed.scheme or parsed.netloc
-            or parsed.query or parsed.fragment or parsed.path != path
-            or "\\" in decoded or any(ord(c) < 32 for c in decoded)
-            or any(p in (".", "..") for p in decoded.split("/"))):
-        raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Only compatibility file paths may be signed")
-    return path
-
-
 class CompatContext:
     def __init__(self, native_url, token, data_dir, public_url):
         if urlsplit(native_url).path not in ("", "/"):
@@ -306,8 +208,6 @@ class CompatContext:
                 self.state.put("gateway:config", "native_url", self.native.url)
             elif native_url != self.native.url:
                 raise ValueError("Compatibility data directory is bound to a different native URL")
-            # Check the binding before creating or changing any artifact paths.
-            self.artifacts = Artifacts(self, self.data_dir / "blobs")
         except BaseException:
             self.close()
             raise
@@ -319,29 +219,6 @@ class CompatContext:
                 lock = threading.RLock()
                 self._locks[key] = lock
             return lock
-
-    def signed_url(self, path, expires_in=3600):
-        path = _signed_path(path)
-        if type(expires_in) is not int or not 1 <= expires_in <= 604800:
-            raise ValueError("expires_in must be 1..604800 seconds")
-        expiry = str(int(time.time()) + expires_in)
-        signature = self._signature(path, expiry)
-        return self.public_url + path + "?" + urlencode({"expires": expiry, "signature": signature})
-
-    def _signature(self, path, expiry):
-        return hmac.new(self.token.encode(), (path + "\n" + expiry).encode(), hashlib.sha256).hexdigest()
-
-    def valid_signature(self, path, query):
-        try:
-            _signed_path(path)
-            expiry = query["expires"]
-            if not re.fullmatch(r"[0-9]{1,12}", expiry):
-                return False
-            if not int(time.time()) < int(expiry) <= int(time.time()) + 604800:
-                return False
-            return hmac.compare_digest(self._signature(path, expiry).encode(), query["signature"].encode())
-        except (ProtocolError, KeyError, ValueError, TypeError):
-            return False
 
     @staticmethod
     def _receipt(receipt, run_id, batch_id, count):

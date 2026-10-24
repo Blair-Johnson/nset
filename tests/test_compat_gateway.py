@@ -2,6 +2,8 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import gzip
+import hashlib
+import hmac
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -16,7 +18,6 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from urllib.parse import parse_qsl, urlsplit
 
 from nset_client.transport import APIError
 from nset_compat import CompatContext, ProtocolError, Request, Response, make_server
@@ -224,7 +225,6 @@ else:
 from nset_compat import CompatContext
 c=CompatContext("http://127.0.0.1:1", "secret", sys.argv[1], "http://localhost")
 c.state.put("test:kill", "key", {"saved": True})
-c.artifacts.put("test:kill", "file", b"durable")
 print("ready", flush=True)
 sys.stdin.read()
 '''
@@ -239,7 +239,6 @@ sys.stdin.read()
             child.wait(timeout=10)
             recovered = self.reopen_context()
             self.assertEqual(recovered.state.get("test:kill", "key"), {"saved": True})
-            self.assertEqual(recovered.artifacts.get("test:kill", "file")[0], b"durable")
             self.assertEqual(lock_path.stat().st_ino, inode)
         finally:
             if child.poll() is None:
@@ -249,7 +248,7 @@ sys.stdin.read()
     def test_context_failed_initialization_closes_database_and_releases_lock(self):
         self.ctx.close()
         connect = sqlite3.connect
-        for failure in ("_fsync_dir", "Artifacts"):
+        for failure in ("_fsync_dir", "State.get"):
             connections = []
             def capture_connection(*args, **kwargs):
                 db = connect(*args, **kwargs)
@@ -264,21 +263,16 @@ sys.stdin.read()
                 connections[0].execute("SELECT 1")
             self.reopen_context().close()
 
-    def test_context_native_binding_precedes_artifacts_and_allows_rotation(self):
+    def test_context_native_binding_and_credential_rotation(self):
         self.assertEqual(self.ctx.state.get("gateway:config", "native_url"), self.ctx.native.url)
-        self.ctx.artifacts.put("test", "file", b"original")
+        self.ctx.state.put("test", "metadata", {"saved": True})
         self.ctx.close()
-        blobs = Path(self.temp.name) / "blobs"
-        before = {p.name: p.read_bytes() for p in blobs.iterdir()}
         for native_url in ("http://127.0.0.1:2", "https://127.0.0.1:1"):
-            with patch("nset_compat.context.Artifacts") as artifacts:
-                with self.assertRaisesRegex(ValueError, "different native URL"):
-                    self.reopen_context(native_url=native_url)
-                artifacts.assert_not_called()
-            self.assertEqual({p.name: p.read_bytes() for p in blobs.iterdir()}, before)
+            with self.assertRaisesRegex(ValueError, "different native URL"):
+                self.reopen_context(native_url=native_url)
         rotated = self.reopen_context(native_url="http://127.0.0.1:1/", token="rotated", public_url="https://example.test")
         self.assertEqual(rotated.state.get("gateway:config", "native_url"), "http://127.0.0.1:1")
-        self.assertEqual(rotated.artifacts.get("test", "file")[0], b"original")
+        self.assertEqual(rotated.state.get("test", "metadata"), {"saved": True})
         self.assertEqual(rotated.native.token, "rotated")
         self.assertEqual(rotated.public_url, "https://example.test")
         rotated.state.put("gateway:config", "native_url", None)
@@ -292,50 +286,11 @@ sys.stdin.read()
                 self.reopen_context()
             mkdir.assert_not_called()
 
-    def test_artifact_bytes_namespace_listing_and_dedup(self):
-        artifacts = self.ctx.artifacts
-        artifacts.put("mlflow:run", "nested/data.bin", b"\x00\xff", "application/custom")
-        artifacts.put("wandb:run", "other", b"\x00\xff")
-        artifacts.put("mlflow:run", "root.txt", b"hello", "text/plain")
-        self.assertEqual(artifacts.get("mlflow:run", "nested/data.bin"), (b"\x00\xff", "application/custom"))
-        self.assertEqual(artifacts.list("mlflow:run"), [
-            {"path": "nested", "is_dir": True, "file_size": 0},
-            {"path": "root.txt", "is_dir": False, "file_size": 5}])
-        self.assertEqual(artifacts.list("mlflow:run", "nested/")[0]["path"], "nested/data.bin")
-        self.assertEqual(len(list(artifacts.root.iterdir())), 2)
-        artifacts.delete("mlflow:run", "nested/data.bin")
-        with self.assertRaises(ProtocolError) as caught:
-            artifacts.get("mlflow:run", "nested/data.bin")
-        self.assertEqual(caught.exception.status, 404)
-        self.assertEqual(artifacts.get("wandb:run", "other")[0], b"\x00\xff")
-
-    def test_artifact_traversal_capacity_and_failed_sync(self):
-        for path in ("../x", "/x", "a/../b", "a\\b", "a\x00b", "a//b", "./x", ""):
-            with self.subTest(path=path), self.assertRaises(ProtocolError):
-                self.ctx.artifacts.put("test", path, b"x")
-        self.ctx.max_body_bytes = 4
-        with self.assertRaises(ProtocolError) as caught:
-            self.ctx.artifacts.put("test", "big", b"12345")
-        self.assertEqual(caught.exception.status, 413)
-        with patch("nset_compat.context.os.fsync", side_effect=OSError("full")):
-            with self.assertRaises(OSError):
-                self.ctx.artifacts.put("test", "not-committed", b"data")
-        self.assertEqual(self.ctx.artifacts.list("test"), [])
-
-    def test_artifact_integrity_failure_is_explicit(self):
-        self.ctx.artifacts.put("test", "file", b"hello")
-        blob = next(self.ctx.artifacts.root.iterdir())
-        blob.write_bytes(b"wrong")
-        with self.assertRaises(ProtocolError) as caught:
-            self.ctx.artifacts.get("test", "file")
-        self.assertEqual(caught.exception.code, "DATA_LOSS")
-
     def test_abrupt_process_exit_preserves_committed_data(self):
         code = '''import os, sys
 from nset_compat import CompatContext
 c=CompatContext("http://127.0.0.1:1","secret",sys.argv[1],"http://localhost")
 c.state.put("test:crash", "key", {"saved":True})
-c.artifacts.put("test:crash", "file.bin", b"durable")
 os._exit(0)
 '''
         self.ctx.close()
@@ -343,24 +298,6 @@ os._exit(0)
         self.assertEqual(result.returncode, 0, result.stderr)
         reopened = self.reopen_context()
         self.assertEqual(reopened.state.get("test:crash", "key"), {"saved": True})
-        self.assertEqual(reopened.artifacts.get("test:crash", "file.bin")[0], b"durable")
-
-    def test_signatures_scope_expiry_tamper_and_replay(self):
-        with patch("nset_compat.context.time.time", return_value=100):
-            url = self.ctx.signed_url("/compat/files/file", expires_in=60)
-            parts = urlsplit(url)
-            query = dict(parse_qsl(parts.query))
-            self.assertNotIn(TOKEN, url)
-            self.assertTrue(self.ctx.valid_signature(parts.path, query))
-            self.assertTrue(self.ctx.valid_signature(parts.path, query))
-            self.assertFalse(self.ctx.valid_signature("/compat/files/other", query))
-            self.assertFalse(self.ctx.valid_signature("/api/runs", query))
-            self.assertFalse(self.ctx.valid_signature(parts.path, {**query, "expires": "161"}))
-        with patch("nset_compat.context.time.time", return_value=160):
-            self.assertFalse(self.ctx.valid_signature(parts.path, query))
-        for path in ("/api/runs", "//evil/compat/files/x", "/compat/files/../x", "/compat/files/%2e%2e/x", "/compat/files/x?x=1"):
-            with self.subTest(path=path), self.assertRaises(ProtocolError):
-                self.ctx.signed_url(path)
 
     def test_durable_ingest_poll_replay_and_conflict(self):
         native = FakeNative()
@@ -579,12 +516,6 @@ class HTTPTests(unittest.TestCase):
             raise ProtocolError(400, "INVALID_PARAMETER_VALUE", "Unsupported operation")
         if request.path == "/compat/native-failure":
             raise APIError(429, "capacity exhausted")
-        if request.path == "/compat/files/blob":
-            if request.method == "PUT":
-                ctx.artifacts.put("http:test", "blob", request.body, request.headers.get("content-type", "application/octet-stream"))
-                return Response()
-            body, content_type = ctx.artifacts.get("http:test", "blob")
-            return Response(body=body, headers={"Content-Type": content_type})
         return None
 
     def request(self, method="GET", path="/api/check", body=None, headers=None, auth=True):
@@ -621,13 +552,14 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html")
         self.assertEqual(self.request(path="/%61pi/check", auth=False)[0], 401)
 
-    def test_native_proxy_status_bytes_query_and_redirect(self):
+    def test_native_proxy_status_bytes_query_redirect_and_images(self):
         status, _, body = self.request(path="/api/check?q=a%2Fb")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["path"], "/api/check?q=a%2Fb")
-        status, headers, body = self.request("POST", "/api/upload", b"\xff\x00", {"Content-Type": "application/custom"})
+        status, headers, body = self.request("POST", "/api/runs/run/images?key=frame&step=1", b"\xff\x00", {"Content-Type": "image/png"})
         self.assertEqual((status, body), (201, b"\xff\x00"))
-        self.assertEqual(headers["Content-Type"], "application/custom")
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(self.backend.seen[-1], ("/api/runs/run/images?key=frame&step=1", "Bearer " + TOKEN))
         status, headers, _ = self.request(path="/redirect", auth=False)
         self.assertEqual(status, 302)
         self.assertEqual(headers["location"], "http://127.0.0.1:1/never-follow")
@@ -667,28 +599,45 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(self.request(path=path)[0], 400)
         self.assertEqual(self.request(path="/api/check?a=1&a=2")[0], 400)
 
-    def test_signed_download_not_upload_or_api_auth(self):
-        self.assertEqual(self.request("PUT", "/compat/files/blob", b"artifact", {"Content-Type": "text/plain"})[0], 200)
-        parts = urlsplit(self.ctx.signed_url("/compat/files/blob"))
-        signed = parts.path + "?" + parts.query
-        for _ in range(2):
-            status, headers, body = self.request(path=signed, auth=False)
-            self.assertEqual((status, body), (200, b"artifact"))
-            self.assertEqual(headers["Content-Type"], "text/plain")
-        self.assertEqual(self.request("PUT", signed, b"overwrite", auth=False)[0], 401)
-        self.assertEqual(self.request(path="/api/check?" + parts.query, auth=False)[0], 401)
-        self.assertEqual(self.request(path=signed + "0", auth=False)[0], 401)
-        self.assertEqual(self.request(path=signed, method="HEAD", auth=False)[2], b"")
+    def test_file_routes_reject_without_storage_or_native_proxy(self):
+        self.server.adapters = _load_adapters()
+        routes = ("/compat/files/blob", "/wandb/files/entity/project/run/file",
+                  "/files/blob", "/artifacts/blob", "/api/2.0/mlflow-artifacts/artifacts/blob",
+                  "/api/2.0/mlflow/artifacts/list", "/api/2.0/mlflow/logged-models")
+        before = self.ctx.state._db.execute("SELECT * FROM kv ORDER BY namespace, key").fetchall()
+        for route in routes:
+            for method in ("GET", "HEAD", "PUT", "POST"):
+                with self.subTest(route=route, method=method):
+                    status, _, body = self.request(method, route, b"file" if method in ("PUT", "POST") else None)
+                    self.assertEqual(status, 400)
+                    if method != "HEAD":
+                        self.assertIn(json.loads(body)["error_code"], ("NOT_IMPLEMENTED", "UNSUPPORTED_OPERATION"))
+        self.assertEqual(self.backend.seen, [])
+        self.assertEqual(self.ctx.state._db.execute("SELECT * FROM kv ORDER BY namespace, key").fetchall(), before)
+        self.assertFalse((Path(self.temp.name) / "blobs").exists())
+        self.assertFalse(hasattr(self.ctx, "artifacts"))
 
-    def test_concurrent_requests_persist_every_artifact(self):
-        def upload(i):
-            path = "path/" + str(i)
-            self.ctx.artifacts.put("concurrent", path, str(i).encode())
-            return self.ctx.artifacts.get("concurrent", path)[0]
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(upload, range(40)))
-        self.assertEqual(results, [str(i).encode() for i in range(40)])
-        self.assertEqual(len(self.ctx.artifacts.list("concurrent", "path")), 40)
+    def test_query_signatures_never_bypass_authentication(self):
+        expiry = str(int(time.time()) + 60)
+        for route in ("/compat/files/blob", "/files/blob", "/artifacts/blob", "/api/check"):
+            signature = hmac.new(TOKEN.encode(), (route + "\n" + expiry).encode(), hashlib.sha256).hexdigest()
+            query = "?expires=" + expiry + "&signature=" + signature
+            for method in ("GET", "HEAD", "PUT"):
+                with self.subTest(route=route, method=method):
+                    self.assertEqual(self.request(method, route + query, auth=False)[0], 401)
+        self.assertEqual(self.backend.seen, [])
+
+    def test_concurrent_requests_persist_every_metric_batch(self):
+        def ingest(i):
+            payload = {"run_id": "run", "batch_id": "concurrent-" + str(i),
+                       "metrics": [{"key": "loss", "step": i, "value": i}]}
+            status, _, body = self.request("POST", "/compat/ingest", json.dumps(payload).encode())
+            self.assertEqual(status, 200)
+            return json.loads(body)["accepted"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(ingest, range(40))), [1] * 40)
+        self.assertEqual(len(self.backend.receipts), 40)
+        self.assertEqual(len(self.ctx.state.items("gateway:ingest")), 40)
 
     def test_real_http_native_receipts_replay_and_capacity(self):
         payload = {"run_id": "run", "batch_id": "http-batch", "metrics": [{"key": "x", "step": 0, "value": 1}]}

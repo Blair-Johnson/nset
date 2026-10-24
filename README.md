@@ -2,7 +2,7 @@
 
 A small experiment tracker focused on trustworthy timeseries inspection and native-resolution image timelines, with a dark experiment browser and mixed-chart dashboards. A Rust executable serves the browser UI, writes scalar observations to SQLite, and stores images as immutable files. The UI uses uPlot and OpenSeadragon; Node is a build dependency, not a runtime service.
 
-The native API is supplemented by an optional server-side gateway for official MLflow and W&B tracking clients, plus a TensorBoard event-file collector. Existing training instrumentation can keep its SDK; configure the endpoint and credentials instead. Compatibility is a tested subset, not a complete replacement for either vendor's service. See `docs/client-compatibility.md` for setup and limits. This is an early implementation, not a hardened multi-tenant service.
+The native API is supplemented by an optional server-side gateway for official MLflow and W&B tracking clients, plus a TensorBoard event-file collector. Existing training instrumentation can keep its SDK; configure the endpoint and credentials instead. Compatibility is a tested tracking subset, not a complete replacement for either vendor's service. Generic artifact and run-file storage APIs are unsupported; native image logging remains supported. See `docs/client-compatibility.md` for setup and limits. This is an early implementation, not a hardened multi-tenant service.
 
 ## Build
 

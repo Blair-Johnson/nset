@@ -234,9 +234,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         request = Request(self.command, target.path, dict(pairs), headers)
         protected = self.command not in ("GET", "HEAD") or decoded.startswith("/api") or _protocol_path(decoded)
         if protected and not _authorized(self.server.ctx, headers):
-            signed = self.command in ("GET", "HEAD") and self.server.ctx.valid_signature(target.path, request.query)
-            if not signed:
-                raise ProtocolError(401, "UNAUTHENTICATED", "Valid gateway credentials are required")
+            raise ProtocolError(401, "UNAUTHENTICATED", "Valid gateway credentials are required")
         length = headers.get("content-length", "0")
         if not length.isascii() or not length.isdecimal() or len(length) > 20:
             raise ProtocolError(400, "INVALID_REQUEST", "Invalid Content-Length")
@@ -276,7 +274,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if response is not None:
                     break
             if response is None:
-                if _protocol_path(unquote(request.path)):
+                path = unquote(request.path).rstrip("/")
+                if any(path == prefix or path.startswith(prefix + "/")
+                       for prefix in ("/files", "/artifacts", "/compat/files", "/wandb/files")):
+                    raise ProtocolError(400, "UNSUPPORTED_OPERATION", "File and artifact storage are not supported")
+                if _protocol_path(path):
                     raise ProtocolError(501, "NOT_IMPLEMENTED", "Unsupported compatibility route")
                 response = _proxy(self.server.ctx, request)
             self._send(response)

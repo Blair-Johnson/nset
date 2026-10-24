@@ -14,9 +14,9 @@ pixi run compat-serve --native-url http://127.0.0.1:8080 \
   --data-dir ./compat-data --listen 127.0.0.1:3001
 ```
 
-The gateway itself uses only the Python standard library and the bundled native transport. `pip install ./python` includes `nset_compat`; installed deployments can run `python -m nset_compat` with the same arguments. The official SDKs are test dependencies, not gateway runtime dependencies. Use `--public-url https://tracker.example` behind an HTTPS reverse proxy so returned artifact URLs point to the externally reachable origin. Native URLs must be origins without path prefixes. Startup resolves the configured backend hostname once; request workers use those resolved addresses. Restart the gateway after changing backend DNS.
+The gateway itself uses only the Python standard library and the bundled native transport. `pip install ./python` includes `nset_compat`; installed deployments can run `python -m nset_compat` with the same arguments. The official SDKs are test dependencies, not gateway runtime dependencies. Native URLs must be origins without path prefixes. Startup resolves the configured backend hostname once; request workers use those resolved addresses. Restart the gateway after changing backend DNS.
 
-Only one gateway process may own a compatibility data directory. Its persisted state is bound to the native URL; token rotation and public-URL changes are allowed. Do not point an existing compatibility directory at a different backend or delete it to bypass a retry failure. Request bodies and artifact transfers default to 32 MiB, with 16 bounded handler workers; configure `--max-body-bytes` and `--workers` deliberately. Native metrics still obey their own request/observation limits. Use TLS or a tunnel for remote traffic.
+Only one gateway process may own a compatibility data directory. Its persisted state is bound to the native URL; token rotation and public-URL changes are allowed. Do not point an existing compatibility directory at a different backend or delete it to bypass a retry failure. Request bodies default to 32 MiB, with 16 bounded handler workers; configure `--max-body-bytes` and `--workers` deliberately. Native metrics still obey their own request/observation limits. Use TLS or a tunnel for remote traffic.
 
 ## MLflow
 
@@ -27,13 +27,13 @@ export MLFLOW_TRACKING_URI=http://127.0.0.1:3001
 export MLFLOW_TRACKING_TOKEN="$NSET_TOKEN"
 ```
 
-Verified workflows include `set_experiment`, `start_run`, parameter/tag logging, scalar and batch metric logging, `log_artifact`, completion, run/history lookup, search, artifact listing/download, lifecycle delete/restore, and gateway/backend restart. Parameters are immutable; tags are mutable. Exact overlapping metric observations deduplicate across retries and batches. Latest values use MLflow's step/timestamp/value ordering. Indexed logging and latest-value lookup do not reread full native histories; explicit history retrieval still reads stored observations.
+Verified workflows include `set_experiment`, `start_run`, parameter/tag logging, scalar and batch metric logging, completion, run/history lookup, search, lifecycle delete/restore, and gateway/backend restart. Parameters are immutable; tags are mutable. Exact overlapping metric observations deduplicate across retries and batches. Latest values use MLflow's step/timestamp/value ordering. Indexed logging and latest-value lookup do not reread full native histories; explicit history retrieval still reads stored observations.
 
-Experiments use persistent external numeric IDs, runs use persistent external hexadecimal IDs, and both map to native records. Generic artifacts use managed `mlflow-artifacts:/` locations and retain exact bytes. Search supports a fully consumed AND-separated comparison subset, supported attributes/metrics/params/tags, LIKE/ILIKE, ordering and query-bound continuation tokens. Unsupported expressions fail rather than being partly ignored; pagination is live, not a frozen snapshot across requests.
+Experiments use persistent external numeric IDs, runs use persistent external hexadecimal IDs, and both map to native records. Search supports a fully consumed AND-separated comparison subset, supported attributes/metrics/params/tags, LIKE/ILIKE, ordering and query-bound continuation tokens. Unsupported expressions fail rather than being partly ignored; pagination is live, not a frozen snapshot across requests.
 
-Model registry/logging, datasets/input logging, tracing/evaluation, arbitrary logged-model search, multipart artifact upload and external artifact stores are not implemented. The small read-only logged-model name lookup used by MLflow for generic nested artifacts returns an empty model catalog; model creation is rejected. Framework autologging is not claimed universally compatible, since it can invoke those unsupported APIs. Non-finite values, negative zero, negative or out-of-range steps/timestamps, missing metric timestamps, and names/keys outside native limits are rejected explicitly.
+Artifact upload, listing and download, logged-model APIs, model registry/logging, datasets/input logging, and tracing/evaluation are unsupported and return explicit errors. Framework autologging is not claimed universally compatible, since it can invoke those unsupported APIs. Non-finite values, negative zero, negative or out-of-range steps/timestamps, missing metric timestamps, and names/keys outside native limits are rejected explicitly.
 
-Mapped-run metric writes must go through the MLflow adapter to keep its identity/latest-value index authoritative; read-only use of the native UI is supported. MLflow names, lifecycle and exact status vocabulary live in compatibility metadata. Native display names retain their creation-time name after a rename, and MLflow soft deletion does not remove native observations. Generic image files are artifacts, not automatically native image-chart frames.
+Mapped-run metric writes must go through the MLflow adapter to keep its identity/latest-value index authoritative; read-only use of the native UI is supported. MLflow names, lifecycle and exact status vocabulary live in compatibility metadata. Native display names retain their creation-time name after a rename, and MLflow soft deletion does not remove native observations. Native image logging is separate and remains supported.
 
 ## W&B
 
@@ -45,11 +45,11 @@ export WANDB_API_KEY="$NSET_TOKEN"
 export WANDB_ENTITY=local
 ```
 
-Verified workflows include `wandb.init`, configuration and summary updates, scalar/image logging, console capture, `finish`, `resume="must"` after gateway restart, retry through a native-backend outage, and offline capture followed by official `wandb sync`. Repeated synchronization of the same offline run does not duplicate projected scalar observations. Scalar history is projected into native metrics; accepted raw history, events, output, summary and media are retained rather than silently dropped.
+Verified workflows include `wandb.init`, configuration and summary updates, scalar logging, console capture, `finish`, `resume="must"` after gateway restart, retry through a native-backend outage, and offline capture followed by official `wandb sync`. Repeated synchronization of the same offline run does not duplicate projected scalar observations. Scalar history is projected into native metrics; accepted raw history, events, output and summary are retained rather than silently dropped.
 
-Streams use indexed rows and bounded resume metadata: appending a batch does not reread or serialize the run's accumulated history. The per-request size limit is not a lifetime stream limit. Raw records and metric identities remain on disk; requesting an entire stream larger than the response cap fails explicitly without preventing further ingestion. An older full-array record is converted once with replayable migration state.
+Streams use indexed rows and bounded resume metadata: appending a batch does not reread or serialize the run's accumulated history. The per-request size limit is not a lifetime stream limit. Raw records and metric identities remain on disk.
 
-Run-file uploads and signed downloads preserve image/file bytes. These are not W&B Artifact versioning or registry APIs, and images are not automatically native image-chart frames. Nested/nonrepresentable data remains raw compatibility data rather than a scalar plot. Sweeps, registries, advanced Artifact APIs, full Public API coverage, GraphQL fragments and protobuf file-stream transport are unsupported. Optional SDK analytics may report unauthorized warnings; telemetry is not falsely acknowledged. Unknown protocol operations fail explicitly.
+Run-file, media and Artifact uploads and downloads are unsupported and return explicit errors. The default SDK may report file-upload rejection warnings; tested tracking and completion still succeed. Nested/nonrepresentable data remains raw compatibility data rather than a scalar plot. Sweeps, registries, full Public API coverage, GraphQL fragments and protobuf file-stream transport are unsupported. Optional SDK analytics may report unauthorized warnings; telemetry is not falsely acknowledged. Unknown protocol operations fail explicitly.
 
 ## TensorBoard
 
@@ -70,11 +70,11 @@ The collector requires append-only regular local files. It checkpoints source id
 
 The gateway persists protocol identities and pending operations before native metric delivery. Native durable acceptance and query visibility are distinct, and upstream-client buffering/retry behavior still matters before acceptance. Retain W&B offline files and TensorBoard source/state data until delivery is confirmed. MLflow logging failures are visible exceptions, not proof that no data reached the service. See `docs/durable-ingestion.md` for the receipt contract, local outbox, configurable concurrency, monitoring and coordinated backup.
 
-Stop the services before copying the complete native data directory, gateway SQLite/WAL/blob directory and collector state. Pending limits do not bound total disk usage; receipts, indexed identities, raw records and artifacts require monitoring and have no automatic retention/garbage collection policy. Do not mix independently timed backups of query and journal databases.
+Stop the services before copying the complete native data directory, gateway SQLite/WAL directory and collector state. Pending limits do not bound total disk usage; receipts, indexed identities, raw records and native images require monitoring and have no automatic retention/garbage collection policy. Do not mix independently timed backups of query and journal databases.
 
 ```sh
 pixi install -e compat --locked
 NSET_WANDB_SDK_TEST=1 pixi run -e compat compat-test
 ```
 
-The SDK gate exercises real official clients over HTTP, exact artifact/native-metric readback, restart and failure recovery. `docs/durable-ingestion-evidence.md` records the separate scalar delivery probes, including one million verified points across 32 runs and eight experiments. Those probes do not establish a production SLA or the throughput of every compatibility operation.
+The SDK gate exercises real official clients over HTTP, explicit upload rejection, exact native-metric readback, restart and failure recovery. `docs/durable-ingestion-evidence.md` records the separate scalar delivery probes, including one million verified points across 32 runs and eight experiments. Those probes do not establish a production SLA or the throughput of every compatibility operation.
