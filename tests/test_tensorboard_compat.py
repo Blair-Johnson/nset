@@ -8,6 +8,7 @@ import base64
 import importlib.util
 import json
 import os
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -16,6 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "python"))
 
 from nset_client.transport import Transport
 from nset_compat.tensorboard import Collector, SourceChanged, _frames
@@ -63,6 +68,7 @@ class FakeNative:
         self.lose_put = False
         self.reject_put = False
         self.lose_run = False
+        self.receipt_transform = lambda receipt: receipt
 
     def request(self, method, path, payload=None, **kwargs):
         self.calls.append((method, path, payload))
@@ -86,7 +92,8 @@ class FakeNative:
             if self.lose_put:
                 self.lose_put = False
                 raise ConnectionError("lost durable response")
-            return {"state": "accepted"}
+            return self.receipt_transform({"run_id": path.split("/")[3], "batch_id": path.split("/")[-1],
+                "state": "pending", "accepted": len(payload["metrics"]), "accepted_at": 1234500})
         raise AssertionError((method, path))
 
     @property
@@ -170,6 +177,85 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(puts, [first_put, first_put])
         self.assertEqual(len(self.native.metrics), 1)
         self.assertFalse(any(path.endswith("/metrics") for _, path, _ in self.native.calls))
+
+    def test_malformed_receipts_keep_checkpoint_and_replay_identical_batch(self):
+        path = write_events(self.root, [event(simple())])
+        with path.open("rb") as stream:
+            checkpoint = list(_frames(stream, 0))[-1][0]
+        mutations = [("non-object", lambda receipt, value=value: value)
+                     for value in (None, [], "ok", True, 1)]
+        for key in ("run_id", "batch_id", "state", "accepted", "accepted_at"):
+            mutations.append((f"missing-{key}",
+                              lambda receipt, key=key: {k: v for k, v in receipt.items() if k != key}))
+        bad_values = {
+            "run_id": ["other-run", None, 1],
+            "batch_id": ["other-batch", None, 1],
+            "state": ["accepted", "failed", None, []],
+            "accepted": [0, 2, -1, 9007199254740992, True, 1.0, "1", None],
+            "accepted_at": [-1, 9007199254740992, True, 1.0, "1", None],
+        }
+        for key, values in bad_values.items():
+            for value in values:
+                mutations.append((f"{key}={value!r}",
+                                  lambda receipt, key=key, value=value: dict(receipt, **{key: value})))
+        for index, (label, mutate) in enumerate(mutations):
+            with self.subTest(receipt=label):
+                self.state = Path(self.temp.name) / f"state-{index}"
+                self.native = FakeNative()
+                self.native.receipt_transform = mutate
+                with self.collector() as collector:
+                    with self.assertRaisesRegex(RuntimeError, "invalid durable ingest receipt"):
+                        collector.scan()
+                    self.assertEqual(collector.db.execute("SELECT offset FROM files").fetchone()[0], checkpoint)
+                    self.assertEqual(collector.counts()["accepted_batches"], 0)
+                    self.assertEqual(collector.db.execute("SELECT count(*) FROM events WHERE done=0").fetchone()[0], 1)
+                self.native.receipt_transform = lambda receipt: receipt
+                with self.collector() as collector:
+                    collector.scan()
+                    self.assertEqual(collector.db.execute("SELECT offset FROM files").fetchone()[0], path.stat().st_size)
+                    self.assertEqual(collector.counts()["accepted_batches"], 1)
+                puts = [call for call in self.native.calls if call[0] == "PUT"]
+                self.assertEqual(len(puts), 2)
+                self.assertEqual(puts[0], puts[1])
+                self.assertEqual(len(self.native.metrics), 1)
+
+    def test_pending_and_applied_receipts_accept_safe_timestamp_boundaries(self):
+        write_events(self.root, [event(simple())])
+        for state in ("pending", "applied"):
+            for accepted_at in (0, 9007199254740991):
+                with self.subTest(state=state, accepted_at=accepted_at):
+                    self.state = Path(self.temp.name) / f"{state}-{accepted_at}"
+                    self.native = FakeNative()
+                    self.native.receipt_transform = lambda receipt: dict(
+                        receipt, state=state, accepted_at=accepted_at)
+                    with self.collector() as collector:
+                        self.assertEqual(collector.scan()["accepted_batches"], 1)
+
+    def test_pending_indexes_migrate_existing_history_and_serve_drain_queries(self):
+        write_events(self.root, [event(simple(), step=step) for step in range(50)])
+        with self.collector() as collector:
+            counts = collector.scan()
+            # Simulate a pre-index database without changing preserved history.
+            collector.db.executescript("DROP INDEX events_pending; DROP INDEX batches_pending;")
+        with self.collector() as collector:
+            queries = [
+                ("SELECT * FROM events WHERE done=0 ORDER BY rowid", (), "events_pending"),
+                ("SELECT * FROM batches WHERE event_id=? AND accepted=0 ORDER BY rowid",
+                 ("event-id",), "batches_pending"),
+            ]
+            for query, params, index in queries:
+                with self.subTest(index=index):
+                    plan = " ".join(row[3] for row in collector.db.execute("EXPLAIN QUERY PLAN " + query, params))
+                    self.assertIn(index, plan)
+                    self.assertNotIn("TEMP B-TREE", plan)
+                    definition = collector.db.execute(
+                        "SELECT sql FROM sqlite_master WHERE name=?", (index,)).fetchone()[0]
+                    self.assertIn("WHERE", definition)
+            self.assertEqual(collector.scan(), counts)
+        # Index creation is idempotent on subsequent opens too.
+        with self.collector() as collector:
+            self.assertEqual(collector.scan(), counts)
+        self.assertEqual(len(self.native.metrics), 50)
 
     def test_outbox_survives_missing_source(self):
         path = write_events(self.root, [event(simple())])
@@ -345,9 +431,13 @@ class CollectorTests(unittest.TestCase):
             command = [sys.executable, "-m", "nset_compat.tensorboard", "--logdir", str(self.root),
                        "--url", f"http://127.0.0.1:{server.server_port}", "--state-dir", str(self.state)]
             env = dict(os.environ, NSET_TOKEN="cli-test-token")
-            first = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, (
+                str(ROOT / "python"), env.get("PYTHONPATH"))))
+            first = subprocess.run(command, env=env, cwd=self.temp.name,
+                                   capture_output=True, text=True, timeout=30)
             self.assertNotEqual(first.returncode, 0)
-            second = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+            second = subprocess.run(command, env=env, cwd=self.temp.name,
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(len(native.metrics), 1)
             self.assertEqual(len(native.runs), 1)
@@ -359,6 +449,45 @@ class CollectorTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(timeout=5)
+
+    def test_failed_initialization_closes_database_and_releases_lock(self):
+        connect = sqlite3.connect
+        connections = []
+
+        def tracked_connect(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+
+        with self.collector():
+            pass
+        for target, error in (
+            ("nset_compat.tensorboard.Collector._meta", ValueError("invalid config")),
+            ("nset_compat.tensorboard.Collector._meta", KeyboardInterrupt()),
+            ("nset_compat.tensorboard.os.fsync", OSError("fsync failed")),
+            ("nset_compat.tensorboard.os.fsync", KeyboardInterrupt()),
+        ):
+            with self.subTest(target=target, error=type(error).__name__):
+                with mock.patch("nset_compat.tensorboard.sqlite3.connect", side_effect=tracked_connect), \
+                        mock.patch(target, side_effect=error):
+                    with self.assertRaises(type(error)):
+                        self.collector()
+                with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                    connections[-1].execute("SELECT 1")
+                with self.collector():
+                    pass
+
+    def test_initialization_before_database_open_releases_lock(self):
+        for target, error in (
+            ("nset_compat.tensorboard.sqlite3.connect", sqlite3.OperationalError("open failed")),
+            ("fcntl.flock", KeyboardInterrupt()),
+        ):
+            with self.subTest(target=target):
+                with mock.patch(target, side_effect=error):
+                    with self.assertRaises(type(error)):
+                        self.collector()
+                with self.collector() as collector:
+                    collector.close()  # close remains idempotent, including context exit.
 
     def test_state_configuration_and_concurrent_writer_rejected(self):
         with self.collector():

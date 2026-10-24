@@ -165,13 +165,12 @@ class Collector:
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.lock = open(self.state_dir / "collector.lock", "a+b")
-        try:
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.lock.close()
-            raise RuntimeError("state directory already has an active collector") from None
         self.db = None
         try:
+            try:
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise RuntimeError("state directory already has an active collector") from None
             self.http = transport or Transport(url, token)
             self.db = sqlite3.connect(self.state_dir / "state.sqlite3")
             self.db.row_factory = sqlite3.Row
@@ -191,6 +190,10 @@ class Collector:
                 CREATE TABLE IF NOT EXISTS artifacts(event_id TEXT NOT NULL,ordinal INTEGER NOT NULL,
                     image_index INTEGER NOT NULL,tag TEXT NOT NULL,data BLOB NOT NULL,
                     PRIMARY KEY(event_id,ordinal,image_index));
+                -- Also migrate existing state: drain only pending rows, not all history.
+                -- Equal index keys retain rowid order for the queries below.
+                CREATE INDEX IF NOT EXISTS events_pending ON events(done) WHERE done=0;
+                CREATE INDEX IF NOT EXISTS batches_pending ON batches(event_id) WHERE accepted=0;
             """)
             config = {"logdir": str(self.root), "url": url.rstrip("/"), "experiment": experiment,
                       "version": 1}
@@ -210,15 +213,17 @@ class Collector:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
     def close(self):
-        if self.db is not None:
-            self.db.close()
+        try:
+            if self.db is not None:
+                self.db.close()
+        finally:
             self.db = None
-        self.lock.close()
+            self.lock.close()
 
     def __enter__(self):
         return self
@@ -268,8 +273,19 @@ class Collector:
                                       (event["id"],)).fetchall()
             for batch in batches:
                 # No POST fallback: old servers must fail without moving the checkpoint.
-                self.http.request("PUT", f"/api/runs/{quote(batch['run_id'], safe='')}/ingest/{batch['id']}",
-                                  json.loads(batch["payload"]))
+                payload = json.loads(batch["payload"])
+                receipt = self.http.request(
+                    "PUT", f"/api/runs/{quote(batch['run_id'], safe='')}/ingest/{batch['id']}", payload)
+                if (not isinstance(receipt, dict)
+                        or receipt.get("run_id") != batch["run_id"]
+                        or receipt.get("batch_id") != batch["id"]
+                        or receipt.get("state") not in ("pending", "applied")
+                        or type(receipt.get("accepted")) is not int
+                        or receipt["accepted"] != len(payload["metrics"])
+                        or not 0 <= receipt["accepted"] <= SAFE_INT
+                        or type(receipt.get("accepted_at")) is not int
+                        or not 0 <= receipt["accepted_at"] <= SAFE_INT):
+                    raise RuntimeError("invalid durable ingest receipt; batch remains pending")
                 with self.db:
                     self.db.execute("UPDATE batches SET accepted=1 WHERE id=?", (batch["id"],))
             with self.db:
