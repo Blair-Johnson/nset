@@ -5,13 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nset-client"
 version = "0.1.0"
-description = "Native producer client and optional TensorBoard collector for nset"
+description = "Native producer client for nset"
 requires-python = ">=3.10"
 dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nset_client*", "nset_compat*"]
-
-[project.optional-dependencies]
-tensorboard = ["tensorboard>=2,<3"]
+include = ["nset_client*"]

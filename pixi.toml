@@ -21,7 +21,6 @@ verify = { depends-on = ["check", "api-test", "format-check"] }
 preview = { cmd = "python scripts/preview.py", depends-on = ["build"] }
 benchmark = { cmd = "python scripts/benchmark.py", depends-on = ["build"], env = { NSET_BINARY = "target/release/nset" } }
 compat-test = { cmd = "python -W error::ResourceWarning -m unittest discover -s tests -p 'test_*.py'", depends-on = ["server-debug"], env = { PYTHONPATH = "python", NSET_BINARY = "target/debug/nset", NSET_WANDB_SDK_TEST = "1" } }
-tensorboard-ingest = { cmd = "python -m nset_compat.tensorboard", env = { PYTHONPATH = "python" } }
 
 [dependencies]
 rust = ">=1.85,<2"
@@ -31,7 +30,6 @@ python = ">=3.12,<3.14"
 [feature.compat.pypi-dependencies]
 mlflow-skinny = ">=3, <4"
 wandb = ">=0.20, <1"
-tensorboard = ">=2, <3"
 pillow = "*"
 
 [environments]

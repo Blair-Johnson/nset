@@ -19,7 +19,7 @@ pixi install -e compat --locked
 pixi run -e compat compat-test
 ```
 
-This enables the W&B SDK cases alongside MLflow and TensorBoard checks. Inspect test output for skipped cases when running a smaller environment.
+This enables the W&B SDK cases alongside MLflow checks. Inspect test output for skipped cases when running a smaller environment.
 
 For browser fixtures:
 

@@ -65,24 +65,11 @@ Supported workflows include `wandb.init`, configuration and summary updates, sca
 
 W&B file, media, and Artifact uploads/downloads, sweeps, registries, full Public API coverage, GraphQL fragments, and protobuf file-stream transport are unsupported. Normal SDK tracking may emit file-upload rejection warnings. Log images with the native client.
 
-These adapters implement a scoped tracking subset. The locked SDK test environment uses mlflow-skinny 3.17.2, W&B 0.31.0, and TensorBoard 2.21.0; other versions need validation. See [development checks](contributing.md#checks).
-
-## TensorBoard event files
-
-On Linux or macOS, install `pip install './python[tensorboard]'` from the checkout where the event files are accessible, then run:
-
-```sh
-python -m nset_compat.tensorboard --logdir ./training-logs \
-  --url http://127.0.0.1:8080 --state-dir ./tensorboard-state --watch
-```
-
-The collector reads `NSET_TOKEN` and maps each relative log directory to a native run. It sends legacy `simple_value` and real rank-zero tensor scalars, converting wall time to milliseconds. Images and other non-scalar records are preserved locally with warnings and counts; they do not become native image panels. Restarted steps append to native history.
-
-Keep event files append-only and retain them with collector state until delivery is confirmed. State is bound to its log directory, destination, and experiment. Truncation or rewriting stops collection; preserve state when investigating failures. Each scan verifies the processed file prefixes, so scan cost grows with log size.
+These adapters implement a scoped tracking subset. The locked SDK test environment uses mlflow-skinny 3.17.2 and W&B 0.31.0; other versions need validation. See [development checks](contributing.md#checks).
 
 ## Server storage and recovery
 
-Keep the `--db-path` directory on local storage. Stop the server before backing up the whole directory together: `nset.sqlite3`, `ingest.sqlite3`, native images, `nset.lock`, and any SQLite WAL/SHM sidecars. Restore them from the same backup. Producer outboxes, W&B offline runs, and TensorBoard source/state also need retention until delivery is confirmed.
+Keep the `--db-path` directory on local storage. Stop the server before backing up the whole directory together: `nset.sqlite3`, `ingest.sqlite3`, native images, `nset.lock`, and any SQLite WAL/SHM sidecars. Restore them from the same backup. Producer outboxes and W&B offline runs also need retention until delivery is confirmed.
 
 Authenticated `GET /api/ingest/status` reports pending batches/bytes and the last projection error. A damaged batch remains pending and blocks later projection; preserve the databases while investigating. Capacity errors retain accepted batches. Retry temporary delivery failures with stable identities and backoff, honoring `Retry-After`; an HTTP error can follow acceptance. Compatibility operations split into native chunks, so a large operation can become partially visible before completion.
 
