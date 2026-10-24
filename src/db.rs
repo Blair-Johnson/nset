@@ -1,4 +1,4 @@
-//! SQLite never runs on an async executor. One writer and two read-only actors,
+//! SQLite never runs on an async executor. One writer and configurable read-only actors,
 //! each with a bounded queue, own their connections for their entire lifetime.
 use crate::{
     errors::{ApiError, Result},
@@ -23,8 +23,8 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
 struct Actor(mpsc::Sender<Job>);
 impl Actor {
-    fn start(mut connection: Connection, name: &str) -> Result<Self> {
-        let (tx, mut rx) = mpsc::channel::<Job>(64);
+    fn start(mut connection: Connection, name: &str, queue_capacity: usize) -> Result<Self> {
+        let (tx, mut rx) = mpsc::channel::<Job>(queue_capacity);
         std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
@@ -169,6 +169,16 @@ fn sync_image_directory(directory: &Path) -> std::io::Result<()> {
 
 impl Database {
     pub fn open(directory: &Path) -> Result<Self> {
+        let defaults = crate::config::ConcurrencyOptions::default();
+        Self::open_with_options(directory, defaults.read_workers, defaults.db_queue_capacity)
+    }
+
+    pub fn open_with_options(
+        directory: &Path,
+        read_workers: usize,
+        queue_capacity: usize,
+    ) -> Result<Self> {
+        crate::config::validate_database_options(read_workers, queue_capacity)?;
         std::fs::create_dir_all(directory)?;
         let path = directory.join("nset.sqlite3");
         let mut connection = Connection::open(&path)?;
@@ -181,15 +191,16 @@ impl Database {
         initialize_schema(&mut connection)?;
         let images = directory.join("images");
         std::fs::create_dir_all(&images)?;
-        let writer = Actor::start(connection, "nset-sqlite-writer")?;
+        let writer = Actor::start(connection, "nset-sqlite-writer", queue_capacity)?;
         let mut readers = Vec::new();
-        for i in 0..2 {
+        for i in 0..read_workers {
             let connection =
                 Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             setup(&connection)?;
             readers.push(Actor::start(
                 connection,
                 &format!("nset-sqlite-reader-{i}"),
+                queue_capacity,
             )?);
         }
         Ok(Self {
@@ -199,6 +210,18 @@ impl Database {
             images: Arc::new(images),
         })
     }
+    /// Configured queue capacities: the single writer, then each read-only actor.
+    /// Counts exclude executing jobs and do not change as queues fill or drain.
+    pub fn queue_capacities(&self) -> (usize, Vec<usize>) {
+        (
+            self.writer.0.max_capacity(),
+            self.readers
+                .iter()
+                .map(|reader| reader.0.max_capacity())
+                .collect(),
+        )
+    }
+
     fn reader(&self) -> &Actor {
         &self.readers[self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len()]
     }

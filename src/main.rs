@@ -1,7 +1,6 @@
 use clap::Parser;
 use nset::{AppState, api, config::Config};
-#[tokio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -9,14 +8,32 @@ async fn main() {
         )
         .init();
     let config = Config::parse();
-    if let Err(error) = serve(config).await {
+    if let Err(error) = run(config) {
         eprintln!("nset: {}", error.1);
         std::process::exit(1);
     }
 }
+fn run(config: Config) -> nset::errors::Result<()> {
+    config.concurrency.validate()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.concurrency.http_workers)
+        .enable_all()
+        .build()?;
+    runtime.block_on(serve(config))
+}
+
 async fn serve(config: Config) -> nset::errors::Result<()> {
     let token = config.load_token()?;
-    let state = AppState::open(&config.data_dir, token)?;
+    let state = AppState::open_with_options(&config.data_dir, token, &config.concurrency)?;
+    tracing::info!(
+        http_workers = config.concurrency.http_workers,
+        read_workers = config.concurrency.read_workers,
+        db_queue_capacity = config.concurrency.db_queue_capacity,
+        write_concurrency = config.concurrency.write_concurrency,
+        image_concurrency = config.concurrency.image_concurrency,
+        sqlite_writers = 1,
+        "resolved concurrency"
+    );
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     // Register SIGTERM before reporting readiness; non-Unix platforms use Ctrl-C.
     #[cfg(unix)]
