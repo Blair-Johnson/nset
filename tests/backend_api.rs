@@ -152,9 +152,7 @@ async fn experiments_and_runs_merge_objects_and_persist() {
     assert_eq!(run["tags"], json!({"owner":"me","note":"done"}));
     assert_eq!(run["status"], "finished");
     // A null tag value removes that tag; other tags are untouched.
-    let (status, untagged) = app
-        .json("PATCH", &url, json!({"tags":{"note":null}}))
-        .await;
+    let (status, untagged) = app.json("PATCH", &url, json!({"tags":{"note":null}})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(untagged["tags"], json!({"owner":"me"}));
     let (_, run) = app
@@ -771,9 +769,7 @@ async fn concurrent_writers_and_readers_keep_every_observation() {
     let mut tasks = Vec::new();
     // Keep the integrity workload within admission capacity. Saturation and
     // fail-fast rejection are exercised independently in backend_admission.
-    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(
-        nset::config::MAX_ACTIVE_WRITES,
-    ));
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(nset::config::MAX_ACTIVE_WRITES));
     for batch in 0..20 {
         let router = app.app.clone();
         let id = id.clone();

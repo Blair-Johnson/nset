@@ -1,5 +1,6 @@
 """Pure native outbox tests: mock transport, real disposable SQLite, no server."""
 import concurrent.futures
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -41,7 +42,7 @@ class OutboxTests(unittest.TestCase):
         return box
 
     def rows(self):
-        with sqlite3.connect(self.path) as db:
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
             return db.execute("SELECT run_id,batch_id,payload FROM outbox_pending ORDER BY id").fetchall()
 
     def test_offline_commit_reopen_and_credentials_not_stored(self):
@@ -256,11 +257,11 @@ class OutboxTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaisesRegex(ValueError, "destination"):
                 DurableOutbox(Client(url, token="another"), self.path)
         self.assertEqual(self.rows(), original)
-        with sqlite3.connect(self.path) as db:
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
             db.execute("PRAGMA user_version=99")
         with self.assertRaisesRegex(ValueError, "schema"):
             self.box()
-        with sqlite3.connect(self.path) as db:
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (99,))
         self.assertEqual(self.rows(), original)
 

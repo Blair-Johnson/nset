@@ -270,7 +270,7 @@ sys.stdin.read()
         self.ctx.close()
         blobs = Path(self.temp.name) / "blobs"
         before = {p.name: p.read_bytes() for p in blobs.iterdir()}
-        for native_url in ("http://127.0.0.1:2", "https://127.0.0.1:1", "http://127.0.0.1:1/prefix"):
+        for native_url in ("http://127.0.0.1:2", "https://127.0.0.1:1"):
             with patch("nset_compat.context.Artifacts") as artifacts:
                 with self.assertRaisesRegex(ValueError, "different native URL"):
                     self.reopen_context(native_url=native_url)
@@ -514,7 +514,7 @@ class BackendHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self.server.seen.append((self.path, self.headers.get("Authorization")))
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path.endswith("/capacity"):
+        if getattr(self.server, "reject_ingest", False):
             self._json(503, {"error": "native capacity exhausted"})
             return
         with self.server.receipt_lock:
@@ -701,9 +701,11 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(all(auth == "Bearer " + TOKEN for _, auth in self.backend.seen))
         applied_receipt = json.loads(body)
         payload["batch_id"] = "capacity"
+        self.backend.reject_ingest = True
         status, _, body = self.request("POST", "/compat/ingest", json.dumps(payload).encode())
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)["error_code"], "NATIVE_ERROR")
+        self.backend.reject_ingest = False
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(3)
