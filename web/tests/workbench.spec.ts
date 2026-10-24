@@ -469,7 +469,7 @@ test("native run-filter paths and values still complete with direct Tab", async 
   page,
 }) => {
   await fixture(page);
-  await page.getByRole("button", { name: "Vision study", exact: true }).click();
+  await charts(page);
   await page
     .getByLabel("Filter runs by config or tags", { exact: true })
     .click();
@@ -487,5 +487,5 @@ test("native run-filter paths and values still complete with direct Tab", async 
   await expect(value).toHaveValue("resnet");
   await value.press("Shift+Tab");
   await expect(value).not.toBeFocused();
-  await expect(page.locator(".run-table tbody tr")).toHaveCount(2);
+  await expect(page.locator(".run-filter-count")).toContainText("2 match");
 });
