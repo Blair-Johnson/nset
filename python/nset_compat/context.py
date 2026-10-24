@@ -12,7 +12,7 @@ import time
 from urllib.parse import quote, urlencode, urlsplit, unquote
 import weakref
 
-from nset_client.transport import Transport
+from .upstream import NativeTransport as Transport
 from .common import ProtocolError
 
 MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -408,9 +408,14 @@ class CompatContext:
     def close(self):
         with self._close_lock:
             try:
-                if self.state is not None:
-                    self.state.close()
+                close_native = getattr(self.native, "close", None)
+                if close_native is not None:
+                    close_native()
             finally:
-                if self._directory_lock is not None:
-                    self._directory_lock.close()
-                    self._directory_lock = None
+                try:
+                    if self.state is not None:
+                        self.state.close()
+                finally:
+                    if self._directory_lock is not None:
+                        self._directory_lock.close()
+                        self._directory_lock = None
