@@ -9,10 +9,42 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples"))
+import nset_client
 from nset_client import Client, DeliveryError
+
+
+def isolated_env(home):
+    """Subprocesses use the same installed package, never a source path override."""
+    env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(home / "state"),
+               LOCALAPPDATA=str(home / "local"))
+    env.pop("PYTHONPATH", None)
+    env["NSET_TEST_CLIENT_SOURCE"] = str(Path(nset_client.__file__).resolve())
+    return env
+
+
+class IsolatedClientTestCase(unittest.TestCase):
+    """Protect user spools even when transport receipts are globally mocked."""
+    def setUp(self):
+        self.client_home = tempfile.TemporaryDirectory(prefix="nset-client-test-")
+        self.addCleanup(self.client_home.cleanup)
+        patcher = patch.dict(os.environ, isolated_env(Path(self.client_home.name)), clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.clients = []
+        self.addCleanup(self.close_clients)
+
+    def client(self, *args, **kwargs):
+        client = Client(*args, **kwargs)
+        self.clients.append(client)
+        return client
+
+    def close_clients(self):
+        for client in self.clients:
+            client.close(timeout=1)
 
 
 class Server:

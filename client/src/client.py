@@ -101,6 +101,46 @@ class Client:
                 self._outbox = DurableOutbox(self, self.spool_path, _automatic=True)
             return self._outbox
 
+    def _attach_existing(self, deadline):
+        # Caller owns the lifecycle lock. Opening SQLite can sync/checkpoint;
+        # a late result must be closed by its helper, not strand a connection
+        # or extend a bounded flush/close on the caller's thread.
+        if self.http.url != self._destination:
+            raise ValueError("destination changed; create a new Client for the new URL")
+        ready, gate = threading.Event(), threading.Lock()
+        result = []
+        abandoned = False
+
+        def attach():
+            box, error = None, None
+            try:
+                _private_spool(self.spool_path)
+                box = DurableOutbox(self, self.spool_path, _automatic=True, _deadline=deadline)
+            except BaseException as caught:
+                error = caught
+            with gate:
+                if not abandoned:
+                    result.append((box, error))
+                    ready.set()
+                    return
+            if box is not None:
+                box.close()
+
+        threading.Thread(target=attach, name="nset-open", daemon=True).start()
+        try:
+            ready.wait(max(0, deadline - time.monotonic()))
+        finally:
+            with gate:
+                if result:
+                    self._outbox, error = result[0]
+                else:
+                    abandoned = True
+        if not result:
+            raise DeliveryTimeoutError(str(self.spool_path))
+        if error is not None:
+            raise error
+        return self._outbox
+
     def _log_batch(self, run_id, metrics):
         self._check_open()
         with self._lock:
@@ -127,6 +167,8 @@ class Client:
         with _locked(self._lock, deadline, self.spool_path):
             self._check_open()
             box = self._outbox
+            if box is None and self.spool_path.exists():
+                box = self._attach_existing(deadline)
         if box is not None:
             box._wait(max(0, deadline - time.monotonic()), run_id)
 
@@ -139,9 +181,14 @@ class Client:
         with _locked(self._lock, deadline, self.spool_path):
             if self._closed:
                 if self._close_done.is_set():
+                    # Retry cleanup if thread creation previously failed.
+                    if self._outbox is not None and not self._outbox._closed:
+                        self._outbox._shutdown(max(0, deadline - time.monotonic()))
                     return
                 owner = False
             else:
+                if self._outbox is None and self.spool_path.exists():
+                    self._attach_existing(deadline)
                 self._closed = True
                 owner = True
             box = self._outbox
@@ -155,7 +202,14 @@ class Client:
             if box is not None:
                 try:
                     box._wait(max(0, deadline - time.monotonic()))
-                finally:
+                except BaseException as error:
+                    try:
+                        box._shutdown(max(0, deadline - time.monotonic()))
+                    except Exception as cleanup_error:
+                        if hasattr(error, "add_note"):
+                            error.add_note(f"Scalar cleanup also failed: {cleanup_error}")
+                    raise
+                else:
                     box._shutdown(max(0, deadline - time.monotonic()))
         except BaseException as error:
             self._close_error = error

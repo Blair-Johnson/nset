@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from support import ROOT, Server
+from support import Server, isolated_env
 from nset_client import (APIError, Client, DeliveryError, DeliveryTimeoutError,
                          OutboxFullError, Run)
 from test_outbox import receipt
@@ -36,6 +36,10 @@ class DefaultDeliveryTests(unittest.TestCase):
         patcher = patch("nset_client.client._spool_path", side_effect=lambda url: private_path(self.temp.name, url))
         patcher.start()
         self.addCleanup(patcher.stop)
+        transport = patch("nset_client.outbox.Transport.request",
+                          side_effect=OSError("unit-test transport disabled"))
+        transport.start()
+        self.addCleanup(transport.stop)
         self.clients = []
         self.addCleanup(self.cleanup_clients)
 
@@ -223,6 +227,182 @@ class DefaultDeliveryTests(unittest.TestCase):
                 client.flush(timeout=5)
             self.assertEqual(pending(clients[0].spool_path), [])
 
+    def test_nonwriting_client_discovers_later_spool_at_flush_and_close(self):
+        for operation in ("flush", "close"):
+            with self.subTest(operation=operation):
+                url = f"http://late-{operation}"
+                reader, writer = self.client(url=url), self.client(url=url)
+                with patch("nset_client.outbox.DurableOutbox.start"):
+                    Run(writer, {"id": "run"}).log_metrics({"v": 1}, step=0)
+                    with self.assertRaises(DeliveryTimeoutError):
+                        writer.close(timeout=0)
+                self.assertIsNone(reader._outbox)
+                before = pending(reader.spool_path)
+                with patch("nset_client.outbox.Transport.request", side_effect=receipt) as send:
+                    getattr(reader, operation)(timeout=2)
+                    self.assertEqual(send.call_args.kwargs["raw"], before[0][2])
+                    self.assertEqual(pending(reader.spool_path), [])
+
+    def test_nonwriting_waits_report_later_spool_outage(self):
+        for operation in ("flush", "close"):
+            with self.subTest(operation=operation):
+                url = f"http://late-offline-{operation}"
+                reader, writer = self.client(url=url), self.client(url=url)
+                with patch("nset_client.outbox.DurableOutbox.start"):
+                    Run(writer, {"id": "run"}).log_metrics({"v": 1}, step=0)
+                    with self.assertRaises(DeliveryTimeoutError):
+                        writer.close(timeout=0)
+                with patch("nset_client.outbox.Transport.request", side_effect=OSError("offline")):
+                    with self.assertRaises(DeliveryTimeoutError):
+                        getattr(reader, operation)(timeout=.02)
+                    self.assertEqual(len(pending(reader.spool_path)), 1)
+                    with contextlib.suppress(DeliveryError):
+                        reader.close(timeout=0)
+
+    def test_late_spool_attachment_respects_shared_lock_deadline(self):
+        reader, writer = self.client(), self.client()
+        box = writer._delivery()
+        entered, release = threading.Event(), threading.Event()
+        def hold():
+            with box._state.lock:
+                entered.set()
+                release.wait(3)
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            start = time.monotonic()
+            with self.assertRaises(DeliveryTimeoutError):
+                reader.flush(timeout=.02)
+            self.assertLess(time.monotonic() - start, .5)
+        finally:
+            release.set()
+            thread.join(2)
+
+    def test_late_spool_fsync_does_not_block_flush_or_close(self):
+        from nset_client.client import _sync_directory
+        from nset_client.outbox import DurableOutbox
+        for operation in ("flush", "close"):
+            with self.subTest(operation=operation):
+                url = f"http://blocked-open-{operation}"
+                reader, writer = self.client(url=url), self.client(url=url)
+                box = writer._delivery()
+                box.enqueue("run", [{"key": "v", "step": 0, "value": 1}])
+                before = pending(writer.spool_path)
+                entered, release, opened = threading.Event(), threading.Event(), threading.Event()
+                attachments = []
+                def sync(path):
+                    entered.set()
+                    release.wait(3)
+                    _sync_directory(path)
+                def create(*args, **kwargs):
+                    attached = DurableOutbox(*args, **kwargs)
+                    attachments.append(attached)
+                    opened.set()
+                    return attached
+                with patch("nset_client.client._sync_directory", side_effect=sync), \
+                     patch("nset_client.client.DurableOutbox", side_effect=create):
+                    try:
+                        start = time.monotonic()
+                        with self.assertRaises(DeliveryTimeoutError):
+                            getattr(reader, operation)(timeout=.05)
+                        self.assertLess(time.monotonic() - start, .5)
+                        self.assertTrue(entered.is_set())
+                        self.assertIsNone(reader._outbox)
+                    finally:
+                        release.set()
+                    self.assertTrue(opened.wait(2))
+                    deadline = time.monotonic() + 2
+                    while not attachments[0]._closed and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(attachments[0]._closed)
+                self.assertEqual(pending(writer.spool_path), before)
+
+    def test_cleanup_start_failure_detaches_claim_and_preserves_delivery_error(self):
+        client = self.client()
+        box = client._delivery()
+        entered, release = threading.Event(), threading.Event()
+        replayed, finish_replay = threading.Event(), threading.Event()
+        original_start = threading.Thread.start
+        def start(thread):
+            if thread.name == "nset-close":
+                raise RuntimeError("cleanup unavailable")
+            return original_start(thread)
+        def stuck(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            raise OSError("old request failed")
+        def replay(*args, **kwargs):
+            replayed.set()
+            finish_replay.wait(5)
+            return receipt(*args, **kwargs)
+        with patch.object(box._http, "request", side_effect=stuck):
+            try:
+                Run(client, {"id": "run"}).log_metrics({"v": 1}, step=0)
+                self.assertTrue(entered.wait(2))
+                before = pending(client.spool_path)
+                with patch("threading.Thread.start", new=start):
+                    with self.assertRaises(DeliveryTimeoutError) as caught:
+                        client.close(timeout=.02)
+                if hasattr(caught.exception, "__notes__"):
+                    self.assertIn("cleanup unavailable", caught.exception.__notes__[0])
+                with patch("nset_client.outbox.Transport.request", side_effect=replay) as send:
+                    restored = self.client()
+                    self.assertTrue(replayed.wait(2))
+                    with box._state.lock:
+                        claims = dict(box._state.claims)
+                    release.set()
+                    deadline = time.monotonic() + 2
+                    while not box._closed and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(box._closed)
+                    with box._state.lock:
+                        self.assertEqual(box._state.claims, claims)
+                    self.assertEqual(send.call_args.kwargs["raw"], before[0][2])
+                    finish_replay.set()
+                    restored.flush(timeout=2)
+                    self.assertEqual(pending(client.spool_path), [])
+            finally:
+                release.set()
+                finish_replay.set()
+
+    def test_cleanup_start_failure_can_be_retried_without_active_worker(self):
+        client = self.client()
+        box = client._delivery()
+        with patch("threading.Thread.start", side_effect=RuntimeError("cleanup unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "cleanup unavailable"):
+                client.close(timeout=.02)
+        self.assertFalse(box._closed)
+        client.close(timeout=2)
+        self.assertTrue(box._closed)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "fork unavailable")
+    def test_fresh_child_client_recovers_with_parent_delivery_active(self):
+        client = self.client()
+        entered, release = threading.Event(), threading.Event()
+        def stuck(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            raise OSError("parent offline")
+        with patch("nset_client.outbox.Transport.request", side_effect=stuck):
+            try:
+                Run(client, {"id": "run"}).log_metrics({"v": 1}, step=0)
+                self.assertTrue(entered.wait(2))
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        with patch("nset_client.outbox.Transport.request", side_effect=receipt):
+                            with Client(client.http.url, token="child", flush_timeout=2) as fresh:
+                                fresh.flush(timeout=2)
+                        os._exit(0)
+                    except BaseException:
+                        os._exit(1)
+                _, status = os.waitpid(pid, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+                self.assertEqual(pending(client.spool_path), [])
+            finally:
+                release.set()
+
     def test_interrupted_close_still_stops_worker_and_retains_data(self):
         client = self.client()
         with patch("nset_client.outbox.Transport.request", side_effect=OSError("offline")):
@@ -400,6 +580,9 @@ class DefaultDeliveryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             Run(client, {'id': 'run'}).log_metrics({'v': 1}, step=0)
         self.assertEqual(target.read_text(), 'retain me')
+        with self.assertRaises(PermissionError):
+            client.close(timeout=.1)
+        client.spool_path.unlink()  # Remove only this test's poisoned symlink.
 
 
     def test_worker_start_failure_keeps_local_acceptance_unambiguous(self):
@@ -508,8 +691,7 @@ class DefaultDeliveryHTTPTests(unittest.TestCase):
     def subprocess_env(self):
         home = self.server.directory / "child-home"
         home.mkdir(exist_ok=True)
-        return dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(home / 'state'),
-                    LOCALAPPDATA=str(home / 'local'), PYTHONPATH=str(ROOT / "python"),
+        return dict(isolated_env(home),
                     NSET_TEST_URL=self.server.url, NSET_TEST_TOKEN=self.server.token,
                     NSET_TEST_RUN=self.run.id)
 
@@ -518,6 +700,7 @@ class DefaultDeliveryHTTPTests(unittest.TestCase):
         env = self.subprocess_env()
         produce = '''import os
 from nset_client import Client, Run
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 c = Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN'], timeout=.1)
 r = Run(c, {'id': os.environ['NSET_TEST_RUN']})
 assert r.log_metrics({'v': 7}, step=9, timestamp=123) == {'accepted': 1}
@@ -532,6 +715,7 @@ os._exit(0)
         self.server.start()
         consume = '''import os
 from nset_client import Client
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 with Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN']) as c:
     c.flush(timeout=10)
 '''
@@ -544,6 +728,7 @@ with Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN']) as
         env = self.subprocess_env()
         produce = """import os, threading
 from nset_client import Client, Run
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 c = Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN'])
 box = c._delivery()
 send = box._http.request
@@ -566,6 +751,7 @@ os._exit(1)
         self.server.start()
         consume = """import os
 from nset_client import Client
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 with Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN']) as c:
     c.flush(timeout=10)
 """
@@ -579,6 +765,7 @@ with Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN']) as
         env = self.subprocess_env()
         code = '''import os, sys
 from nset_client import Client, Run
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 with Client(os.environ['NSET_TEST_URL'], token=os.environ['NSET_TEST_TOKEN']) as c:
     r = Run(c, {'id': os.environ['NSET_TEST_RUN']})
     for i in range(20):

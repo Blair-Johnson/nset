@@ -176,7 +176,7 @@ class DurableOutbox:
 
     def __init__(self, client, path, *, max_pending_bytes=268435456,
                  max_pending_batches=10000, workers=1, retry_interval=1.0,
-                 _automatic=False):
+                 _automatic=False, _deadline=None):
         self._pid = os.getpid()
         self._automatic = _automatic
         self._permanent = {}
@@ -203,13 +203,17 @@ class DurableOutbox:
         self._closing = False
         self._closed = False
         self._last_error = None
-        with self._state.lock:
-            self._db = sqlite3.connect(self.path, timeout=min(timeout, 5), check_same_thread=False)
+        with (self._state.lock if _deadline is None else
+              _locked(self._state.lock, _deadline, self.path)):
+            busy_timeout = min(timeout, 5)
+            if _deadline is not None:
+                busy_timeout = min(busy_timeout, max(0, _deadline - time.monotonic()))
+            self._db = sqlite3.connect(self.path, timeout=busy_timeout, check_same_thread=False)
             try:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
                 if version not in (0, 1):
                     raise ValueError("unsupported outbox schema version")
-                _enable_wal(self._db, min(timeout, 5))
+                _enable_wal(self._db, busy_timeout)
                 self._db.execute("PRAGMA synchronous=FULL")
                 with self._db:
                     self._db.execute("BEGIN IMMEDIATE")
@@ -315,12 +319,18 @@ class DurableOutbox:
                         continue
                     run_id, batch_id, payload, accepted = row
                     key = (run_id, batch_id)
-                    if key in self._state.claims:
-                        continue
+                    previous = self._state.claims.get(key)
+                    if previous is not None:
+                        if not previous[0].is_set():
+                            continue
+                        # A detached owner's request must not block replay, even
+                        # if its cleanup thread could not be started.
+                        self._state.claims.pop(key)
+                        self._state.retries.pop(key, None)
                     failures, ready_at = self._state.retries.get(key, (0, 0))
                     if background and time.monotonic() < ready_at:
                         continue
-                    claim = object()
+                    claim = (self._stop, object())
                     self._state.claims[key] = claim
                     self._owned_claims[key] = claim
                 try:
@@ -448,6 +458,7 @@ class DurableOutbox:
         """Stop without waiting on a socket; release detached claims for replay."""
         self._check_process()
         self._closing = True
+        self._detach_close = True
         self._stop.set()
         # Closing the last SQLite connection can checkpoint a large WAL. Keep
         # that filesystem work off the caller's bounded shutdown path too.

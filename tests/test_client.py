@@ -1,13 +1,13 @@
 import unittest
-from support import ROOT
+from support import IsolatedClientTestCase
 from nset_client import Client
 
 
-class ClientTests(unittest.TestCase):
+class ClientTests(IsolatedClientTestCase):
     def test_context_preserves_training_error_when_status_update_fails(self):
         from unittest.mock import Mock
         from nset_client import Run
-        run = Run(Client(token="test"), {"id": "test-id"})
+        run = Run(self.client(token="test"), {"id": "test-id"})
         run.finish = Mock(side_effect=OSError("network unavailable"))
         with self.assertRaisesRegex(RuntimeError, "training failed"):
             with run:
