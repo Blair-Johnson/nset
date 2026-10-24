@@ -49,7 +49,7 @@ Charts retain fractional, repeated, and restarted X coordinates in event order. 
 Install the native client in your training environment from this checkout:
 
 ```sh
-pip install ./python
+pip install ./client
 ```
 
 Set `NSET_TOKEN` to the server's token in that environment, then:

@@ -540,7 +540,7 @@ export function mountRecordControls(
         const pre = element("pre");
         details.addEventListener("toggle", () => {
           if (details.open && !pre.textContent)
-            pre.textContent = JSON.stringify(row.data, null, 2);
+            pre.textContent = row.raw ?? JSON.stringify(row.data, null, 2);
         });
         details.append(
           pre,
@@ -548,7 +548,7 @@ export function mountRecordControls(
             "Copy raw record",
             () =>
               void navigator.clipboard.writeText(
-                JSON.stringify(row.data, null, 2),
+                row.raw ?? JSON.stringify(row.data, null, 2),
               ),
           ),
         );

@@ -42,6 +42,8 @@ export interface FieldHint {
   values: Scalar[];
 }
 export interface RecordRow {
+  /** Original stored JSON, including exact integer text and formatting. */
+  raw?: string;
   run_uid: string;
   seq: number;
   received_at: string;

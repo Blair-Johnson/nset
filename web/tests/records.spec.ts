@@ -540,3 +540,46 @@ test("shell exposes rx beside native data, saves a record chart, and hides run m
   ).toHaveCount(0);
   await expect(page.locator(".run-detail-status")).toHaveText("succeeded");
 });
+
+test("raw inspection retains exact JSON text rather than rounding large integers", async ({
+  page,
+}) => {
+  await fixture(page);
+  const raw = '{ "kind": "epoch", "id": 9007199254740993, "loss": 1.00 }';
+  await page.route("**/api/rx/records", (route) =>
+    route.fulfill({
+      json: {
+        diagnostics: {
+          scanned: 1,
+          matched: 1,
+          bytes: 70,
+          invalid_json: 0,
+          oversized: 0,
+          skipped_axes: 0,
+          skipped_groups: 0,
+          omitted_traces: 0,
+          points: 0,
+          partial: false,
+          reasons: [],
+        },
+        records: [
+          {
+            run_uid: "uid",
+            seq: 1,
+            received_at: "now",
+            data: JSON.parse(raw),
+            raw,
+          },
+        ],
+        next_cursor: null,
+        fields: [],
+        traces: [],
+        coverage: "bounded snapshot",
+      },
+    }),
+  );
+  await page.getByText("Inspect records", { exact: true }).click();
+  await page.getByRole("button", { name: "Load records", exact: true }).click();
+  await page.locator(".record-inspection summary").click();
+  await expect(page.locator(".record-inspection pre")).toHaveText(raw);
+});

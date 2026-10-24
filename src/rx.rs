@@ -50,6 +50,10 @@ impl Source {
             .arg(repo)
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
             .output()
             .map_err(|_| {
                 ApiError::bad("--rx-repo: could not run git to resolve the common directory")
@@ -643,6 +647,11 @@ impl Source {
         let mut hints: BTreeMap<String, Hint> = BTreeMap::new();
         let mut traces: BTreeMap<String, Trace> = BTreeMap::new();
         let started = Instant::now();
+        let byte_budget = if mode == Mode::Records {
+            2 * 1024 * 1024
+        } else {
+            MAX_BYTES
+        };
         let mut visits = 0;
         let mut stopped = false;
         while cursor.run < ids.len() {
@@ -658,7 +667,7 @@ impl Source {
                 .map_err(unavailable)?;
             while let Some(row) = rows.next().map_err(unavailable)? {
                 if d.scanned >= MAX_SCAN
-                    || d.bytes >= MAX_BYTES
+                    || d.bytes >= byte_budget
                     || started.elapsed() > Duration::from_millis(500)
                     || (mode == Mode::Fields && d.scanned >= 2000)
                 {
@@ -668,7 +677,7 @@ impl Source {
                 }
                 let seq: i64 = row.get(0).map_err(unavailable)?;
                 let bytes = row.get::<_, i64>(2).map_err(unavailable)? as usize;
-                if bytes <= MAX_RECORD && d.bytes + bytes > MAX_BYTES {
+                if bytes <= MAX_RECORD && d.bytes + bytes > byte_budget {
                     d.limit("byte budget reached");
                     stopped = true;
                     break;
@@ -694,7 +703,7 @@ impl Source {
                 match mode {
                     Mode::Records => {
                         let received_at: String = row.get(1).map_err(unavailable)?;
-                        records.push(json!({"run_uid":q.runs[cursor.run],"seq":seq,"received_at":received_at,"data":value}));
+                        records.push(json!({"run_uid":q.runs[cursor.run],"seq":seq,"received_at":received_at,"data":value,"raw":raw}));
                         if records.len() >= q.limit {
                             stopped = true;
                             break;
@@ -1184,5 +1193,16 @@ mod tests {
                 .iter()
                 .any(|v| v["points"].as_array().unwrap().len() == 2)
         );
+    }
+    #[test]
+    fn inspection_keeps_original_json_text_and_large_integer_identity() {
+        let f = fixture(false);
+        let raw = "{ \"kind\": \"epoch\", \"id\": 9007199254740993, \"loss\": 1.00 }";
+        f.writer
+            .execute("INSERT INTO events VALUES(859,1,'now',?)", [raw])
+            .unwrap();
+        let result = f.source.query(request(json!({})), Mode::Records).unwrap();
+        assert_eq!(result["records"][0]["raw"], raw);
+        assert_eq!(result["records"][0]["data"]["id"], 9007199254740993u64);
     }
 }
