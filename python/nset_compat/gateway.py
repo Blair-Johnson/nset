@@ -10,9 +10,8 @@ from socketserver import ThreadingMixIn
 import sqlite3
 import threading
 import time
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
-from urllib.request import Request as URLRequest
+from urllib.error import URLError
+from urllib.parse import parse_qsl, unquote, urlsplit
 import zlib
 
 from nset_client.transport import APIError
@@ -70,32 +69,17 @@ def _load_adapters():
 
 
 def _proxy(ctx, request):
-    suffix = "?" + urlencode(request.query) if request.query else ""
-    target = ctx.native.url + request.path + suffix
-    headers = {"Authorization": "Bearer " + ctx.token,
-               "Content-Type": request.headers.get("content-type", "application/json")}
+    headers = {"Content-Type": request.headers.get("content-type", "application/json")}
     for key in ("accept", "if-none-match", "if-modified-since"):
         if key in request.headers:
             headers[key] = request.headers[key]
-    outgoing = URLRequest(target, data=request.body if request.body else None, headers=headers, method=request.method)
-    try:
-        upstream = ctx.native.opener.open(outgoing, timeout=ctx.native.timeout)
-    except HTTPError as exc:
-        upstream = exc  # Preserve native status/body, including redirects; never follow them.
-    with upstream:
-        deadline = time.monotonic() + ctx.native.timeout
-        chunks, size = [], 0
-        while True:
-            if time.monotonic() >= deadline:
-                raise ProtocolError(504, "DEADLINE_EXCEEDED", "Native response deadline exceeded")
-            chunk = upstream.read1(min(65536, ctx.max_body_bytes + 1 - size))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > ctx.max_body_bytes:
-                raise ProtocolError(502, "BACKEND_RESPONSE_TOO_LARGE", "Native response exceeds configured limit")
-        return Response(upstream.code, b"".join(chunks), {key: value for key, value in upstream.headers.items() if key.lower() in _PROXY_HEADERS})
+    status, body, upstream_headers = ctx.native.raw_request(
+        request.method, request.path, body=request.body or None,
+        headers=headers, query=request.query)
+    forwarded = {key: value for key, value in upstream_headers.items()
+                 if key.lower() in _PROXY_HEADERS
+                 or (request.method == "HEAD" and key.lower() == "content-length")}
+    return Response(status, body, forwarded)
 
 
 class GatewayServer(ThreadingMixIn, HTTPServer):
@@ -162,6 +146,10 @@ class GatewayServer(ThreadingMixIn, HTTPServer):
         super().serve_forever(poll_interval=poll_interval)
 
     def server_close(self):
+        # Closing inbound sockets cannot interrupt a worker blocked upstream.
+        close_upstream = getattr(self.ctx.native, "close", None)
+        if close_upstream is not None:
+            close_upstream()
         with self._active_lock:
             sockets = list(self._active)
         for sock in sockets:
@@ -197,10 +185,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
         headers = {key.lower(): value for key, value in response.headers.items()}
         if any(any(c in str(key) + str(value) for c in "\r\n\x00") for key, value in headers.items()):
             raise ProtocolError(500, "INTERNAL_ERROR", "Invalid response header")
+        length = str(len(body))
+        if getattr(self, "command", "") == "HEAD" and "content-length" in headers:
+            length = str(headers["content-length"]).strip()
+            if not length.isascii() or not length.isdecimal() or len(length) > 20:
+                raise ProtocolError(502, "BACKEND_UNAVAILABLE", "Invalid native Content-Length")
         self.close_connection = True
         self.send_response(response.status)
         self.send_header("Content-Type", headers.pop("content-type", content_type))
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", length)
         self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         for key, value in headers.items():
@@ -310,6 +303,9 @@ def make_server(ctx, host="127.0.0.1", port=0, workers=16, max_body_bytes=MAX_BO
     if type(max_body_bytes) is not int or not 1 <= max_body_bytes <= 1024**3:
         raise ValueError("max_body_bytes must be 1..1073741824")
     ctx.max_body_bytes = max_body_bytes
+    # One cap for proxied responses AND adapter/native receipt calls.
+    if hasattr(ctx.native, "max_response_bytes"):
+        ctx.native.max_response_bytes = min(ctx.native.max_response_bytes, max_body_bytes)
     server_type = GatewayServer
     if ":" in host:
         class IPv6GatewayServer(GatewayServer):
