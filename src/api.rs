@@ -63,7 +63,8 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(middleware::from_fn(normalize_errors));
     Router::new()
-        .nest("/api", api)
+        .nest("/api", api.merge(crate::compat_http::api_routes()))
+        .merge(crate::compat_http::root_routes())
         .fallback(assets::serve)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)

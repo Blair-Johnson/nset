@@ -76,17 +76,20 @@ class DurableHTTPTests(unittest.TestCase):
 
     def test_invalid_durable_options_do_not_create_storage(self):
         import subprocess
-        for flag, value in [("--ingest-queue-capacity", "0"),
-                            ("--ingest-max-pending-bytes", "0"),
-                            ("--ingest-max-pending-bytes", str(2**63)),
-                            ("--ingest-max-pending-batches", "1000001"),
-                            ("--ingest-poll-interval-ms", "60001")]:
+        for name, value in [("NSET_INGEST_QUEUE_CAPACITY", "0"),
+                            ("NSET_INGEST_MAX_PENDING_BYTES", "0"),
+                            ("NSET_INGEST_MAX_PENDING_BYTES", str(2**63)),
+                            ("NSET_INGEST_MAX_PENDING_BATCHES", "1000001"),
+                            ("NSET_INGEST_POLL_INTERVAL_MS", "60001"),
+                            ("NSET_INGEST_PAUSED", "not-a-bool")]:
             directory = self.server.directory / "must-not-exist"
-            result = subprocess.run([str(self.server.binary), "--data-dir", str(directory), flag, value],
-                                    env=dict(os.environ, NSET_TOKEN=self.server.token),
-                                    capture_output=True, timeout=10)
-            self.assertNotEqual(result.returncode, 0, flag)
-            self.assertFalse(directory.exists(), flag)
+            env = dict(os.environ, NSET_TOKEN=self.server.token)
+            env[name] = value
+            result = subprocess.run([str(self.server.binary), "serve", "--db-path", str(directory)],
+                                    env=env, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0, name)
+            self.assertFalse(directory.exists(), name)
+
     def test_concurrent_replays_conflicts_and_authentication(self):
         self.start(NSET_WRITE_CONCURRENCY="4", NSET_READ_WORKERS="3", NSET_HTTP_WORKERS="4")
         run = self.run_record()

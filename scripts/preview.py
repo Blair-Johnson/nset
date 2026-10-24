@@ -30,8 +30,9 @@ def main():
     url = f"http://127.0.0.1:{args.port}"
     env = dict(os.environ)
     env.pop("NSET_TOKEN", None)
-    process = subprocess.Popen([str(args.binary.resolve()), "--data-dir", str(artifacts / "preview-data"),
-                                "--listen", f"127.0.0.1:{args.port}", "--token-file", str(token_path)], env=env)
+    process = subprocess.Popen([str(args.binary.resolve()), "serve", "--db-path", str(artifacts / "preview-data"),
+                                "--host", "127.0.0.1", "--port", str(args.port),
+                                "--token-file", str(token_path)], env=env)
     def stop(signum, frame):
         process.terminate()
     signal.signal(signal.SIGTERM, stop)

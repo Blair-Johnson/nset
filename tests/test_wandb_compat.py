@@ -1,678 +1,348 @@
-"""W&B protocol unit tests and opt-in official-SDK integration.
+"""Direct Rust W&B protocol tests; never start/import the removed Python gateway.
 
-Run SDK test with NSET_WANDB_SDK_TEST=1 and NSET_BINARY pointing to a
-native durable-ingestion build. SDK dependencies are test-only.
+Set NSET_BINARY to a compiled nset binary. NSET_WANDB_SDK_TEST=1 additionally
+runs the official SDK (optionally using NSET_WANDB_PYTHON). Default SDK metadata
+upload warnings are expected: CreateRunFiles is deliberately unsupported.
 """
-import copy
-from contextlib import nullcontext
-import importlib.util
+import base64
+from concurrent.futures import ThreadPoolExecutor
+import gzip
 import json
 import os
 from pathlib import Path
+import secrets
+import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
-from urllib.request import urlopen
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "python"))
-import nset_compat
-# In isolated protocol worktrees PYTHONPATH can supply the shared gateway.
-# Load the adapter under test explicitly, not a different worktree's adapter.
-spec = importlib.util.spec_from_file_location("nset_compat.wandb", ROOT / "python/nset_compat/wandb.py")
-wandb = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = wandb
-spec.loader.exec_module(wandb)
-from nset_compat.common import ProtocolError, Request
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
-class State:
+class RustServer:
     def __init__(self):
-        self.data = {}
+        self.temp = tempfile.TemporaryDirectory(prefix="nset-wandb-")
+        self.directory = Path(self.temp.name)
+        self.token = secrets.token_hex(24)
+        self.binary = Path(os.environ["NSET_BINARY"]).resolve()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.process = None
+        self.log = None
 
-    def get(self, namespace, key, default=None):
-        return copy.deepcopy(self.data.get((namespace, key), default))
+    def start(self):
+        self.log = open(self.directory / "server.log", "ab")
+        self.process = subprocess.Popen([
+            str(self.binary), "serve", "--host", "127.0.0.1", "--port", str(self.port),
+            "--token", self.token, "--db-path", str(self.directory / "data"),
+        ], stdout=self.log, stderr=self.log)
+        for _ in range(150):
+            if self.process.poll() is not None:
+                break
+            try:
+                status, body = self.request("/api/health", method="GET")
+                if status == 200 and body.get("status") == "ok":
+                    return self
+            except OSError:
+                pass
+            time.sleep(0.1)
+        self.stop()
+        raise RuntimeError((self.directory / "server.log").read_text(errors="replace"))
 
-    def put(self, namespace, key, value):
-        self.data[namespace, key] = copy.deepcopy(value)
+    def stop(self, kill=False):
+        if self.process and self.process.poll() is None:
+            self.process.kill() if kill else self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        if self.log:
+            self.log.close()
 
-    def get_many(self, namespace, keys):
-        return {key: self.get(namespace, key) for key in keys if (namespace, key) in self.data}
+    def close(self):
+        self.stop()
+        self.temp.cleanup()
 
-    def put_many(self, namespace, mapping):
-        self.data.update({(namespace, key): copy.deepcopy(value) for key, value in mapping.items()})
+    def request(self, path, data=None, method="POST", compressed=False, basic=False):
+        headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}
+        if basic:
+            headers["Authorization"] = "Basic " + base64.b64encode(("api:" + self.token).encode()).decode()
+        encoded = None if data is None else json.dumps(data).encode()
+        if compressed:
+            encoded = gzip.compress(encoded)
+            headers["Content-Encoding"] = "gzip"
+        request = Request(self.url + path, data=encoded, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=40) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            raw = error.read()
+            return error.code, json.loads(raw) if raw else {}
 
-    def delete(self, namespace, key):
-        self.data.pop((namespace, key), None)
+    def gql(self, query, variables=None):
+        return self.request("/graphql", {"query": query, "variables": variables or {}}, basic=True)
 
-    def items(self, namespace):
-        return [(k, copy.deepcopy(v)) for (ns, k), v in self.data.items() if ns == namespace]
+    def bucket(self, name="r", entity="e", project="p"):
+        status, body = self.gql('query($e:String,$p:String,$r:String) { model(name:$p,entityName:$e) { bucket(name:$r) { id name config summaryMetrics historyLineCount historyTail eventsLineCount eventsTail logLineCount wandbConfig state } } }', {"e": entity, "p": project, "r": name})
+        assert status == 200, (status, body)
+        return body["data"]["model"]["bucket"]
 
-
-class Native:
-    def __init__(self):
-        self.calls = []
-        self.runs = []
-        self.lose_create_response = False
-
-    def request(self, method, path, payload=None, **kwargs):
-        self.calls.append((method, path, payload))
-        if method == "GET" and path == "/api/runs":
-            return {"runs": copy.deepcopy(self.runs)}
-        result = {"id": "native-" + str(len(self.calls))}
-        if method == "POST" and path == "/api/runs":
-            result.update(payload)
-            self.runs.append(result)
-            if self.lose_create_response:
-                self.lose_create_response = False
-                raise ProtocolError(503, "RETRY", "Simulated lost creation response")
-        return result
-
-
-class Context:
-    def __init__(self):
-        self.token = "unit-test-token-" + "x" * 40
-        self.state, self.native = State(), Native()
-        self.lock = threading.RLock()
-        self.batches = {}
-        self.attempts = []
-        self.fail = False
-
-    def lock_for(self, key):
-        return self.lock
-
-    def ingest_metrics(self, run_id, batch_id, metrics, wait=True):
-        self.attempts.append((batch_id, copy.deepcopy(metrics)))
-        if batch_id in self.batches:
-            assert self.batches[batch_id] == metrics
-        self.batches[batch_id] = copy.deepcopy(metrics)
-        if self.fail:
-            self.fail = False
-            raise ProtocolError(503, "RETRY", "Simulated committed receipt timeout")
-        return {"status": "applied"}
-
-
-def request(path, data=None, method="POST", body=None):
-    return Request(method=method, path=path, query={}, headers={},
-                   body=body if body is not None else json.dumps(data).encode())
-
-
-def gql(ctx, query, variables=None):
-    return wandb.handle(ctx, request("/graphql", {"query": query, "variables": variables or {}}))
-
-
-def stream_bytes(ctx, key, name):
-    """Inspect current durable rows, not a public file/download API."""
-    count = ctx.state.get(wandb.RUNS, key)["streams"][name]["count"]
-    rows = ctx.state.get_many(wandb._rows_namespace(key, name), [str(i) for i in range(count)])
-    return "".join(rows[str(i)] + "\n" for i in range(count)).encode(), "text/plain"
+    def points(self, run_id, key):
+        query = {"key": key, "limit": 10000}
+        points = []
+        while True:
+            status, page = self.request(f"/api/runs/{run_id}/metrics?" + urlencode(query), method="GET")
+            assert status == 200, (status, page)
+            points.extend(page["points"])
+            if page["next_after"] is None:
+                return points
+            query.update(after=page["next_after"], snapshot=page["snapshot"])
 
 
+@unittest.skipUnless(os.environ.get("NSET_BINARY"), "set NSET_BINARY to the Rust nset executable")
 class WandbProtocolTests(unittest.TestCase):
     def setUp(self):
-        self.ctx = Context()
-        self.upsert()
+        self.server = RustServer()
+        self.addCleanup(self.server.close)
+        self.server.start()
+        self.native_id = self.upsert()["bucket"]["id"]
         self.path = "/files/e/p/r/file_stream"
-        self.key = wandb._identity("e", "p", "r")
 
-    def upsert(self):
-        result = gql(self.ctx, 'mutation UpsertBucket($name:String,$project:String,$entity:String,$config:JSONString) { upsertBucket(input:{name:$name,modelName:$project,entityName:$entity,config:$config}) { bucket { id name config } inserted } }',
-                     {"name": "r", "project": "p", "entity": "e", "config": '{"lr":{"value":0.1}}'})
-        self.assertEqual(result.status, 200, result.body)
-        return result
+    def upsert(self, name="r", config=None):
+        if config is None:
+            config = {"lr": {"value": 0.1}, "enabled": {"value": True}, "layers": {"value": [8, 4]}}
+        status, body = self.server.gql('mutation($r:String,$c:JSONString) { upsertBucket(input:{name:$r,modelName:"p",entityName:"e",config:$c}) { bucket { id name config } inserted } }', {"r": name, "c": json.dumps(config)})
+        self.assertEqual(status, 200, body)
+        return body["data"]["upsertBucket"]
 
     def stream(self, filename, lines, offset=0, **extra):
-        return wandb.handle(self.ctx, request(self.path, {"files": {filename: {"offset": offset, "content": lines}}, **extra}))
+        return self.server.request(self.path, {"files": {filename: {"offset": offset, "content": lines}}, **extra})
 
-    def test_history_retry_preserves_raw_and_no_duplicate_metrics(self):
-        lines = ['{"loss":2,"label":"hello","_step":3,"_timestamp":12.5}', '{"bad":[1,2]}', 'not-json']
-        self.stream("wandb-history.jsonl", lines)
-        self.stream("wandb-history.jsonl", lines)
-        self.assertEqual(len(self.ctx.batches), 1)
-        rows = next(iter(self.ctx.batches.values()))
-        self.assertEqual(rows, [{"key": "loss", "value": 2, "step": 3, "timestamp": 12500}])
-        raw, _ = stream_bytes(self.ctx, self.key, "wandb-history.jsonl")
-        self.assertEqual(raw, ("\n".join(lines) + "\n").encode())
-        self.assertEqual(len(self.ctx.attempts), 1)
+    def test_typed_config_projects_into_native_params_and_merges(self):
+        self.assertFalse(self.upsert(config={"schedule": {"value": {"kind": "cosine"}}, "nullable": {"value": None}})["inserted"])
+        status, native = self.server.request("/api/runs/" + self.native_id, method="GET")
+        self.assertEqual(status, 200, native)
+        self.assertEqual(native["params"], {"lr": 0.1, "enabled": True, "layers": [8, 4], "schedule": {"kind": "cosine"}, "nullable": None})
+        self.assertEqual(json.loads(self.server.bucket()["config"])["schedule"], {"value": {"kind": "cosine"}})
+        self.server.stop(kill=True)
+        self.server.start()
+        self.assertEqual(self.upsert()["bucket"]["id"], self.native_id)
+        self.assertEqual(self.server.request("/api/runs/" + self.native_id, method="GET")[1]["params"]["schedule"], {"kind": "cosine"})
 
-    def test_offline_observation_replay_at_new_offset_preserves_raw_but_deduplicates(self):
-        self.stream("wandb-history.jsonl", ['{"loss":1,"_step":0,"_timestamp":12.5}'])
-        self.stream("wandb-history.jsonl", ['{"_timestamp":12.5,"_step":0,"loss":1}'], offset=1)
-        self.assertEqual(len(self.ctx.batches), 1)
-        self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["streams"]["wandb-history.jsonl"]["count"], 2)
-        self.stream("wandb-history.jsonl", ['{"loss":1,"_step":0,"_timestamp":12.5001}'], offset=2)
-        self.assertEqual(len(self.ctx.batches), 2)
+    def test_history_retries_offline_identity_and_full_timestamp(self):
+        first = '{"loss":1,"_step":0,"_timestamp":12.5}'
+        for _ in range(2):
+            self.assertEqual(self.stream("wandb-history.jsonl", [first])[0], 200)
+        self.assertEqual(self.stream("wandb-history.jsonl", ['{"_timestamp":12.5,"_step":0,"loss":1}'], offset=1)[0], 200)
+        self.assertEqual(self.stream("wandb-history.jsonl", ['{"loss":1,"_step":0,"_timestamp":12.5001}'], offset=2)[0], 200)
+        points = self.server.points(self.native_id, "loss")
+        self.assertEqual([p["value"] for p in points], [1, 1])
+        self.assertEqual([p["timestamp"] for p in points], [12500, 12500])
+        self.assertEqual(self.server.bucket()["historyLineCount"], 3)
 
-    def test_chunk_limit_and_unrepresentable_keys_remain_raw(self):
-        values = {"metric-" + str(i): i for i in range(10001)}
-        values["x" * 513] = 1
-        values["huge"] = 10 ** 400
-        self.stream("wandb-history.jsonl", [json.dumps(values)])
-        self.assertEqual(sorted(map(len, self.ctx.batches.values())), [1, 10000])
-        raw, _ = stream_bytes(self.ctx, self.key, "wandb-history.jsonl")
-        self.assertEqual(json.loads(raw)["huge"], 10 ** 400)
+    def test_offset_conflicts_gaps_and_invalid_completion_are_atomic(self):
+        self.assertEqual(self.stream("wandb-history.jsonl", ['{"loss":1}'])[0], 200)
+        for offset, line in [(0, '{"loss":2}'), (3, '{}')]:
+            self.assertEqual(self.stream("wandb-history.jsonl", [line], offset)[0], 409)
+        for extra in ({"complete": 1}, {"exitcode": True}, {"uploaded": ["x"]}):
+            self.assertEqual(self.stream("wandb-history.jsonl", ['{"loss":9}'], 1, **extra)[0], 400)
+        self.assertEqual(self.server.bucket()["historyLineCount"], 1)
+        self.assertEqual([p["value"] for p in self.server.points(self.native_id, "loss")], [1])
 
-    def test_native_create_response_loss_recovers_same_run(self):
-        self.ctx.native.lose_create_response = True
-        query = 'mutation { upsertBucket(input:{name:"new",modelName:"p",entityName:"e"}) { bucket { id } } }'
-        first = gql(self.ctx, query)
-        self.assertEqual(first.status, 503)
-        created_id = self.ctx.native.runs[-1]["id"]
-        second = gql(self.ctx, query)
-        self.assertEqual(second.body["data"]["upsertBucket"]["bucket"]["id"], created_id)
-        self.assertEqual(len(self.ctx.native.runs), 2)  # baseline plus new, not three
-
-    def test_oversized_stream_and_missing_upload_do_not_poison_pending(self):
-        self.ctx.max_body_bytes = 10
-        with self.assertRaises(ProtocolError) as error:
-            self.stream("output.log", ["x" * 11])
-        self.assertEqual(error.exception.status, 413)
-        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-        with self.assertRaises(ProtocolError):
-            wandb.handle(self.ctx, request(self.path, {"uploaded":["missing.png"],"complete":True}))
-        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-        self.ctx.max_body_bytes = 1024
-        self.stream("output.log", ["valid"])
-
-    def test_offset_gap_and_conflict_are_explicit(self):
-        self.stream("wandb-history.jsonl", ['{"loss":1}'])
-        for offset, line, code in [(0, '{"loss":2}', "OFFSET_CONFLICT"), (3, '{}', "OFFSET_GAP")]:
-            with self.assertRaises(ProtocolError) as error:
-                self.stream("wandb-history.jsonl", [line], offset=offset)
-            self.assertEqual(error.exception.code, code)
-
-    def test_committed_native_timeout_replays_identical_batch_after_restart(self):
-        self.ctx.fail = True
-        with self.assertRaises(ProtocolError):
-            self.stream("wandb-history.jsonl", ['{"loss":1}'])
-        old = self.ctx
-        self.ctx = Context()
-        self.ctx.state, self.ctx.native = old.state, old.native
-        self.ctx.batches, self.ctx.attempts = old.batches, old.attempts
-        self.stream("wandb-history.jsonl", ['{"loss":1}'])
-        self.assertEqual(self.ctx.attempts[0], self.ctx.attempts[1])
-        self.assertEqual(len(self.ctx.batches), 1)
-        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-
-    def test_summary_console_events_and_complete_survive(self):
-        self.stream("wandb-summary.json", ['{"loss":5,"label":"first"}'])
-        self.stream("wandb-summary.json", ['{"loss":3,"label":"updated"}'])
-        self.stream("output.log", ["first"])
-        self.stream("output.log", ["rewritten"])
-        self.stream("wandb-events.jsonl", ['{"cpu":3.0,"_timestamp":1}'])
-        result = wandb.handle(self.ctx, request(self.path, {"complete": True, "exitcode": 0}))
-        self.assertEqual(result.status, 200)
-        run = self.ctx.state.get(wandb.RUNS, self.key)
+    def test_summary_console_events_finish_and_restart_resume(self):
+        for name, lines in [
+            ("wandb-summary.json", ['{"loss":5,"note":"first"}']),
+            ("wandb-summary.json", ['{"loss":3,"note":"retained"}']),
+            ("output.log", ["é", "tail"]), ("output.log", ["updated"]),
+            ("wandb-history.jsonl", ['{"loss":3,"_step":5,"_timestamp":12.5}']),
+            ("wandb-events.jsonl", ['{"cpu":3,"_timestamp":1}']),
+        ]:
+            self.assertEqual(self.stream(name, lines)[0], 200)
+        self.assertEqual(self.server.request(self.path, {"complete": True, "exitcode": 0, "uploaded": []})[0], 200)
+        self.server.stop(kill=True)
+        self.server.start()
+        run = self.server.bucket()
         self.assertEqual(run["state"], "finished")
-        self.assertEqual(json.loads(run["summaryMetrics"]), {"loss":3,"label":"updated"})
-        self.assertEqual(stream_bytes(self.ctx, self.key, "output.log")[0], b"rewritten\n")
-        self.assertTrue(any(row["key"] == "system/cpu" for rows in self.ctx.batches.values() for row in rows))
+        self.assertEqual(run["logLineCount"], 2)
+        self.assertEqual(run["eventsLineCount"], 1)
+        self.assertEqual(json.loads(json.loads(run["historyTail"])[0])["_step"], 5)
+        self.assertEqual(json.loads(run["summaryMetrics"]), {"loss": 3, "note": "retained"})
+        self.assertIn("t", json.loads(run["wandbConfig"]))
+        self.assertEqual(self.server.request("/api/runs/" + self.native_id, method="GET")[1]["status"], "finished")
+        self.assertEqual(self.server.points(self.native_id, "system/cpu")[0]["value"], 3)
+        self.assertFalse(self.upsert()["inserted"])
+        self.assertEqual(self.stream("wandb-history.jsonl", ['{"loss":2,"_step":6}'], 1)[0], 200)
+        self.assertEqual(self.server.request(self.path, {"complete": True, "exitcode": 1})[0], 200)
+        self.assertEqual(self.server.request("/api/runs/" + self.native_id, method="GET")[1]["status"], "failed")
 
-    def test_resume_and_repeat_upsert(self):
-        self.stream("wandb-history.jsonl", ['{"loss":1,"_step":5}'])
-        result = self.upsert()
-        self.assertFalse(result.body["data"]["upsertBucket"]["inserted"])
-        resumed = gql(self.ctx, '{ model(name:"p",entityName:"e") { bucket(name:"r",missingOk:true) { historyLineCount historyTail wandbConfig config } } }')
-        bucket = resumed.body["data"]["model"]["bucket"]
-        self.assertEqual(bucket["historyLineCount"], 1)
-        self.assertEqual(json.loads(json.loads(bucket["historyTail"])[0])["_step"], 5)
-        self.assertIn("t", json.loads(bucket["wandbConfig"]))
-        self.assertEqual(len([c for c in self.ctx.native.calls if c[:2] == ("POST", "/api/runs")]), 1)
+    def test_gzip_and_nonfinite_nested_raw_values(self):
+        line = '{"nan":NaN,"huge":1e9999,"bool":true,"nested":{"x":1},"finite":4,"_step":2}'
+        status, body = self.server.request(self.path, {"files": {"wandb-history.jsonl": {"offset": 0, "content": [line]}}}, compressed=True, basic=True)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.server.points(self.native_id, "finite")[0]["value"], 4)
+        for key in ("nan", "huge", "bool", "nested"):
+            self.assertEqual(self.server.points(self.native_id, key), [])
+        self.assertEqual(json.loads(self.server.bucket()["historyTail"]), [line])
 
-    def test_file_and_artifact_graphql_rejected_without_side_effects(self):
+    def test_wide_row_chunks_and_invalid_keys(self):
+        row = {"metric-" + str(i): i for i in range(10001)}
+        row["x" * 513] = 9
+        row["huge"] = 10 ** 400
+        self.assertEqual(self.stream("wandb-history.jsonl", [json.dumps(row)])[0], 200)
+        for key in ("metric-0", "metric-9999", "metric-10000"):
+            self.assertEqual(len(self.server.points(self.native_id, key)), 1)
+        self.assertEqual(self.server.points(self.native_id, "huge"), [])
+
+    def test_file_artifact_rejections_preflight_entire_operation(self):
         queries = [
-            'mutation { createRunFiles(input:{entityName:"e",projectName:"p",runName:"r",files:["media/image.png"]}) { files { uploadUrl } } }',
-            'mutation { markRunFilesUploaded(input:{entityName:"e",projectName:"p",runName:"r",files:["file.txt"]}) { success } }',
+            'mutation { createRunFiles(input:{files:["wandb-metadata.json"]}) { files { uploadUrl } } }',
+            'mutation { markRunFilesUploaded(input:{files:["x"]}) { success } }',
             'mutation { createArtifact(input:{name:"x"}) { artifact { id } } }',
-            'query { project(name:"p",entityName:"e") { artifact(name:"x") { id } } }',
-            'query { project(name:"p",entityName:"e") { artifacts { edges { node { id } } } } }',
-            'query { model(name:"p",entityName:"e") { bucket(name:"r") { files(names:["wandb-history.jsonl"]) { edges { node { directUrl } } } } } }',
+            '{ model(name:"p",entityName:"e") { bucket(name:"r") { files { edges { node { directUrl } } } } } }',
             'mutation { upsertBucket(input:{name:"must-not-exist",modelName:"p",entityName:"e"}) { bucket { id } } upload:createRunFiles(input:{files:["x"]}) { runID } }',
         ]
-        before, calls = copy.deepcopy(self.ctx.state.data), list(self.ctx.native.calls)
         for query in queries:
             with self.subTest(query=query):
-                response = gql(self.ctx, query)
-                self.assertEqual(response.status, 400)
-                self.assertEqual(response.body["errors"][0]["extensions"]["code"], "UNSUPPORTED_OPERATION")
-                self.assertNotIn("data", response.body)
-                self.assertEqual(self.ctx.state.data, before)
-                self.assertEqual(self.ctx.native.calls, calls)
-        schema = gql(self.ctx, '{ __type(name:"Mutation") { fields { name } } }')
-        names = {field["name"] for field in schema.body["data"]["__type"]["fields"]}
-        self.assertNotIn("createRunFiles", names)
-        self.assertNotIn("markRunFilesUploaded", names)
+                status, body = self.server.gql(query)
+                self.assertEqual(status, 400, body)
+                self.assertNotIn("data", body)
+        self.assertIsNone(self.server.bucket("must-not-exist"))
+        status, schema = self.server.gql('{ __type(name:"Mutation") { fields { name } } }')
+        self.assertEqual(status, 200)
+        self.assertNotIn("createRunFiles", {f["name"] for f in schema["data"]["__type"]["fields"]})
+        for filename in ("config.yaml", "media/image.png", "../output.log", "requirements.txt"):
+            self.assertEqual(self.server.request(self.path, {"files": {"wandb-history.jsonl": {"offset": 0, "content": ['{"loss":1}']}, filename: {"offset": 0, "content": ["x"]}}})[0], 400)
+        self.assertEqual(self.server.bucket()["historyLineCount"], 0)
+        for method in ("GET", "PUT", "HEAD"):
+            self.assertEqual(self.server.request("/compat/files/wandb/run/file", {} if method == "PUT" else None, method=method)[0], 400)
 
-    def test_file_http_upload_download_and_head_are_unsupported(self):
-        before = copy.deepcopy(self.ctx.state.data)
-        for method in ("PUT", "GET", "HEAD"):
-            for name in ("media/image.png", "wandb-history.jsonl", "../file"):
-                with self.subTest(method=method, name=name), self.assertRaises(ProtocolError) as error:
-                    wandb.handle(self.ctx, request("/compat/files/wandb/" + self.key + "/" + name,
-                                                 method=method, body=b"not accepted"))
-                self.assertEqual((error.exception.status, error.exception.code), (400, "UNSUPPORTED_OPERATION"))
-                self.assertEqual(self.ctx.state.data, before)
+    def test_graphql_selection_defaults_aliases_and_bounds(self):
+        status, body = self.server.gql('query($show:Boolean=true) { me:viewer { name:username id @include(if:$show) email @skip(if:true) } unknown:__type(name:"Unknown") { name } }')
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["data"], {"me": {"name": "nset", "id": "nset"}, "unknown": None})
+        for query in ('{viewer{unknown}}', '{viewer{id} unknown}', '{viewer{...F}}', '{viewer{id}} {viewer{id}}', '{a ' * 80 + '}' * 80, '#' + 'x' * 262145):
+            self.assertEqual(self.server.gql(query)[0], 400)
+        self.upsert("other")
+        status, body = self.server.gql('{ model(name:"p",entityName:"e") { one:bucket(name:"r"){id} two:bucket(name:"other"){id} } }')
+        self.assertEqual(status, 200, body)
+        self.assertNotEqual(body["data"]["model"]["one"], body["data"]["model"]["two"])
 
-    def test_arbitrary_filestream_names_and_upload_receipts_rejected_atomically(self):
-        before = copy.deepcopy(self.ctx.state.data)
-        for filename in ("file.txt", "media/image.png", "config.yaml", "wandb-metadata.json",
-                         "requirements.txt", "nested/output.log", "../output.log", "wandb-history.jsonl/extra"):
-            with self.subTest(filename=filename), self.assertRaises(ProtocolError) as error:
-                wandb.handle(self.ctx, request(self.path, {"files": {
-                    "wandb-history.jsonl": {"offset": 0, "content": ['{"loss":1}']},
-                    filename: {"offset": 0, "content": ["arbitrary bytes"]}}, "complete": True}))
-            self.assertEqual((error.exception.status, error.exception.code), (400, "UNSUPPORTED_OPERATION"))
-            self.assertEqual(self.ctx.state.data, before)
-            self.assertEqual(self.ctx.attempts, [])
-        with self.assertRaises(ProtocolError) as error:
-            wandb.handle(self.ctx, request(self.path, {"uploaded": ["wandb-metadata.json"], "complete": True}))
-        self.assertEqual((error.exception.status, error.exception.code), (400, "UNSUPPORTED_OPERATION"))
-        self.assertEqual(self.ctx.state.data, before)
-        # The normal completion payload may include an empty uploaded list.
-        self.assertEqual(wandb.handle(self.ctx, request(self.path, {"uploaded": [], "complete": True})).status, 200)
+    def test_concurrent_retries_and_cumulative_stream_restart(self):
+        line = '{"loss":1,"_step":0,"_timestamp":1}'
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: self.stream("wandb-history.jsonl", [line]), range(16)))
+        self.assertTrue(all(status == 200 for status, _ in results), results)
+        self.assertEqual(len(self.server.points(self.native_id, "loss")), 1)
+        for offset in range(1, 40):
+            line = json.dumps({"loss": offset, "_step": offset, "_timestamp": offset + 1, "raw": "x" * 8192})
+            self.assertEqual(self.stream("wandb-history.jsonl", [line], offset)[0], 200)
+        self.server.stop(kill=True)
+        self.server.start()
+        self.assertEqual(self.stream("wandb-history.jsonl", [line], 39)[0], 200)
+        self.assertEqual(self.stream("wandb-history.jsonl", [line], 40)[0], 200)
+        self.assertEqual(len(self.server.points(self.native_id, "loss")), 40)
+        self.assertEqual(self.server.bucket()["historyLineCount"], 41)
 
-    def test_unknown_graphql_never_fake_success(self):
-        for query in ('mutation { createArtifact(input:{name:"x"}) { id } }', '{ viewer { unknownField } }', '{ viewer { id } anotherUnknown }'):
-            response = gql(self.ctx, query)
-            self.assertGreaterEqual(response.status, 400)
-            self.assertIn("errors", response.body)
-        response = gql(self.ctx, '{ a:__type(name:"UnknownType") { name } serverInfo { features { name isEnabled } } }')
-        self.assertEqual(response.body["data"]["a"], None)
+    def test_lost_http_ack_then_restart_retries_same_intent(self):
+        payload = {"files": {"wandb-history.jsonl": {"offset": 0, "content": [json.dumps({"loss": i, "_step": i, "_timestamp": i + 1}) for i in range(250)]}}, "complete": True}
+        raw = json.dumps(payload).encode()
+        # Close without reading the response: the commit/ack boundary is unknown.
+        with socket.create_connection(("127.0.0.1", self.server.port)) as connection:
+            header = (f"POST {self.path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {self.server.token}\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\n\r\n").encode()
+            connection.sendall(header + raw)
+        self.server.stop(kill=True)
+        self.server.start()
+        for _ in range(2):
+            status, body = self.server.request(self.path, payload)
+            self.assertEqual(status, 200, body)
+        self.assertEqual(len(self.server.points(self.native_id, "loss")), 250)
+        self.assertEqual(self.server.bucket()["historyLineCount"], 250)
+        self.assertEqual(self.server.bucket()["state"], "finished")
 
-    def test_nonfinite_bool_and_nested_values_preserved_not_projected(self):
-        self.stream("wandb-history.jsonl", ['{"nan":NaN,"bool":true,"nested":{"x":1},"finite":4}'])
-        self.assertEqual([r["key"] for rows in self.ctx.batches.values() for r in rows], ["finite"])
-        self.assertIn(b"NaN", stream_bytes(self.ctx, self.key, "wandb-history.jsonl")[0])
 
-
-    def test_projected_request_limit_is_validated_before_pending_intent(self):
-        self.ctx.max_body_bytes = 512
-        with self.assertRaises(ProtocolError) as error:
-            self.stream("wandb-history.jsonl", [json.dumps({"m" + str(i): i for i in range(16)})])
-        self.assertEqual(error.exception.status, 413)
-        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-        self.assertEqual(self.ctx.attempts, [])
-        self.stream("wandb-history.jsonl", ['{"loss":1}'])
-
-    def test_large_cumulative_stream_has_bounded_index_work_and_metadata(self):
-        self.ctx.max_body_bytes = 2048
-        original_get_many = self.ctx.state.get_many
-        original_put = self.ctx.state.put
-        reads, sizes = [], []
-        def get_many(ns, keys):
-            reads.append((ns, list(keys)))
-            self.assertLessEqual(len(keys), 4)
-            return original_get_many(ns, keys)
-        def put(ns, key, value):
-            if ns in (wandb.RUNS, wandb.PENDING):
-                sizes.append((ns, len(json.dumps(value))))
-            return original_put(ns, key, value)
-        self.ctx.state.get_many = get_many
-        self.ctx.state.put = put
-        self.ctx.state.items = lambda *a: self.fail("history-wide scan")
-        for batch in range(160):
-            lines = [json.dumps({"_step": batch * 4 + i, "_timestamp": 20 + batch + i / 10,
-                                 "loss": i, "raw": "x" * 200}) for i in range(4)]
-            self.stream("wandb-history.jsonl", lines, offset=batch * 4)
-        run = self.ctx.state.get(wandb.RUNS, self.key)
-        meta = run["streams"]["wandb-history.jsonl"]
-        self.assertEqual(meta["count"], 640)
-        self.assertGreater(meta["bytes"], self.ctx.max_body_bytes * 50)
-        self.assertEqual(len(meta["tail"]), 1)
-        self.assertLess(max(size for ns, size in sizes if ns == wandb.RUNS), 1100)
-        self.assertLess(max(size for ns, size in sizes if ns == wandb.PENDING), 3600)
-        self.assertTrue(all(not keys for ns, keys in reads if ns.startswith("wandb.rows.")))
-        before = len(self.ctx.attempts)
-        self.stream("wandb-history.jsonl", lines, offset=636)
-        self.assertEqual(len(self.ctx.attempts), before)
-        self.assertEqual(reads[-2][1], ["636", "637", "638", "639"])
-        self.assertEqual(wandb._bucket(run)["historyLineCount"], 640)
-        self.stream("wandb-history.jsonl", ['{"loss":9}'], offset=640)
-        print(json.dumps({"kind":"scaling", "metrics":{"rows":640,"stream_bytes":meta["bytes"],
-              "request_cap":2048,"max_run_bytes":max(n for ns,n in sizes if ns == wandb.RUNS),
-              "max_pending_bytes":max(n for ns,n in sizes if ns == wandb.PENDING)}}), flush=True)
-
-    def test_mutable_rows_keep_current_exact_bytes(self):
-        self.stream("output.log", ["é", "tail"])
-        self.stream("output.log", ["changed"])
-        self.assertEqual(stream_bytes(self.ctx, self.key, "output.log")[0], b"changed\ntail\n")
-        meta = self.ctx.state.get(wandb.RUNS, self.key)["streams"]["output.log"]
-        self.assertEqual(meta, {"count":2,"bytes":13,"tail":[]})
-        self.stream("wandb-summary.json", ['{"first":1}', '{"last":2}'])
-        self.stream("wandb-summary.json", ['{"first":3}'])
-        self.assertEqual(json.loads(self.ctx.state.get(wandb.RUNS, self.key)["summaryMetrics"]), {"last":2})
-
-    def test_row_and_metric_indexes_are_scoped_by_run_and_stream(self):
-        line = '{"loss":1,"_step":0,"_timestamp":12.5}'
-        self.stream("wandb-history.jsonl", [line])
-        self.stream("wandb-events.jsonl", [line])
-        result = gql(self.ctx, 'mutation { upsertBucket(input:{name:"other",modelName:"p",entityName:"e"}) { bucket { id } } }')
-        self.assertEqual(result.status, 200)
-        wandb.handle(self.ctx, request("/files/e/p/other/file_stream", {"files":{"wandb-history.jsonl":{"offset":0,"content":[line]}}}))
-        self.assertEqual(len(self.ctx.batches), 3)
-
-    def test_sqlite_crash_boundaries_reopen_without_gap_or_double_insert(self):
-        from nset_compat.context import State as DurableState
-        for stage in ("native", "rows", "identities", "offset", "clear"):
-            for after in (False, True):
-                with self.subTest(stage=stage, after=after), tempfile.TemporaryDirectory() as directory:
-                    self.setUp()
-                    run = self.ctx.state.get(wandb.RUNS, self.key)
-                    self.ctx.state = DurableState(Path(directory) / "state.sqlite")
-                    self.ctx.state.put(wandb.RUNS, self.key, run)
-                    state = self.ctx.state
-                    method = "put_many" if stage in ("rows", "identities") else "put" if stage == "offset" else "delete"
-                    target = self.ctx if stage == "native" else state
-                    if stage == "native":
-                        method = "ingest_metrics"
-                    original = getattr(target, method)
-                    fired = []
-                    def crash(*args, **kwargs):
-                        matches = (stage == "native" or stage == "rows" and args[0].startswith("wandb.rows.")
-                                   or stage == "identities" and args[0].startswith("wandb.metrics.")
-                                   or stage == "offset" and args[0] == wandb.RUNS
-                                   or stage == "clear" and args[0] == wandb.PENDING)
-                        if matches and not fired:
-                            fired.append(True)
-                            if after:
-                                original(*args, **kwargs)
-                            raise RuntimeError("simulated process death")
-                        return original(*args, **kwargs)
-                    setattr(target, method, crash)
-                    lines = ['{"loss":1,"_step":0,"_timestamp":12.5}', '{"loss":2,"_step":1,"_timestamp":13.5}']
-                    with self.assertRaises(RuntimeError):
-                        self.stream("wandb-history.jsonl", lines)
-                    setattr(target, method, original)
-                    state.close()
-                    self.ctx.state = DurableState(Path(directory) / "state.sqlite")
-                    try:
-                        self.stream("wandb-history.jsonl", lines)
-                        self.stream("wandb-history.jsonl", lines, offset=2)  # offline repeat sync
-                        self.assertEqual(len(self.ctx.batches), 2)
-                        self.assertEqual(len(self.ctx.attempts), 2 + (1 if stage == "native" and after else 2 if stage in ("rows", "identities", "offset", "clear") and not (stage == "clear" and after) else 0))
-                        self.assertEqual(stream_bytes(self.ctx, self.key, "wandb-history.jsonl")[0], ("\n".join(lines * 2) + "\n").encode())
-                        self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["streams"]["wandb-history.jsonl"]["count"], 4)
-                        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-                    finally:
-                        self.ctx.state.close()
-
-    def test_current_pending_completion_replays_summary_console_and_metrics(self):
-        from nset_compat.context import State as DurableState
-        for stage in ("journal", "finish"):
-            for after in (False, True):
-                with self.subTest(stage=stage, after=after), tempfile.TemporaryDirectory() as directory:
-                    self.setUp()
-                    run = self.ctx.state.get(wandb.RUNS, self.key)
-                    database = Path(directory) / "state.sqlite"
-                    self.ctx.state = DurableState(database)
-                    self.ctx.state.put(wandb.RUNS, self.key, run)
-                    target = self.ctx.state if stage == "journal" else self.ctx.native
-                    method = "put" if stage == "journal" else "request"
-                    original = getattr(target, method)
-                    fired = []
-                    def crash(*args, **kwargs):
-                        matches = args[0] == (wandb.PENDING if stage == "journal" else "PATCH")
-                        if matches and not fired:
-                            fired.append(True)
-                            if after:
-                                original(*args, **kwargs)
-                            raise RuntimeError("completion crash")
-                        return original(*args, **kwargs)
-                    setattr(target, method, crash)
-                    payload = {"files": {
-                        "wandb-history.jsonl": {"offset": 0, "content": ['{"loss":1}']},
-                        "wandb-summary.json": {"offset": 0, "content": ['{"loss":1,"note":"done"}']},
-                        "output.log": {"offset": 0, "content": ["finished é"]}}, "complete": True, "exitcode": 0}
-                    try:
-                        with self.assertRaisesRegex(RuntimeError, "completion crash"):
-                            wandb.handle(self.ctx, request(self.path, payload))
-                    finally:
-                        setattr(target, method, original)
-                        self.ctx.state.close()
-                    self.ctx.state = DurableState(database)
-                    try:
-                        wandb.handle(self.ctx, request(self.path, payload))
-                        self.assertEqual(len(self.ctx.batches), 1)
-                        run = self.ctx.state.get(wandb.RUNS, self.key)
-                        self.assertEqual(run["state"], "finished")
-                        self.assertEqual(json.loads(run["config"]), {"lr": {"value": 0.1}})
-                        self.assertEqual(json.loads(run["summaryMetrics"]), {"loss": 1, "note": "done"})
-                        self.assertEqual(stream_bytes(self.ctx, self.key, "output.log")[0], "finished é\n".encode())
-                        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
-                    finally:
-                        self.ctx.state.close()
-
-@unittest.skipUnless(os.environ.get("NSET_WANDB_SDK_TEST") == "1", "opt-in real SDK/native integration")
+@unittest.skipUnless(os.environ.get("NSET_BINARY") and os.environ.get("NSET_WANDB_SDK_TEST") == "1", "opt-in official SDK against Rust nset serve")
 class OfficialWandbSDKTests(unittest.TestCase):
-    def test_default_scalar_finish_repeat_resume_and_restart(self):
-        from nset_compat.context import CompatContext
-        from nset_compat.gateway import make_server
-        from support import Server
-        native = Server().start()
-        self.addCleanup(native.close)
-        self.assertGreaterEqual(len(native.token), 40)
-        evidence = ROOT / "artifacts" / "wandb-sdk"
-        evidence.mkdir(parents=True, exist_ok=True)
-        evidence = Path(tempfile.mkdtemp(prefix="case-", dir=evidence))
-        original_handle = wandb.handle
-        rejected_uploads = []
-        def traced_handle(ctx, req):
-            try:
-                response = original_handle(ctx, req)
-            except ProtocolError as exc:
-                print(json.dumps({"route":req.path,"method":req.method,"status":exc.status,"error":exc.code}), flush=True)
-                raise
-            if response is not None:
-                print(json.dumps({"route":req.path,"method":req.method,"status":response.status}), flush=True)
-                if req.path == "/graphql" and "createRunFiles" in req.json().get("query", ""):
-                    rejected_uploads.append((req.json().get("variables"), response.status, response.body))
-                    print(json.dumps({"kind":"sdk_file_rejection", "variables":req.json().get("variables"),
-                                      "status":response.status, "response":response.body}), flush=True)
-            return response
-        wandb.handle = traced_handle
-        self.addCleanup(setattr, wandb, "handle", original_handle)
-        with nullcontext(str(evidence)) as directory:
-            def start_gateway():
-                ctx = CompatContext(native.url, native.token, Path(directory) / "gateway", "http://127.0.0.1:0")
-                server = make_server(ctx)
-                ctx.public_url = f"http://127.0.0.1:{server.server_address[1]}"
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                return ctx, server, thread
+    def setUp(self):
+        self.server = RustServer()
+        self.addCleanup(self.server.close)
+        self.server.start()
+        self.python = os.environ.get("NSET_WANDB_PYTHON", sys.executable)
+        self.env = dict(os.environ, WANDB_BASE_URL=self.server.url, WANDB_API_KEY=self.server.token,
+                        WANDB_DIR=str(self.server.directory), WANDB_CONFIG_DIR=str(self.server.directory / "config"),
+                        WANDB_CACHE_DIR=str(self.server.directory / "cache"), WANDB_SILENT="false")
 
-            ctx, server, thread = start_gateway()
-            code = r'''
-import json, os, sys, time
-from pathlib import Path
-import wandb
+    def sdk(self, args, timeout=180):
+        result = subprocess.run([self.python, *args], env=self.env, cwd=self.server.directory, capture_output=True, text=True, timeout=timeout)
+        print(result.stdout, result.stderr, flush=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def test_default_scalar_finish_repeat_resume_and_restart(self):
+        code = r'''
+import json, sys, wandb
 print(json.dumps({"sdk":wandb.__version__,"python":sys.executable}), flush=True)
 phase = int(sys.argv[1])
-r = wandb.init(project="sdk-project", entity="sdk-entity", id="sdk-run", resume="allow" if phase == 0 else "must", config={"lr":0.1}, settings=wandb.Settings(init_timeout=35))
+r = wandb.init(project="sdk-project",entity="sdk-entity",id="sdk-run",resume="allow" if phase == 0 else "must",config={"lr":0.1},settings=wandb.Settings(init_timeout=35))
 assert r.resumed == bool(phase), (phase,r.resumed)
-if phase:
-    Path("ready").touch()
-    while not Path("go").exists():
-        time.sleep(0.02)
-r.config.update({"schedule":{"kind":"cosine"}}, allow_val_change=True)
+r.config.update({"schedule":{"kind":"cosine"}},allow_val_change=True)
 r.log({"loss":3.0-phase,"label":"raw-string"})
 r.summary["note"] = "retained summary"
 r.finish()
-# A second distinct run verifies repeated init/finish in the same process.
 if phase == 0:
-    with wandb.init(project="sdk-project", entity="sdk-entity", id="sdk-second") as other:
-        print("default console output", flush=True)
+    with wandb.init(project="sdk-project",entity="sdk-entity",id="sdk-second") as other:
+        print("default console output",flush=True)
         other.log({"accuracy":0.9})
 '''
-            try:
-                for phase in range(2):
-                    env = dict(os.environ, WANDB_BASE_URL=ctx.public_url, WANDB_API_KEY=native.token,
-                               WANDB_DIR=directory, WANDB_CONFIG_DIR=directory + "/config", WANDB_CACHE_DIR=directory + "/cache", WANDB_SILENT="false")
-                    if phase == 0:
-                        process = subprocess.run([sys.executable, "-c", code, str(phase)], env=env, cwd=directory, capture_output=True, text=True, timeout=150)
-                        stdout, stderr, returncode = process.stdout, process.stderr, process.returncode
-                    else:
-                        outage_seen = threading.Event()
-                        original_ingest = ctx.ingest_metrics
-                        def observing_ingest(*args, **kwargs):
-                            try:
-                                return original_ingest(*args, **kwargs)
-                            except Exception:
-                                outage_seen.set()
-                                raise
-                        ctx.ingest_metrics = observing_ingest
-                        process = subprocess.Popen([sys.executable, "-c", code, str(phase)], env=env, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                        try:
-                            deadline = time.monotonic() + 40
-                            while not (evidence / "ready").exists() and process.poll() is None and time.monotonic() < deadline:
-                                time.sleep(0.02)
-                            self.assertTrue((evidence / "ready").exists(), "SDK did not reach outage barrier")
-                            native.stop()
-                            (evidence / "go").touch()
-                            failed_while_down = outage_seen.wait(10)
-                            native.start()
-                            stdout, stderr = process.communicate(timeout=150)
-                            returncode = process.returncode
-                            self.assertTrue(failed_while_down, "No real ingest attempt observed during outage")
-                        finally:
-                            if process.poll() is None:
-                                process.kill()
-                                process.communicate()
-                    print(stdout, stderr, flush=True)
-                    self.assertEqual(returncode, 0, stdout + stderr)
-                    if phase == 0:
-                        server.shutdown(); server.server_close(); thread.join()
-                        ctx.close()
-                        ctx, server, thread = start_gateway()
-                # Default SDK settings attempt metadata-file uploads even for scalar runs.
-                # Finish must work despite honest rejection; no pretend upload success.
-                self.assertTrue(rejected_uploads, "Default SDK never exercised file upload rejection")
-                self.assertTrue(any("wandb-metadata.json" in (variables or {}).get("files", [])
-                                    for variables, _, _ in rejected_uploads))
-                for variables, status, body in rejected_uploads:
-                    self.assertEqual(status, 400, variables)
-                    self.assertEqual(body["errors"][0]["extensions"]["code"], "UNSUPPORTED_OPERATION")
-                    self.assertNotIn("data", body)
-                key = wandb._identity("sdk-entity", "sdk-project", "sdk-run")
-                run = ctx.state.get(wandb.RUNS, key)
-                points = list(native.client.metric_history(run["native_id"], "loss"))
-                self.assertEqual([p["value"] for p in points], [3.0, 2.0])
-                self.assertEqual([p["step"] for p in points], [0, 1])
-                second_key = wandb._identity("sdk-entity", "sdk-project", "sdk-second")
-                console, _ = stream_bytes(ctx, second_key, "output.log")
-                self.assertIn(b"default console output", console)
-                self.assertEqual(run["state"], "finished")
-                self.assertEqual(json.loads(run["config"])["schedule"]["value"], {"kind":"cosine"})
-                raw, _ = stream_bytes(ctx, key, "wandb-history.jsonl")
-                self.assertIn(b"raw-string", raw)
-                self.assertEqual(len(raw.splitlines()), 2)
-                summary, _ = stream_bytes(ctx, key, "wandb-summary.json")
-                self.assertIn(b"retained summary", summary)
-                print(json.dumps({"kind":"final","sdk":"wandb","metrics":{"history_rows":len(points),"restart_resume":1,"native_outage_retry":1}}), flush=True)
-            finally:
-                server.shutdown(); server.server_close(); thread.join()
-                ctx.close()
-
-
-    def test_multiclient_http_streams_exceed_request_cap(self):
-        from concurrent.futures import ThreadPoolExecutor
-        from urllib.request import Request as HTTPRequest
-        from nset_compat.context import CompatContext
-        from nset_compat.gateway import make_server
-        from support import Server
-        native = Server().start()
-        self.addCleanup(native.close)
-        root = ROOT / "artifacts" / "wandb-sdk"
-        root.mkdir(parents=True, exist_ok=True)
-        directory = Path(tempfile.mkdtemp(prefix="scaling-", dir=root))
-        ctx = CompatContext(native.url, native.token, directory / "gateway", "http://127.0.0.1:0")
-        server = make_server(ctx, max_body_bytes=16 * 1024)
-        ctx.public_url = f"http://127.0.0.1:{server.server_address[1]}"
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        def send(path, data):
-            req = HTTPRequest(ctx.public_url + path, data=json.dumps(data).encode(),
-                              headers={"Authorization":"Bearer " + native.token, "Content-Type":"application/json"})
-            with urlopen(req, timeout=20) as response:
-                return json.load(response)
-        def client(index):
-            name = "client-" + str(index)
-            response = send("/graphql", {"query":'mutation { upsertBucket(input:{name:"' + name + '",modelName:"p",entityName:"e"}) { bucket { id } } }'})
-            self.assertNotIn("errors", response)
-            path = "/files/e/p/" + name + "/file_stream"
-            for offset in range(48):
-                line = json.dumps({"_step":offset,"_timestamp":100 + offset,"loss":offset,"raw":"x" * 8192})
-                send(path, {"files":{"wandb-history.jsonl":{"offset":offset,"content":[line]}}})
-            # Retry old source offset and repeat-sync observation at new offset.
-            send(path, {"files":{"wandb-history.jsonl":{"offset":47,"content":[line]}}})
-            send(path, {"files":{"wandb-history.jsonl":{"offset":48,"content":[line]}}})
-            key = wandb._identity("e", "p", name)
-            run = ctx.state.get(wandb.RUNS, key)
-            self.assertEqual(run["streams"]["wandb-history.jsonl"]["count"], 49)
-            self.assertGreater(run["streams"]["wandb-history.jsonl"]["bytes"], ctx.max_body_bytes * 20)
-            points = list(native.client.metric_history(run["native_id"], "loss"))
-            self.assertEqual([point["value"] for point in points], list(range(48)))
-            self.assertLess(len(json.dumps(run)), 10000)
-            return run["streams"]["wandb-history.jsonl"]["bytes"]
-        try:
-            with ThreadPoolExecutor(max_workers=3) as workers:
-                sizes = list(workers.map(client, range(3)))
-            print(json.dumps({"kind":"http_scaling","metrics":{"clients":3,"rows_per_client":49,
-                  "points_per_client":48,"stream_bytes":sum(sizes),"request_cap":ctx.max_body_bytes}}), flush=True)
-        finally:
-            server.shutdown(); server.server_close(); thread.join()
-            ctx.close()
-
+        for phase in range(2):
+            self.sdk(["-c", code, str(phase)])
+            if phase == 0:
+                self.server.stop(kill=True)
+                self.server.start()
+        run = self.server.bucket("sdk-run", "sdk-entity", "sdk-project")
+        points = self.server.points(run["id"], "loss")
+        self.assertEqual([p["value"] for p in points], [3, 2])
+        self.assertEqual([p["step"] for p in points], [0, 1])
+        self.assertEqual(run["state"], "finished")
+        self.assertEqual(json.loads(run["summaryMetrics"])["note"], "retained summary")
+        self.assertIn("raw-string", run["historyTail"])
+        native = self.server.request("/api/runs/" + run["id"], method="GET")[1]
+        self.assertEqual(native["params"]["lr"], 0.1)
+        self.assertEqual(native["params"]["schedule"], {"kind": "cosine"})
+        self.assertGreater(self.server.bucket("sdk-second", "sdk-entity", "sdk-project")["logLineCount"], 0)
+        # Explicit nonretryable rejection remains part of the real SDK contract.
+        status, body = self.server.gql('mutation { createRunFiles(input:{entityName:"sdk-entity",projectName:"sdk-project",runName:"sdk-run",files:["wandb-metadata.json"]}) { files { uploadUrl } } }')
+        self.assertEqual(status, 400, body)
+        self.assertNotIn("data", body)
 
     def test_offline_capture_then_sync_and_repeat_sync(self):
-        from nset_compat.context import CompatContext
-        from nset_compat.gateway import make_server
-        from support import Server
-        native = Server().start()
-        self.addCleanup(native.close)
-        root = ROOT / "artifacts" / "wandb-sdk"
-        root.mkdir(parents=True, exist_ok=True)
-        directory = Path(tempfile.mkdtemp(prefix="offline-", dir=root))
-        env = dict(os.environ, WANDB_BASE_URL="http://127.0.0.1:1", WANDB_API_KEY=native.token,
-                   WANDB_DIR=str(directory), WANDB_CONFIG_DIR=str(directory / "config"),
-                   WANDB_CACHE_DIR=str(directory / "cache"), WANDB_SILENT="false")
-        code = """
+        self.env["WANDB_BASE_URL"] = "http://127.0.0.1:1"
+        self.sdk(["-c", '''
 import wandb
 with wandb.init(mode="offline",entity="sdk-entity",project="sdk-project",id="offline-run",config={"lr":0.2}) as r:
     r.log({"offline_loss":7.0,"label":"offline raw"})
     r.summary["note"] = "offline summary"
-"""
-        result = subprocess.run([sys.executable,"-c",code],env=env,cwd=directory,capture_output=True,text=True,timeout=60)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        sources = list((directory / "wandb").glob("offline-run-*/run-*.wandb"))
+'''])
+        sources = list((self.server.directory / "wandb").glob("offline-run-*/run-*.wandb"))
         self.assertEqual(len(sources), 1)
         self.assertGreater(sources[0].stat().st_size, 0)
-        ctx = CompatContext(native.url, native.token, directory / "gateway", "http://127.0.0.1:0")
-        server = make_server(ctx)
-        ctx.public_url = f"http://127.0.0.1:{server.server_address[1]}"
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        env["WANDB_BASE_URL"] = ctx.public_url
-        try:
-            for repeat in range(2):
-                result = subprocess.run([sys.executable,"-m","wandb","sync","--include-synced",str(sources[0].parent)], env=env,cwd=directory,capture_output=True,text=True,timeout=150)
-                print(result.stdout, result.stderr, flush=True)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            key = wandb._identity("sdk-entity","sdk-project","offline-run")
-            run = ctx.state.get(wandb.RUNS, key)
-            points = list(native.client.metric_history(run["native_id"],"offline_loss"))
-            self.assertEqual([p["value"] for p in points],[7.0])
-            self.assertEqual(run["state"], "finished")
-            raw, _ = stream_bytes(ctx, key, "wandb-history.jsonl")
-            self.assertIn(b"offline raw", raw)
-            self.assertEqual(json.loads(run["config"])["lr"]["value"], 0.2)
-            self.assertEqual(json.loads(run["summaryMetrics"])["note"], "offline summary")
-            print(json.dumps({"kind":"final","sdk":"wandb","metrics":{"offline_sync":1,"repeat_sync_points":len(points)}}),flush=True)
-        finally:
-            server.shutdown(); server.server_close(); thread.join()
-            ctx.close()
+        self.env["WANDB_BASE_URL"] = self.server.url
+        for repeat in range(2):
+            self.sdk(["-m", "wandb", "sync", "--include-synced", str(sources[0].parent)])
+            if repeat == 0:
+                self.server.stop(kill=True)
+                self.server.start()
+        run = self.server.bucket("offline-run", "sdk-entity", "sdk-project")
+        self.assertEqual([p["value"] for p in self.server.points(run["id"], "offline_loss")], [7])
+        self.assertEqual(run["state"], "finished")
+        self.assertIn("offline raw", run["historyTail"])
+        self.assertEqual(json.loads(run["summaryMetrics"])["note"], "offline summary")
+        self.assertEqual(self.server.request("/api/runs/" + run["id"], method="GET")[1]["params"]["lr"], 0.2)
 
 
 if __name__ == "__main__":

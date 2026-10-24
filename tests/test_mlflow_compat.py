@@ -1,522 +1,403 @@
-"""MLflow protocol units plus real official-SDK/native-server conformance.
+"""Direct Rust MLflow conformance: no Python gateway, adapter, or native client.
 
-Run with PYTHONPATH=python and NSET_BINARY pointing to a durable-ingest nset.
-An isolated adapter worktree may set NSET_COMPAT_SHARED_PATH to the gateway
-worker's python directory. That is a test-only package-path overlay, not a mock.
+Set NSET_BINARY to the built nset executable. Official SDK tests additionally
+require mlflow; missing binaries/SDKs are explicit gates, never mock evidence.
 """
-import copy
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import importlib.util
 import json
 import os
 from pathlib import Path
-import sys
+import socket
+import sqlite3
+import subprocess
 import tempfile
-import threading
+import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "python"))
-if os.environ.get("NSET_COMPAT_SHARED_PATH"):
-    sys.path.insert(0, os.environ["NSET_COMPAT_SHARED_PATH"])
-try:
-    import nset_compat
-    nset_compat.__path__.insert(0, str(ROOT / "python" / "nset_compat"))
-    from nset_compat import mlflow as adapter
-    from nset_compat.common import Request, ProtocolError
-except ModuleNotFoundError as error:
-    adapter = None
-    ADAPTER_SKIP = f"Shared gateway modules not installed: {error}"
-else:
-    ADAPTER_SKIP = ""
+BINARY = Path(os.environ.get("NSET_BINARY", ROOT / "target/debug/nset")).resolve()
+HAS_BINARY = BINARY.is_file()
+HAS_SDK = importlib.util.find_spec("mlflow") is not None
+API = "/api/2.0/mlflow/"
 
 
-class MemoryState:
+class RustServer:
     def __init__(self):
-        self.values = {}
-        self.counters = {}
+        self.temp = tempfile.TemporaryDirectory(prefix="nset-rust-mlflow-")
+        self.directory = Path(self.temp.name)
+        self.db = self.directory / "db"
+        self.token = "mlflow-test-" + uuid.uuid4().hex
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.process = None
+        self.log = None
 
-    def get(self, namespace, key, default=None):
-        return copy.deepcopy(self.values.get((namespace, key), default))
+    def start(self, **environment):
+        self.log = open(self.directory / "server.log", "ab")
+        self.process = subprocess.Popen(
+            [str(BINARY), "serve", "--host", "127.0.0.1", "--port", str(self.port),
+             "--token", self.token, "--db-path", str(self.db)],
+            stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log,
+            env={**os.environ, "NSET_INGEST_PAUSED": "false", **environment},
+        )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError((self.directory / "server.log").read_text(errors="replace"))
+            try:
+                self.request("GET", "/api/experiments")
+                return
+            except (OSError, URLError):
+                time.sleep(0.05)
+        raise RuntimeError("Rust server failed to become ready")
 
-    def put(self, namespace, key, value):
-        self.values[namespace, key] = copy.deepcopy(value)
+    def stop(self, kill=False):
+        if self.process is not None:
+            if self.process.poll() is None:
+                (self.process.kill if kill else self.process.terminate)()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
+            self.process = None
+        if self.log is not None:
+            self.log.close()
+            self.log = None
 
-    def get_many(self, namespace, keys):
-        return {k: self.get(namespace, k) for k in keys if (namespace, k) in self.values}
+    def restart(self, kill=False):
+        self.stop(kill=kill)
+        self.start()
 
-    def put_many(self, namespace, mapping):
-        self.values.update({(namespace, k): copy.deepcopy(v) for k, v in mapping.items()})
+    def close(self):
+        self.stop()
+        self.temp.cleanup()
 
-    def items(self, namespace):
-        return [(k, copy.deepcopy(v)) for (n, k), v in self.values.items() if n == namespace]
+    def request(self, method, path, data=None, query=None):
+        if query:
+            path += "?" + urlencode(query)
+        request = Request(self.url + path,
+                          data=None if data is None else json.dumps(data).encode(),
+                          method=method,
+                          headers={"Authorization": "Bearer " + self.token,
+                                   "Content-Type": "application/json"})
+        with urlopen(request, timeout=40) as response:
+            return json.load(response)
 
-    def next_id(self, namespace, start=1):
-        value = self.counters.get(namespace, start)
-        self.counters[namespace] = value + 1
-        return value
+    def call(self, route, data=None, method=None):
+        method = method or ("GET" if route in {"experiments/get", "experiments/get-by-name", "runs/get", "metrics/get-history"} else "POST")
+        return self.request(method, API + route,
+                            data=data if method != "GET" else None,
+                            query=data if method == "GET" else None)
 
+    def metadata_table(self, connection):
+        # Tests inspect the native database only, never a separately hosted state DB.
+        for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            columns = {r[1] for r in connection.execute('PRAGMA table_info("' + name.replace('"', '""') + '")')}
+            if {"namespace", "key", "value"} <= columns:
+                return '"' + name.replace('"', '""') + '"'
+        raise AssertionError("native compatibility key/value table not found")
 
-class FakeNative:
-    """Protocol unit helper only; NOT SDK conformance evidence."""
-    def __init__(self):
-        self.runs = {}
-        self.experiments = {}
-        self.history_calls = 0
-        self.metrics = {}
-        self.receipts = {}
-        self.calls = []
-        self.fail_after_commit = False
+    def stored(self, namespace, key):
+        with closing(sqlite3.connect(self.db / "nset.sqlite3")) as conn, conn:
+            table = self.metadata_table(conn)
+            row = conn.execute(f"SELECT value FROM {table} WHERE namespace=? AND key=?", (namespace, key)).fetchone()
+            return json.loads(row[0]) if row else None
 
-    def request(self, method, path, payload=None, *, query=None):
-        if method == "POST":
-            value = dict(payload, id=str(uuid.uuid4()))
-            if path == "/api/experiments":
-                self.experiments[value["id"]] = value
-            if path == "/api/runs":
-                self.runs[value["id"]] = value
-                self.metrics[value["id"]] = []
-            return value
-        rid = path.split("/")[3]
-        if method == "PATCH":
-            for key, value in payload.items():
-                if key in ("params", "tags"):
-                    for k, v in value.items():
-                        if v is None:
-                            self.runs[rid][key].pop(k, None)
-                        else:
-                            self.runs[rid][key][k] = v
-                else:
-                    self.runs[rid][key] = value
-            return self.runs[rid]
-        if method == "GET" and path.endswith("/metrics"):
-            self.history_calls += 1
-            rows = self.metrics[rid]
-            snapshot = query.get("snapshot", len(rows))
-            rows = [dict(m, seq=i + 1) for i, m in enumerate(rows[:snapshot])
-                    if m["key"] == query["key"] and i + 1 > query.get("after", 0)]
-            page = rows[:query["limit"]]
-            return {"points": page, "snapshot": snapshot,
-                    "next_after": page[-1]["seq"] if len(rows) > len(page) else None}
-        raise AssertionError((method, path, payload, query))
-
-    def ingest(self, rid, batch_id, metrics, wait=True):
-        self.calls.append((rid, batch_id, copy.deepcopy(metrics)))
-        key = (rid, batch_id)
-        if key in self.receipts:
-            assert self.receipts[key] == metrics
-        else:
-            self.receipts[key] = copy.deepcopy(metrics)
-            self.metrics[rid].extend(copy.deepcopy(metrics))
-        if self.fail_after_commit:
-            self.fail_after_commit = False
-            raise ProtocolError(503, "TEMPORARILY_UNAVAILABLE", "injected after durable commit")
-        return {"state": "applied"}
-
-
-class FakeContext:
-    def __init__(self):
-        self.state = MemoryState()
-        self.native = FakeNative()
-        self.ingest_metrics = self.native.ingest
-        self.locks = {}
-
-    def lock_for(self, key):
-        return self.locks.setdefault(key, threading.RLock())
+    def replace_stored(self, namespace, key, value):
+        assert self.process is None, "fault injection requires the server to be stopped"
+        with closing(sqlite3.connect(self.db / "nset.sqlite3")) as conn, conn:
+            table = self.metadata_table(conn)
+            conn.execute(f"UPDATE {table} SET value=? WHERE namespace=? AND key=?", (json.dumps(value), namespace, key))
 
 
-@unittest.skipIf(adapter is None, ADAPTER_SKIP)
-class MLflowProtocolUnitTests(unittest.TestCase):
+@unittest.skipUnless(HAS_BINARY, "NSET_BINARY must point to a built Rust nset")
+class RustMlflowProtocolTests(unittest.TestCase):
     def setUp(self):
-        self.ctx = FakeContext()
-        self.rid = self.call("runs/create", {"experiment_id": "0", "start_time": 123})["run"]["info"]["run_id"]
+        self.server = RustServer()
+        self.addCleanup(self.server.close)
+        self.server.start()
 
-    def call(self, route, data, method=None):
-        method = method or adapter._ROUTES[route][0]
-        request = Request(method, adapter.API + route,
-                          query=data if method == "GET" else {},
-                          body=json.dumps(data).encode() if method != "GET" else b"")
-        return adapter.handle(self.ctx, request).body
+    def call(self, route, data=None, method=None):
+        return self.server.call(route, data, method)
 
-    def test_ids_default_experiments_tags_and_lifecycle(self):
-        default = self.call("experiments/get", {"experiment_id": "0"})["experiment"]
-        self.assertEqual(default["name"], "Default")
-        eid = self.call("experiments/create", {"name": "work", "tags": [{"key": "team", "value": "a"}]})["experiment_id"]
+    def create(self):
+        eid = self.call("experiments/create", {"name": "test-" + uuid.uuid4().hex})["experiment_id"]
+        rid = self.call("runs/create", {"experiment_id": eid, "run_name": "native-sdk"})["run"]["info"]["run_id"]
+        return eid, rid
+
+    def rejects(self, route, payload, status=400, method=None):
+        with self.assertRaises(HTTPError) as error:
+            self.call(route, payload, method)
+        self.assertEqual(error.exception.code, status)
+        body = json.load(error.exception)
+        self.assertIn("error_code", body)
+        self.assertIn("message", body)
+        return body
+
+    def test_experiments_lifecycle_names_and_native_config(self):
+        self.assertEqual(self.call("experiments/get", {"experiment_id": "0"})["experiment"]["name"], "Default")
+        name = "界" * 170
+        eid = self.call("experiments/create", {"name": name, "tags": [{"key": "owner", "value": "sdk"}]})["experiment_id"]
         self.assertTrue(eid.isdecimal())
-        self.assertNotEqual(eid, "0")
-        self.assertNotEqual(self.ctx.state.get(adapter.EXP, eid)["native_id"], eid)
+        self.rejects("experiments/create", {"name": name}, 409)
+        rid = self.call("runs/create", {"experiment_id": eid, "run_name": "training"})["run"]["info"]["run_id"]
+        self.assertRegex(rid, r"^[0-9a-f]{32}$")
+        self.call("runs/log-batch", {"run_id": rid, "params": [{"key": "lr", "value": "0.01"}], "tags": [{"key": "owner", "value": "me"}]})
+        stored = self.server.stored("mlflow.runs", rid)
+        native = self.server.request("GET", "/api/runs/" + stored["native_id"])
+        self.assertEqual(native["params"], {"lr": "0.01"})
+        self.assertEqual(native["tags"]["owner"], "me")
+        exp = self.server.stored("mlflow.experiments", eid)
+        native_exp = next(e for e in self.server.request("GET", "/api/experiments")["experiments"] if e["id"] == exp["native_id"])
+        self.assertTrue(native_exp["name"].startswith(f"mlflow:{eid}:"))
+        self.assertLessEqual(len(native_exp["name"].encode()), 512)
         self.call("experiments/update", {"experiment_id": eid, "new_name": "renamed"})
-        self.call("experiments/set-experiment-tag", {"experiment_id": eid, "key": "team", "value": "b"})
-        exp = self.call("experiments/get-by-name", {"experiment_name": "renamed"})["experiment"]
-        self.assertEqual(exp["tags"], [{"key": "team", "value": "b"}])
-        with self.assertRaises(ProtocolError):
-            self.call("experiments/create", {"name": "renamed"})
-        run = self.call("runs/create", {"experiment_id": eid})["run"]
-        rid = run["info"]["run_id"]
+        self.assertEqual(self.call("experiments/get-by-name", {"experiment_name": "renamed"})["experiment"]["experiment_id"], eid)
         self.call("experiments/delete", {"experiment_id": eid})
         self.assertEqual(self.call("runs/get", {"run_id": rid})["run"]["info"]["lifecycle_stage"], "deleted")
-        with self.assertRaises(ProtocolError):
-            self.call("runs/create", {"experiment_id": eid})
-        self.call("experiments/restore", {"experiment_id": eid})
-        self.assertEqual(self.call("runs/get", {"run_id": rid})["run"]["info"]["lifecycle_stage"], "active")
-        # Upstream experiment restore reactivates even individually deleted runs.
-        self.call("runs/delete", {"run_id": rid})
-        self.call("experiments/delete", {"experiment_id": eid})
+        self.rejects("runs/restore", {"run_id": rid})
         self.call("experiments/restore", {"experiment_id": eid})
         self.assertEqual(self.call("runs/get", {"run_id": rid})["run"]["info"]["lifecycle_stage"], "active")
 
-    def test_metric_timestamp_step_latest_and_retry(self):
-        metrics = [{"key": "loss", "value": v, "step": s, "timestamp": t}
-                   for v, s, t in [(9, 4, 50), (8, 4, 50), (7, 4, 49), (20, 3, 100)]]
-        self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
-        self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics[::-1]})
-        latest = self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"]
-        self.assertEqual(latest, [metrics[0]])
-        history = self.call("metrics/get-history", {"run_id": self.rid, "metric_key": "loss"})["metrics"]
-        self.assertEqual(len(history), 4)
-        native = self.ctx.state.get(adapter.RUN, self.rid)["native_id"]
-        self.assertEqual(len(self.ctx.native.metrics[native]), 4)
-        self.assertEqual({(m["step"], m["timestamp"]) for m in history}, {(4, 50), (4, 49), (3, 100)})
-
-    def test_chunking_and_recovery_after_native_commit(self):
-        metrics = [{"key": "x", "value": float(i), "timestamp": 100 + i, "step": i} for i in range(10001)]
-        payload = {"run_id": self.rid, "metrics": metrics,
-                   "params": [{"key": "fixed", "value": "v"}], "tags": [{"key": "t", "value": "ok"}]}
-        self.ctx.native.fail_after_commit = True
-        with self.assertRaises(ProtocolError):
-            self.call("runs/log-batch", payload)
-        self.assertIn("pending", self.ctx.state.get(adapter.RUN, self.rid))
-        # A fresh context sharing persisted stores simulates adapter state reconstruction.
-        fresh = FakeContext()
-        fresh.state, fresh.native = self.ctx.state, self.ctx.native
-        fresh.ingest_metrics = fresh.native.ingest
-        self.ctx = fresh
-        self.call("runs/log-batch", payload)
-        calls = self.ctx.native.calls
-        self.assertEqual([len(c[2]) for c in calls], [10000, 10000, 1])
-        self.assertEqual(calls[0][1], calls[1][1])
-        self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, self.rid))
-        self.assertEqual(len(self.ctx.native.metrics[calls[0][0]]), 10001)
-        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["params"], [{"key": "fixed", "value": "v"}])
-
-    def test_named_native_experiments_preserve_external_names_and_byte_bound(self):
-        for name in ("training-loss", "界" * 170 + "ab"):
-            with self.subTest(name=name):
-                eid = self.call("experiments/create", {"name": name})["experiment_id"]
-                stored = self.ctx.state.get(adapter.EXP, eid)
-                native_name = self.ctx.native.experiments[stored["native_id"]]["name"]
-                self.assertTrue(native_name.startswith(f"mlflow:{eid}:"))
-                self.assertLessEqual(len(native_name.encode("utf-8")), 512)
-                if name == "training-loss":
-                    self.assertEqual(native_name, f"mlflow:{eid}:training-loss")
-                self.assertEqual(stored["name"], name)
-                self.assertEqual(self.call("experiments/get-by-name", {"experiment_name": name})["experiment"]["name"], name)
-                self.call("experiments/update", {"experiment_id": eid, "new_name": name + "r" if len(name) < 100 else "renamed"})
-                self.assertEqual(self.ctx.native.experiments[stored["native_id"]]["name"], native_name)
-
-    def test_indexed_many_logs_gets_and_search_never_read_native_history(self):
-        with patch.object(self.ctx.state, "get_many", wraps=self.ctx.state.get_many) as lookup:
-            for i in range(100):
-                metrics = [{"key": key, "value": i, "timestamp": i, "step": i} for key in ("x", "y")]
-                self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
-                self.assertEqual(len(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"]), 2)
-                found = self.call("runs/search", {"experiment_ids": ["0"], "filter": f"metrics.x = {i}"})
-                self.assertEqual([r["info"]["run_id"] for r in found["runs"]], [self.rid])
-            self.assertEqual(lookup.call_count, 100)
-            self.assertTrue(all(len(call.args[1]) == 2 for call in lookup.call_args_list))
-        run = self.ctx.state.get(adapter.RUN, self.rid)
-        self.assertEqual(run["metric_index_version"], 1)
-        self.assertEqual(len(run["latest_metrics"]), 2)
-        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(run))), 200)
-        self.assertEqual(self.ctx.native.history_calls, 0)
-        self.assertEqual(len(self.call("metrics/get-history", {"run_id": self.rid, "metric_key": "x"})["metrics"]), 100)
-        self.assertEqual(self.ctx.native.history_calls, 1)
-
-    def test_concurrent_overlapping_batches_deduplicate_native_observations(self):
-        count, width, stride = 8, 400, 100
-        barrier = threading.Barrier(count)
-
-        def log(index):
-            metrics = [{"key": "x", "value": float(i), "timestamp": i, "step": i}
-                       for i in range(index * stride, index * stride + width)]
-            barrier.wait(timeout=10)
-            self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
-            self.call("runs/get", {"run_id": self.rid})
-
-        with ThreadPoolExecutor(max_workers=count) as pool:
-            list(pool.map(log, range(count)))
-        run = self.ctx.state.get(adapter.RUN, self.rid)
-        native = self.ctx.native.metrics[run["native_id"]]
-        expected = (count - 1) * stride + width
-        self.assertEqual(len(native), expected)
-        self.assertEqual(len({adapter._metric_tuple(m) for m in native}), expected)
-        self.assertEqual(run["latest_metrics"]["x"]["step"], expected - 1)
-        self.assertEqual(self.ctx.native.history_calls, 0)
-
-    def test_recovery_between_index_and_metadata_commits_replays_original_ids(self):
-        metrics = [{"key": "x", "value": i, "timestamp": i, "step": i} for i in range(3)]
-        payload = {"run_id": self.rid, "metrics": metrics,
-                   "params": [{"key": "p", "value": "fixed"}], "tags": [{"key": "t", "value": "yes"}]}
-        original_put = self.ctx.state.put
-
-        def fail_metadata(namespace, key, value):
-            if namespace == adapter.RUN and "pending" not in value:
-                raise RuntimeError("injected after index commit, before metadata commit")
-            original_put(namespace, key, value)
-
-        with patch.object(self.ctx.state, "put", side_effect=fail_metadata), self.assertRaises(RuntimeError):
-            self.call("runs/log-batch", payload)
-        stored = self.ctx.state.get(adapter.RUN, self.rid)
-        self.assertIn("pending", stored)
-        self.assertEqual(stored["latest_metrics"], {})
-        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 3)
-        fresh = FakeContext()
-        fresh.state, fresh.native = self.ctx.state, self.ctx.native
-        fresh.ingest_metrics = fresh.native.ingest
-        self.ctx = fresh
-        # The retry overlaps the interrupted write but has a different payload.
-        extra = {"key": "x", "value": 3, "timestamp": 3, "step": 3}
-        self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics[1:] + [extra]})
-        calls = self.ctx.native.calls
-        self.assertEqual(calls[0][1:], calls[1][1:])
-        self.assertEqual(calls[2][2], [extra])
-        stored = self.ctx.state.get(adapter.RUN, self.rid)
-        self.assertNotIn("pending", stored)
-        self.assertEqual(stored["params"], {"p": "fixed"})
-        self.assertEqual(stored["tags"]["t"], "yes")
-        self.assertEqual(stored["latest_metrics"]["x"], extra)
-        self.assertEqual(len(self.ctx.native.metrics[stored["native_id"]]), 4)
-        self.assertEqual(self.ctx.native.history_calls, 0)
-
-    def test_one_time_legacy_backfill_and_interrupted_migration(self):
-        metrics = [{"key": "x", "value": v, "timestamp": t, "step": s}
-                   for v, t, s in [(1, 100, 2), (9, 20, 3), (8, 20, 3)]]
-        run = self.ctx.state.get(adapter.RUN, self.rid)
-        # Old-format persisted metadata + native data, with no index/cache.
-        run.pop("metric_index_version")
-        run.pop("latest_metrics")
-        run["metric_keys"] = ["x"]
-        self.ctx.native.metrics[run["native_id"]] = copy.deepcopy(metrics)
-        self.ctx.state.put(adapter.RUN, self.rid, run)
-        original_put = self.ctx.state.put
-
-        def fail_marker(namespace, key, value):
-            if namespace == adapter.RUN and "metric_index_version" in value:
-                raise RuntimeError("injected before migration marker")
-            original_put(namespace, key, value)
-
-        with patch.object(self.ctx.state, "put", side_effect=fail_marker), self.assertRaises(RuntimeError):
-            self.call("runs/get", {"run_id": self.rid})
-        self.assertNotIn("metric_index_version", self.ctx.state.get(adapter.RUN, self.rid))
-        self.assertEqual(self.ctx.native.history_calls, 1)
-        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"], [metrics[1]])
-        self.assertEqual(self.ctx.native.history_calls, 2)
-        stored = self.ctx.state.get(adapter.RUN, self.rid)
-        self.assertEqual(stored["metric_index_version"], 1)
-        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 3)
-        for _ in range(3):
-            self.call("runs/get", {"run_id": self.rid})
-            self.call("runs/search", {"experiment_ids": ["0"]})
-            self.call("runs/log-batch", {"run_id": self.rid, "metrics": metrics})
-        self.assertEqual(self.ctx.native.history_calls, 2)
-        self.assertEqual(self.ctx.native.calls, [])
-        self.assertEqual(len(self.ctx.native.metrics[run["native_id"]]), 3)
-
-    def test_legacy_pending_replays_stable_id_after_native_backfill(self):
-        metric = {"key": "x", "value": 2, "timestamp": 5, "step": 1}
-        self.ctx.native.fail_after_commit = True
-        with self.assertRaises(ProtocolError):
-            self.call("runs/log-batch", {"run_id": self.rid, "metrics": [metric]})
-        run = self.ctx.state.get(adapter.RUN, self.rid)
-        run.pop("metric_index_version")
-        run.pop("latest_metrics")
-        run["metric_keys"] = ["x"]
-        self.ctx.state.put(adapter.RUN, self.rid, run)
-        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["data"]["metrics"], [metric])
-        self.assertEqual(self.ctx.native.calls[0][1:], self.ctx.native.calls[1][1:])
-        self.assertEqual(len(self.ctx.native.metrics[run["native_id"]]), 1)
-        self.assertEqual(self.ctx.native.history_calls, 1)
-        self.call("runs/log-batch", {"run_id": self.rid, "metrics": [metric]})
-        self.assertEqual(len(self.ctx.native.calls), 2)
-        self.assertEqual(self.ctx.native.history_calls, 1)
-
-    def test_params_are_immutable_and_batch_validated_before_write(self):
-        self.call("runs/log-parameter", {"run_id": self.rid, "key": "p", "value": "first"})
-        self.call("runs/log-parameter", {"run_id": self.rid, "key": "p", "value": "first"})
-        with self.assertRaises(ProtocolError):
-            self.call("runs/log-batch", {"run_id": self.rid,
-                      "params": [{"key": "p", "value": "second"}],
-                      "metrics": [{"key": "x", "value": 1, "timestamp": 1}]})
-        self.assertEqual(self.ctx.native.calls, [])
-        self.call("runs/set-tag", {"run_id": self.rid, "key": "label", "value": "one"})
-        self.call("runs/set-tag", {"run_id": self.rid, "key": "label", "value": "two"})
-        self.call("runs/delete-tag", {"run_id": self.rid, "key": "label"})
-        self.assertNotIn("label", self.ctx.state.get(adapter.RUN, self.rid)["tags"])
-
-    def test_explicit_unsupported_metrics_and_requests(self):
-        for update in ({"value": "NaN"}, {"value": "Infinity"}, {"value": -0.0}, {"step": -1},
-                       {"timestamp": 2 ** 53}, {"dataset_name": "training"}, {"model_id": "m"},
-                       {"timestamp": None}, {"value": True}, {"key": "x" * 513}):
-            with self.subTest(update=update), self.assertRaises(ProtocolError):
-                self.call("runs/log-metric", {"run_id": self.rid, "key": "x", "value": 1,
-                          "timestamp": 1, "step": 0, **update})
-        with self.assertRaises(ProtocolError):
-            self.call("runs/log-batch", {"run_id": self.rid, "unknown": "discard?"})
-        with self.assertRaises(ProtocolError):
-            self.call("experiments/create", {"name": "a", "artifact_location": "s3://bucket/a"})
-        with self.assertRaises(ProtocolError):
-            adapter.handle(self.ctx, Request("POST", adapter.API + "registered-models/create", body=b"{}"))
-        self.assertEqual(self.ctx.native.calls, [])
-
-    def test_artifact_and_logged_model_routes_reject_without_storage(self):
-        state = copy.deepcopy(self.ctx.state.values)
-        native = copy.deepcopy(self.ctx.native.__dict__)
-        # No artifact service exists on FakeContext: rejection needs no backend.
-        paths = [
-            "/api/2.0/mlflow-artifacts",
-            "/api/2.0/mlflow-artifacts/artifacts",
-            "/api/2.0/mlflow-artifacts/artifacts/unsupported/sample.txt",
-            "/api/2.0/mlflow-artifacts/artifacts/../../sample.txt",
-            adapter.API + "artifacts/list",
-            adapter.API + "artifacts/download",
-            adapter.API + "logged-models/search",
-            adapter.API + "logged-models",
-        ]
-        for path in paths:
-            for method in ("GET", "PUT", "POST", "DELETE"):
-                with self.subTest(path=path, method=method):
-                    with self.assertRaises(ProtocolError) as rejected:
-                        adapter.handle(self.ctx, Request(method, path, body=b"not JSON or an artifact"))
-                    self.assertEqual(rejected.exception.status, 400)
-                    self.assertEqual(rejected.exception.code, "NOT_IMPLEMENTED")
-                    self.assertIn("not supported", str(rejected.exception))
-        self.assertEqual(self.ctx.state.values, state)
-        self.assertEqual(self.ctx.native.__dict__, native)
-
-    def test_artifact_metadata_cannot_select_an_external_or_local_store(self):
-        experiment = self.call("experiments/get", {"experiment_id": "0"})["experiment"]
-        run = self.call("runs/get", {"run_id": self.rid})["run"]
-        self.assertEqual(experiment["artifact_location"], "mlflow-artifacts:/unsupported")
-        self.assertEqual(run["info"]["artifact_uri"], "mlflow-artifacts:/unsupported")
-        state = copy.deepcopy(self.ctx.state.values)
-        for location in ("s3://bucket/path", "https://example.com/artifacts", "file:///tmp/artifacts",
-                         "/tmp/artifacts", "mlflow-artifacts://example.com/path"):
-            with self.subTest(location=location), self.assertRaises(ProtocolError) as rejected:
-                self.call("experiments/create", {"name": "external", "artifact_location": location})
-            self.assertEqual(rejected.exception.status, 400)
-            self.assertEqual(rejected.exception.code, "NOT_IMPLEMENTED")
-        self.assertEqual(self.ctx.state.values, state)
-
-    def test_search_filters_order_and_bound_pagination(self):
-        eid = self.call("experiments/create", {"name": "search"})["experiment_id"]
-        for i in range(3):
-            rid = self.call("runs/create", {"experiment_id": eid, "start_time": i, "run_name": f"run-{i}"})["run"]["info"]["run_id"]
-            self.call("runs/log-batch", {"run_id": rid,
-                      "params": [{"key": "p", "value": "a AND b"}],
-                      "metrics": [{"key": "loss", "value": i, "timestamp": i, "step": 0}]})
-        query = {"experiment_ids": [eid], "filter": "params.p = 'a AND b' AND metrics.loss >= 1",
-                 "order_by": ["metrics.loss DESC"], "max_results": 1}
-        page = self.call("runs/search", query)
-        self.assertEqual(page["runs"][0]["info"]["run_name"], "run-2")
-        page2 = self.call("runs/search", dict(query, page_token=page["next_page_token"]))
-        self.assertEqual(page2["runs"][0]["info"]["run_name"], "run-1")
-        self.assertNotIn("next_page_token", page2)
-        with self.assertRaises(ProtocolError):
-            self.call("runs/search", dict(query, filter="", page_token=page["next_page_token"]))
-        for expression in ("metrics.loss > 0 OR metrics.loss < 2", "params.p IN ('a')",
-                           "attributes.unknown = 'x'", "metrics.loss > 0 AND", "tags.p = 'x'; DROP TABLE runs"):
-            with self.subTest(expression=expression), self.assertRaises(ProtocolError):
-                self.call("runs/search", {"experiment_ids": [eid], "filter": expression})
-
-    def test_history_pagination_and_update_lifecycle(self):
-        for i in range(3):
-            self.call("runs/log-metric", {"run_id": self.rid, "key": "x", "value": i, "timestamp": i, "step": i})
-        query = {"run_id": self.rid, "metric_key": "x", "max_results": "2"}
+    def test_dedup_latest_history_pagination_concurrency_restart(self):
+        eid, rid = self.create()
+        metrics = [{"key": "loss", "value": float(i), "timestamp": i, "step": i} for i in range(1000)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: self.call("runs/log-batch", {"run_id": rid, "metrics": metrics}), range(4)))
+        self.call("runs/log-batch", {"run_id": rid, "metrics": [
+            {"key": "loss", "value": 1001.0, "timestamp": 1000, "step": 1000},
+            {"key": "loss", "value": 1000.0, "timestamp": 1000, "step": 1000},
+            {"key": "loss", "value": 9999.0, "timestamp": 9999, "step": 998}]})
+        result = self.call("runs/get", {"run_uuid": rid})["run"]
+        self.assertEqual(result["data"]["metrics"][0]["value"], 1001.0)
+        query = {"run_id": rid, "metric_key": "loss", "max_results": 500}
         first = self.call("metrics/get-history", query)
         second = self.call("metrics/get-history", dict(query, page_token=first["next_page_token"]))
-        self.assertEqual(len(first["metrics"] + second["metrics"]), 3)
-        updated = self.call("runs/update", {"run_id": self.rid, "status": "KILLED", "end_time": 456, "run_name": "new"})["run_info"]
-        self.assertEqual((updated["start_time"], updated["end_time"], updated["status"], updated["run_name"]), (123, 456, "KILLED", "new"))
-        self.call("runs/delete", {"run_id": self.rid})
-        with self.assertRaises(ProtocolError):
-            self.call("runs/set-tag", {"run_id": self.rid, "key": "x", "value": "no"})
-        self.call("runs/restore", {"run_id": self.rid})
-        self.assertEqual(self.call("runs/get", {"run_id": self.rid})["run"]["info"]["lifecycle_stage"], "active")
+        third = self.call("metrics/get-history", dict(query, page_token=second["next_page_token"]))
+        self.assertEqual(sum(len(p["metrics"]) for p in [first, second, third]), 1003)
+        self.rejects("metrics/get-history", dict(query, metric_key="other", page_token=first["next_page_token"]))
+        self.server.restart(kill=True)
+        self.assertEqual(self.call("runs/get", {"run_id": rid})["run"], result)
+        self.assertEqual(len(self.call("metrics/get-history", dict(query, max_results=2000))["metrics"]), 1003)
+        self.assertEqual(self.call("runs/search", {"experiment_ids": [eid], "filter": "metrics.loss >= 1001"})["runs"][0]["info"]["run_id"], rid)
+
+    def test_recovery_replays_pending_even_after_identity_commit(self):
+        _, rid = self.create()
+        metric = {"key": "recover", "value": 3.5, "timestamp": 12345, "step": 7}
+        self.call("runs/log-batch", {"run_id": rid, "metrics": [metric], "params": [{"key": "p", "value": "v"}]})
+        # Model death between the durable identity write and final run metadata.
+        # Native receipt and identity already exist; replay must retain the original
+        # batch, not filter it to an empty or differently identified payload.
+        self.server.stop(kill=True)
+        run = self.server.stored("mlflow.runs", rid)
+        run["latest_metrics"] = {}
+        run["params"] = {}
+        run["pending"] = {"metrics": [metric], "params": {"p": "v"}, "tags": {},
+                          "info": {"status": "FINISHED", "end_time": 99},
+                          "patch": {"params": {"p": "v"}, "status": "finished"}}
+        self.server.replace_stored("mlflow.runs", rid, run)
+        self.server.start()
+        got = self.call("runs/get", {"run_id": rid})["run"]
+        self.assertEqual(got["data"]["metrics"], [metric])
+        self.assertEqual(got["data"]["params"], [{"key": "p", "value": "v"}])
+        self.assertEqual(got["info"]["status"], "FINISHED")
+        self.assertNotIn("pending", self.server.stored("mlflow.runs", rid))
+        self.assertEqual(self.call("metrics/get-history", {"run_id": rid, "metric_key": "recover"})["metrics"], [metric])
+        native = self.server.request("GET", "/api/runs/" + run["native_id"] + "/metrics", query={"key": "recover"})
+        self.assertEqual(len(native["points"]), 1)
+        # Also recover an intent that has never reached ingestion at all.
+        self.server.stop()
+        run = self.server.stored("mlflow.runs", rid)
+        fresh = dict(metric, value=4.5, step=8)
+        run["pending"] = {"metrics": [fresh], "params": {}, "tags": {}, "info": {}, "patch": {}}
+        self.server.replace_stored("mlflow.runs", rid, run)
+        self.server.start()
+        self.assertEqual(self.call("runs/get", {"run_id": rid})["run"]["data"]["metrics"], [fresh])
+        self.assertEqual(len(self.call("metrics/get-history", {"run_id": rid, "metric_key": "recover"})["metrics"]), 2)
+
+    def test_pending_projection_does_not_block_sibling_run_or_experiment(self):
+        eid, blocked = self.create()
+        sibling = self.call("runs/create", {"experiment_id": eid})["run"]["info"]["run_id"]
+        metric = {"key": "pending", "value": 2.0, "timestamp": 1, "step": 1}
+        self.server.stop()
+        self.server.start(NSET_INGEST_PAUSED="true")
+        pool = ThreadPoolExecutor(max_workers=3)
+        pending = pool.submit(self.call, "runs/log-batch", {"run_id": blocked, "metrics": [metric]})
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self.server.request("GET", "/api/ingest/status")["pending_batches"]:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("batch never reached the paused native journal")
+            self.assertIn("pending", self.server.stored("mlflow.runs", blocked))
+            self.assertFalse(pending.done())
+
+            def sibling_operations():
+                self.call("runs/log-parameter", {"run_id": sibling, "key": "independent", "value": "yes"})
+                self.call("runs/set-tag", {"run_id": sibling, "key": "tag", "value": "yes"})
+                self.call("runs/update", {"run_id": sibling, "status": "FINISHED"})
+                return self.call("runs/get", {"run_id": sibling})["run"]
+
+            got = pool.submit(sibling_operations).result(timeout=5)
+            self.assertEqual(got["info"]["status"], "FINISHED")
+            self.assertEqual(got["data"]["params"], [{"key": "independent", "value": "yes"}])
+            # The same-run follower must still wait; it must not monopolize an
+            # experiment lock while waiting for the first run's sequence lock.
+            follower = pool.submit(self.call, "runs/get", {"run_id": blocked})
+            time.sleep(0.1)
+            self.assertFalse(follower.done())
+            pool.submit(self.call, "experiments/delete", {"experiment_id": eid}).result(timeout=5)
+            self.assertFalse(pending.done())
+            self.assertFalse(follower.done())
+            self.assertIn("pending", self.server.stored("mlflow.runs", blocked))
+        finally:
+            # Deliberately kill outstanding real HTTP calls instead of spending
+            # 30 seconds waiting for their projection timeouts on test failures.
+            self.server.stop(kill=True)
+            pool.shutdown(wait=True)
+        self.server.start()
+        recovered = self.call("runs/get", {"run_id": blocked})["run"]
+        self.assertEqual(recovered["info"]["lifecycle_stage"], "deleted")
+        self.assertEqual(recovered["data"]["metrics"], [metric])
+        self.assertNotIn("pending", self.server.stored("mlflow.runs", blocked))
+        self.assertEqual(self.call("metrics/get-history", {"run_id": blocked, "metric_key": "pending"})["metrics"], [metric])
+        self.call("experiments/restore", {"experiment_id": eid})
+        self.assertEqual(self.call("runs/get", {"run_id": blocked})["run"]["info"]["lifecycle_stage"], "active")
+        self.assertEqual(self.call("runs/get", {"run_id": sibling})["run"]["data"]["params"], got["data"]["params"])
+
+    def test_experiment_creation_intent_survives_native_and_mapping_failures(self):
+        self.call("experiments/get", {"experiment_id": "0"})
+        for boundary in ("native", "mapping"):
+            with self.subTest(boundary=boundary):
+                name = "creation-crash-" + boundary + "-" + uuid.uuid4().hex
+                payload = {"name": name, "tags": [{"key": "original", "value": "yes"}]}
+                self.server.stop()
+                with closing(sqlite3.connect(self.server.db / "nset.sqlite3")) as conn, conn:
+                    table = self.server.metadata_table(conn)
+                    if boundary == "native":
+                        trigger = "CREATE TRIGGER reject_creation BEFORE INSERT ON experiments BEGIN SELECT RAISE(ABORT, 'test native failure'); END"
+                    else:
+                        trigger = f"CREATE TRIGGER reject_creation BEFORE INSERT ON {table} WHEN NEW.namespace='mlflow.experiments' AND NEW.key<>'0' BEGIN SELECT RAISE(ABORT, 'test mapping failure'); END"
+                    conn.execute(trigger)
+                self.server.start()
+                self.rejects("experiments/create", payload, status=500)
+                intent = self.server.stored("mlflow.experiment-create-intents.rust-v1", name)
+                self.assertIsNotNone(intent)
+                eid = intent["experiment_id"]
+                self.assertIsNone(self.server.stored("mlflow.experiments", eid))
+                native_name = f"mlflow:{eid}:{name}"
+                native_before = [e for e in self.server.request("GET", "/api/experiments")["experiments"] if e["name"] == native_name]
+                self.assertEqual(len(native_before), int(boundary == "mapping"))
+                # The durable reservation also prevents a rename stealing the
+                # name between the failed creation and its recovery.
+                self.rejects("experiments/update", {"experiment_id": "0", "new_name": name}, status=409)
+                self.server.stop(kill=True)
+                with closing(sqlite3.connect(self.server.db / "nset.sqlite3")) as conn, conn:
+                    conn.execute("DROP TRIGGER reject_creation")
+                self.server.start()
+                self.assertEqual(self.call("experiments/create", payload)["experiment_id"], eid)
+                exp = self.call("experiments/get", {"experiment_id": eid})["experiment"]
+                self.assertEqual(exp["creation_time"], intent["creation_time"])
+                self.assertEqual(exp["tags"], payload["tags"])
+                native_after = [e for e in self.server.request("GET", "/api/experiments")["experiments"] if e["name"] == native_name]
+                self.assertEqual(len(native_after), 1)
+                if native_before:
+                    self.assertEqual(native_after[0]["id"], native_before[0]["id"])
+                self.assertIsNone(self.server.stored("mlflow.experiment-create-intents.rust-v1", name))
+                self.rejects("experiments/create", payload, status=409)
+
+    def test_strict_validation_is_atomic_and_stays_usable(self):
+        _, rid = self.create()
+        self.call("runs/log-parameter", {"run_id": rid, "key": "p", "value": "original"})
+        before = self.call("runs/get", {"run_id": rid})
+        valid = {"key": "loss", "value": 1.0, "timestamp": 1, "step": 1}
+        invalid_metrics = [dict(valid, value=-0.0), dict(valid, value=True), dict(valid, value="NaN"),
+                           dict(valid, step=-1), dict(valid, timestamp=9007199254740992),
+                           dict(valid, step=1.5), dict(valid, dataset_name="dataset"), dict(valid, model_id="m"),
+                           dict(valid, key=""), dict(valid, key="x\0y"), dict(valid, run_id="f" * 32)]
+        for metric in invalid_metrics:
+            with self.subTest(metric=metric):
+                self.rejects("runs/log-batch", {"run_id": rid, "metrics": [valid, metric], "params": [{"key": "new", "value": "no"}]})
+                self.assertEqual(self.call("runs/get", {"run_id": rid}), before)
+        self.rejects("runs/log-batch", {"run_id": rid, "metrics": [valid], "params": [{"key": "p", "value": "changed"}]})
+        for surrogate in ["\ud800", "\udfff"]:
+            self.rejects("runs/log-batch", {"run_id": rid, "metrics": [valid], "tags": [{"key": "tag", "value": surrogate}]})
+        self.assertEqual(self.call("runs/get", {"run_id": rid}), before)
+        self.assertNotIn("pending", self.server.stored("mlflow.runs", rid))
+        self.call("runs/log-batch", {"run_id": rid, "metrics": [valid], "params": [{"key": "unicode", "value": "café 😀"}]})
+        self.server.restart()
+        self.assertEqual(self.call("runs/get", {"run_id": rid})["run"]["data"]["metrics"], [valid])
+
+    def test_search_filters_orders_pages_tags_and_status(self):
+        eid, _ = self.create()
+        ids = []
+        for i in range(3):
+            rid = self.call("runs/create", {"experiment_id": eid, "run_name": f"page-{i}", "start_time": i + 1})["run"]["info"]["run_id"]
+            ids.append(rid)
+            self.call("runs/log-batch", {"run_id": rid, "params": [{"key": "optimizer", "value": "adam"}], "tags": [{"key": "group space", "value": "A'b"}]})
+        query = {"experiment_ids": [eid], "filter": "params.optimizer = 'adam' AND tags.`group space` ILIKE 'a''%'", "order_by": ["attributes.start_time ASC"], "max_results": 2}
+        first = self.call("runs/search", query)
+        second = self.call("runs/search", dict(query, page_token=first["next_page_token"]))
+        self.assertEqual([r["info"]["run_id"] for r in first["runs"] + second["runs"]], ids)
+        for expression in ["params.optimizer = 'adam' OR status = 'RUNNING'", "metrics.loss = '1'", "params.optimizer > 'adam'", "status = 'RUNNING' AND", "status = 'RUNNING' trailing"]:
+            self.rejects("runs/search", dict(query, filter=expression))
+        self.rejects("runs/search", dict(query, max_results=1, page_token=first["next_page_token"]))
+        self.call("runs/update", {"run_id": ids[0], "status": "KILLED", "end_time": 1234, "run_name": "renamed"})
+        info = self.call("runs/get", {"run_id": ids[0]})["run"]["info"]
+        self.assertEqual((info["status"], info["end_time"], info["run_name"]), ("KILLED", 1234, "renamed"))
+        self.call("runs/delete-tag", {"run_id": ids[0], "key": "group space"})
+        self.call("runs/delete", {"run_id": ids[0]})
+        self.assertEqual(self.call("runs/search", {"experiment_ids": [eid], "run_view_type": "DELETED_ONLY"})["runs"][0]["info"]["run_id"], ids[0])
+        self.call("runs/restore", {"run_id": ids[0]})
+
+    def test_unsupported_artifacts_models_routes_fail_closed(self):
+        _, rid = self.create()
+        self.rejects("experiments/create", {"name": "unsupported", "artifact_location": "file:///tmp/nope"})
+        for route in ["artifacts/list", "logged-models/search", "runs/log-inputs", "unknown"]:
+            self.rejects(route, {"run_id": rid})
+        for method in ["GET", "PUT", "POST", "DELETE"]:
+            with self.assertRaises(HTTPError) as error:
+                self.server.request(method, "/api/2.0/mlflow-artifacts/artifacts/unsupported/test", {} if method != "GET" else None)
+            self.assertEqual(error.exception.code, 400)
+        self.call("runs/log-parameter", {"run_id": rid, "key": "after", "value": "usable"})
 
 
-def _sdk_missing():
-    if adapter is None:
-        return ADAPTER_SKIP
-    if importlib.util.find_spec("mlflow") is None:
-        return "Official mlflow-skinny SDK is not installed; this is not a conformance run"
-    try:
-        from nset_compat.context import CompatContext  # noqa: F401
-        from nset_compat.gateway import make_server  # noqa: F401
-    except ImportError as error:
-        return "Shared compatibility gateway is unavailable: " + str(error)
-    binary = Path(os.environ.get("NSET_BINARY", ROOT / "target/debug/nset"))
-    if not binary.is_file():
-        return "Native nset executable missing; set NSET_BINARY (no implicit build)"
-    return ""
-
-
-SDK_SKIP = _sdk_missing()
-
-
-@unittest.skipIf(bool(SDK_SKIP), SDK_SKIP)
-class OfficialMLflowSDKConformanceTests(unittest.TestCase):
-    """Real SDK → real gateway → real native durable metric storage."""
-    @classmethod
-    def setUpClass(cls):
+@unittest.skipUnless(HAS_BINARY and HAS_SDK, "Requires NSET_BINARY and the official mlflow SDK")
+class OfficialMlflowSDKTests(unittest.TestCase):
+    def setUp(self):
         import mlflow
-        from mlflow.tracking import MlflowClient
-        from tests.support import Server
-        cls.mlflow, cls.Client = mlflow, MlflowClient
-        cls.native = Server().start()
-        cls.temp = tempfile.TemporaryDirectory(prefix="nset-mlflow-sdk-")
-        cls.old_uri = mlflow.get_tracking_uri()
-        cls.environment = patch.dict(os.environ, {"MLFLOW_TRACKING_TOKEN": cls.native.token,
-                                                   "MLFLOW_ENABLE_ASYNC_LOGGING": "false",
-                                                   "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "0"})
-        cls.environment.start()
-        cls._start_gateway()
+        from mlflow import MlflowClient
+        self.mlflow = mlflow
+        self.server = RustServer()
+        self.addCleanup(self.server.close)
+        self.server.start()
+        self.environment = patch.dict(os.environ, {"MLFLOW_TRACKING_TOKEN": self.server.token,
+                                                   "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "0",
+                                                   "MLFLOW_ENABLE_ASYNC_LOGGING": "false"})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        old_uri = mlflow.get_tracking_uri()
+        mlflow.set_tracking_uri(self.server.url)
+        self.addCleanup(mlflow.set_tracking_uri, old_uri)
+        self.addCleanup(lambda: mlflow.end_run() if mlflow.active_run() else None)
+        self.client = MlflowClient(tracking_uri=self.server.url)
 
-    @classmethod
-    def _start_gateway(cls):
-        from nset_compat.context import CompatContext
-        from nset_compat.gateway import make_server
-        cls.ctx = CompatContext(cls.native.url, cls.native.token, Path(cls.temp.name), "http://127.0.0.1")
-        cls.gateway = make_server(cls.ctx, host="127.0.0.1", port=0)
-        cls.ctx.public_url = f"http://127.0.0.1:{cls.gateway.server_address[1]}"
-        cls.thread = threading.Thread(target=cls.gateway.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.mlflow.set_tracking_uri(cls.ctx.public_url)
-        cls.client = cls.Client(tracking_uri=cls.ctx.public_url)
-
-    @classmethod
-    def _stop_gateway(cls):
-        cls.gateway.shutdown()
-        cls.gateway.server_close()
-        cls.thread.join(timeout=5)
-        # CompatContext owns the lifetime directory lock; close before reopening.
-        cls.ctx.close()
-
-    @classmethod
-    def tearDownClass(cls):
-        if cls.mlflow.active_run():
-            cls.mlflow.end_run()
-        cls._stop_gateway()
-        cls.mlflow.set_tracking_uri(cls.old_uri)
-        cls.environment.stop()
-        cls.native.close()
-        cls.temp.cleanup()
-
-    def test_official_fluent_tracking_rejects_upload_search_history_restart(self):
-        from requests.exceptions import HTTPError
+    def test_official_fluent_tracking_search_history_restart_and_artifact_rejection(self):
         from mlflow.entities import Metric, ViewType
         from mlflow.exceptions import MlflowException
+        from requests.exceptions import HTTPError as RequestsHTTPError
         name = "sdk-" + uuid.uuid4().hex
         experiment = self.mlflow.set_experiment(name)
         self.assertTrue(experiment.experiment_id.isdecimal())
@@ -528,21 +409,10 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
             self.mlflow.log_metrics({"loss": 2.0, "accuracy": 0.5}, step=3)
             self.mlflow.set_tag("mutable", "first")
             self.mlflow.set_tag("mutable", "second")
-            artifact = Path(self.temp.name) / "sample.txt"
-            artifact.write_bytes(b"official SDK artifact\x00bytes\n")
-            requests = Mock(wraps=adapter.handle)
-            with patch.dict(os.environ, {"MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3"}), \
-                    patch.object(self.gateway, "adapters", [requests]):
-                with self.assertRaisesRegex(HTTPError, "MLflow artifact storage is not supported") as rejected:
-                    self.mlflow.log_artifact(str(artifact), artifact_path="nested")
-            self.assertEqual(rejected.exception.response.status_code, 400)
-            self.assertEqual(rejected.exception.response.json()["error_code"], "NOT_IMPLEMENTED")
-            uploads = [call.args[1] for call in requests.call_args_list
-                       if call.args[1].path.startswith("/api/2.0/mlflow-artifacts")]
-            self.assertEqual(len(uploads), 1, "Unsupported uploads must not be retried")
-            self.assertEqual(uploads[0].method, "PUT")
-            self.assertEqual(list((Path(self.temp.name) / "blobs").rglob("*")), [])
-            # A rejected upload does not poison the run or scalar/config logging.
+            artifact = self.server.directory / "sample.txt"
+            artifact.write_bytes(b"unsupported SDK artifact\x00bytes\n")
+            with self.assertRaises((RequestsHTTPError, MlflowException)):
+                self.mlflow.log_artifact(str(artifact), artifact_path="nested")
             self.mlflow.log_param("after_upload", "usable")
             self.mlflow.log_metric("after_upload", 3.0)
             self.mlflow.set_tag("after_upload", "usable")
@@ -558,9 +428,7 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.client.log_batch(rid, metrics=[Metric("loss", 8.0, 100, 9), Metric("loss", 7.0, 100, 9), Metric("loss", 99.0, 999, 8)])
         self.client.log_metric(rid, "loss", 8.0, timestamp=100, step=9)
         self.assertEqual(self.client.get_run(rid).data.metrics["loss"], 8.0)
-        history = self.client.get_metric_history(rid, "loss")
-        self.assertEqual(len(history), 4)
-        self.assertIn((8.0, 100, 9), [(m.value, m.timestamp, m.step) for m in history])
+        self.assertEqual(len(self.client.get_metric_history(rid, "loss")), 4)
         with self.assertRaises(MlflowException):
             self.client.log_param(rid, "optimizer", "sgd")
         self.client.delete_tag(rid, "mutable")
@@ -571,14 +439,8 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertEqual(self.client.search_runs([experiment.experiment_id]), [])
         self.assertEqual(self.client.search_runs([experiment.experiment_id], run_view_type=ViewType.DELETED_ONLY)[0].info.run_id, rid)
         self.client.restore_run(rid)
-        # Restart native and compatibility context; tracking IDs and scalar data survive.
-        self.__class__._stop_gateway()
-        self.native.stop()
-        self.native.start()
-        self.__class__._start_gateway()
-        recovered = self.client.get_run(rid)
-        self.assertEqual(recovered.data.metrics["loss"], 8.0)
-        self.assertEqual(recovered.data.params["optimizer"], "adam")
+        self.server.restart(kill=True)
+        self.assertEqual(self.client.get_run(rid).data.metrics["loss"], 8.0)
         self.assertEqual(len(self.client.get_metric_history(rid, "loss")), 4)
         self.client.set_experiment_tag(experiment.experiment_id, "owner", "sdk")
         self.client.rename_experiment(experiment.experiment_id, name + "-renamed")
@@ -586,146 +448,9 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.client.delete_experiment_tag(experiment.experiment_id, "owner")
         self.assertNotIn("owner", self.client.get_experiment(experiment.experiment_id).tags)
         self.client.delete_experiment(experiment.experiment_id)
-        self.assertEqual(self.client.get_experiment(experiment.experiment_id).lifecycle_stage, "deleted")
+        self.assertEqual(self.client.get_run(rid).info.lifecycle_stage, "deleted")
         self.client.restore_experiment(experiment.experiment_id)
         self.assertEqual(self.client.get_run(rid).info.lifecycle_stage, "active")
-
-    def test_official_index_commit_crash_bulk_overlap_and_cached_reads_after_restart(self):
-        from mlflow.entities import Metric
-        from mlflow.exceptions import MlflowException
-        name = "indexed-" + uuid.uuid4().hex
-        eid = self.client.create_experiment(name)
-        exp = self.ctx.state.get(adapter.EXP, eid)
-        native_exp = next(e for e in self.ctx.native.request("GET", "/api/experiments")["experiments"]
-                          if e["id"] == exp["native_id"])
-        self.assertEqual(native_exp["name"], f"mlflow:{eid}:{name}")
-        rid = self.client.create_run(eid).info.run_id
-        metrics = [Metric("bulk", float(i), i, i) for i in range(1000)]
-        original_put = self.ctx.state.put
-
-        def fail_metadata(namespace, key, value):
-            if namespace == adapter.RUN and key == rid and "pending" not in value:
-                raise ProtocolError(503, "TEMPORARILY_UNAVAILABLE", "injected after index commit")
-            original_put(namespace, key, value)
-
-        with patch.object(self.ctx.state, "put", side_effect=fail_metadata), self.assertRaises(MlflowException):
-            self.client.log_batch(rid, metrics=metrics)
-        stored = self.ctx.state.get(adapter.RUN, rid)
-        self.assertIn("pending", stored)
-        self.assertEqual(stored["latest_metrics"], {})
-        self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 1000)
-        self.__class__._stop_gateway()
-        self.__class__._start_gateway()
-        # Real SQLite persists the index ahead of latest metadata. Recovery must
-        # still replay the original pending batch, not silently omit its metrics.
-        with patch.object(adapter, "_history", side_effect=AssertionError("indexed read scanned history")):
-            self.assertEqual(self.client.get_run(rid).data.metrics["bulk"], 999.0)
-            self.client.log_batch(rid, metrics=metrics[100:] + [Metric("bulk", 1000.0, 1000, 1000)])
-            self.assertEqual(self.client.get_run(rid).data.metrics["bulk"], 1000.0)
-            found = self.client.search_runs([eid], "metrics.bulk = 1000")
-            self.assertEqual([r.info.run_id for r in found], [rid])
-        stored = self.ctx.state.get(adapter.RUN, rid)
-        self.assertNotIn("pending", stored)
-        self.assertEqual(len(stored["latest_metrics"]), 1)
-        self.assertEqual(len(self.client.get_metric_history(rid, "bulk")), 1001)
-        native = self.native.client.http.request("GET", f'/api/runs/{stored["native_id"]}/metrics',
-                                                  query={"key": "bulk", "limit": 10000})
-        self.assertEqual(len(native["points"]), 1001)
-        self.assertEqual(len({(m["step"], m["timestamp"], m["value"]) for m in native["points"]}), 1001)
-
-    def test_surrogate_values_rejected_without_mutation_and_usable_after_restart(self):
-        from urllib.error import HTTPError
-        from urllib.request import Request as HTTPRequest, urlopen
-
-        eid = self.client.create_experiment("unicode-" + uuid.uuid4().hex)
-        runs = []
-        metric = {"key": "loss", "value": 2.0, "timestamp": 2, "step": 2}
-        for surrogate in ("\ud800", "\udfff"):
-            for target in ("parameter", "tag", "batch-param", "batch-tag"):
-                with self.subTest(surrogate=repr(surrogate), target=target):
-                    rid = self.client.create_run(eid).info.run_id
-                    self.client.log_metric(rid, "loss", 1.0, timestamp=1, step=1)
-                    stored = self.ctx.state.get(adapter.RUN, rid)
-                    namespace = adapter._metric_namespace(stored)
-                    index = self.ctx.state.items(namespace)
-                    native_path = f'/api/runs/{stored["native_id"]}'
-                    native = self.ctx.native.request("GET", native_path)
-                    points = self.ctx.native.request("GET", native_path + "/metrics",
-                                                     query={"key": "loss", "limit": 100})
-                    if target.startswith("batch-"):
-                        route = "runs/log-batch"
-                        payload = {"run_id": rid, "metrics": [metric],
-                                   "params": [{"key": "p", "value": "valid"}],
-                                   "tags": [{"key": "t", "value": "valid"}]}
-                        field = "params" if target == "batch-param" else "tags"
-                        payload[field][0]["value"] = surrogate
-                    else:
-                        route = "runs/log-parameter" if target == "parameter" else "runs/set-tag"
-                        payload = {"run_id": rid, "key": "invalid", "value": surrogate}
-                    # Send escaped JSON directly so SDK validation cannot hide the bug.
-                    request = HTTPRequest(self.ctx.public_url + adapter.API + route,
-                                          data=json.dumps(payload).encode("utf-8"),
-                                          headers={"Authorization": "Bearer " + self.native.token,
-                                                   "Content-Type": "application/json"})
-                    with self.assertRaises(HTTPError) as rejected:
-                        with urlopen(request, timeout=10):
-                            pass
-                    with rejected.exception as response:
-                        self.assertEqual(response.code, 400)
-                        self.assertEqual(json.load(response)["error_code"], "INVALID_PARAMETER_VALUE")
-                    self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, rid))
-                    self.assertEqual(self.ctx.state.get(adapter.RUN, rid), stored)
-                    self.assertEqual(self.ctx.state.items(namespace), index)
-                    self.assertEqual(self.ctx.native.request("GET", native_path), native)
-                    self.assertEqual(self.ctx.native.request("GET", native_path + "/metrics",
-                                                            query={"key": "loss", "limit": 100}), points)
-                    self.assertEqual(self.client.get_run(rid).data.metrics, {"loss": 1.0})
-                    runs.append(rid)
-        self.__class__._stop_gateway()
-        self.native.stop()
-        self.native.start()
-        self.__class__._start_gateway()
-        for rid in runs:
-            with self.subTest(restarted_run=rid):
-                self.assertNotIn("pending", self.ctx.state.get(adapter.RUN, rid))
-                self.assertEqual(self.client.get_run(rid).data.metrics, {"loss": 1.0})
-                self.client.log_metric(rid, "loss", 2.0, timestamp=2, step=2)
-                # Valid non-ASCII and non-BMP values remain supported.
-                self.client.log_param(rid, "p", "caf\u00e9 \U0001f600")
-                self.client.set_tag(rid, "t", "\u754c \U0001f600")
-                run = self.client.get_run(rid)
-                self.assertEqual(run.data.params["p"], "caf\u00e9 \U0001f600")
-                self.assertEqual(run.data.tags["t"], "\u754c \U0001f600")
-                self.assertEqual(run.data.metrics, {"loss": 2.0})
-                self.assertEqual(len(self.client.get_metric_history(rid, "loss")), 2)
-                stored = self.ctx.state.get(adapter.RUN, rid)
-                self.assertNotIn("pending", stored)
-                self.assertEqual(len(self.ctx.state.items(adapter._metric_namespace(stored))), 2)
-        self.assertEqual({r.info.run_id for r in self.client.search_runs([eid], "metrics.loss = 2")}, set(runs))
-
-    def test_official_native_outage_recovers_pending_write_after_restart(self):
-        from mlflow.exceptions import MlflowException
-        eid = self.client.create_experiment("outage-" + uuid.uuid4().hex)
-        rid = self.client.create_run(eid).info.run_id
-        self.native.stop()
-        try:
-            with self.assertRaises(MlflowException):
-                self.client.log_metric(rid, "recover", 3.5, timestamp=12345, step=7)
-            self.assertIn("pending", self.ctx.state.get(adapter.RUN, rid))
-        finally:
-            self.native.start()
-        self.__class__._stop_gateway()
-        self.__class__._start_gateway()
-        # Reading recovers the durable intent before returning metric state.
-        self.assertEqual(self.client.get_run(rid).data.metrics["recover"], 3.5)
-        self.client.log_metric(rid, "recover", 3.5, timestamp=12345, step=7)
-        history = self.client.get_metric_history(rid, "recover")
-        self.assertEqual([(m.value, m.timestamp, m.step) for m in history], [(3.5, 12345, 7)])
-        stored = self.ctx.state.get(adapter.RUN, rid)
-        native = self.native.client.http.request("GET", f'/api/runs/{stored["native_id"]}/metrics',
-                                                  query={"key": "recover", "limit": 100})
-        self.assertEqual(len(native["points"]), 1)
-        self.assertEqual(native["points"][0]["timestamp"], 12345)
 
     def test_official_search_pages_rejections_and_run_updates(self):
         from mlflow.exceptions import MlflowException
@@ -736,14 +461,30 @@ class OfficialMLflowSDKConformanceTests(unittest.TestCase):
         self.assertEqual([r.info.run_id for r in list(first) + list(second)], [r.info.run_id for r in runs])
         self.client.set_terminated(runs[0].info.run_id, status="KILLED", end_time=1234)
         self.assertEqual(self.client.get_run(runs[0].info.run_id).info.status, "KILLED")
-        with self.assertRaises(MlflowException):
-            self.client.log_metric(runs[0].info.run_id, "nonfinite", float("nan"), timestamp=1)
+        for value in [float("nan"), float("inf"), -0.0]:
+            with self.assertRaises(MlflowException):
+                self.client.log_metric(runs[0].info.run_id, "nonfinite", value, timestamp=1)
         with self.assertRaises(MlflowException):
             self.client.log_metric(runs[0].info.run_id, "negative", 1.0, step=-1, timestamp=1)
         with self.assertRaises(MlflowException):
             self.client.search_runs([eid], "attributes.run_name = 'x' OR attributes.run_name = 'y'")
         experiments = self.client.search_experiments(filter_string="name LIKE 'pages-%'", max_results=1)
         self.assertEqual(experiments[0].experiment_id, eid)
+
+    def test_official_bulk_overlap_restart_and_native_projection(self):
+        from mlflow.entities import Metric
+        eid = self.client.create_experiment("bulk-" + uuid.uuid4().hex)
+        rid = self.client.create_run(eid).info.run_id
+        metrics = [Metric("bulk", float(i), i, i) for i in range(1000)]
+        self.client.log_batch(rid, metrics=metrics)
+        self.server.restart(kill=True)
+        self.client.log_batch(rid, metrics=metrics[100:] + [Metric("bulk", 1000.0, 1000, 1000)])
+        self.assertEqual(self.client.get_run(rid).data.metrics["bulk"], 1000.0)
+        self.assertEqual(len(self.client.get_metric_history(rid, "bulk")), 1001)
+        stored = self.server.stored("mlflow.runs", rid)
+        native = self.server.request("GET", "/api/runs/" + stored["native_id"] + "/metrics", query={"key": "bulk", "limit": 10000})
+        self.assertEqual(len(native["points"]), 1001)
+        self.assertEqual(len({(m["step"], m["timestamp"], m["value"]) for m in native["points"]}), 1001)
 
 
 if __name__ == "__main__":

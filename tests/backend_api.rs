@@ -602,8 +602,8 @@ async fn body_limit_extractor_errors_and_assets_are_safe() {
 }
 #[test]
 fn token_and_config_validation() {
-    use clap::Parser;
-    use nset::config::Config;
+    use clap::{CommandFactory, FromArgMatches};
+    use nset::config::{Command, Config};
     assert!(Token::new("").is_err());
     assert!(Token::new(" \n").is_err());
     let token = Token::new("secret").unwrap();
@@ -612,10 +612,21 @@ fn token_and_config_validation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("token");
     std::fs::write(&path, "file-secret\r\n").unwrap();
-    let config = Config::try_parse_from(["nset", "--token-file", path.to_str().unwrap()]).unwrap();
+    let cli = Config::command().mut_subcommand("serve", |command| {
+        command.mut_args(|arg| arg.env(None::<&str>))
+    });
+    let matches = cli
+        .clone()
+        .try_get_matches_from(["nset", "serve", "--token-file", path.to_str().unwrap()])
+        .unwrap();
+    let Command::Serve(config) = Config::from_arg_matches(&matches).unwrap().command;
     assert!(config.load_token().unwrap().matches("file-secret"));
-    assert_eq!(config.listen.to_string(), "127.0.0.1:8080");
-    assert!(Config::try_parse_from(["nset", "--token", "one", "--token-file", "two"]).is_err());
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert!(
+        cli.try_get_matches_from(["nset", "serve", "--token", "one", "--token-file", "two"])
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -745,7 +756,8 @@ fn binary_requires_token_and_never_echoes_secret() {
     let output = Command::new(env!("CARGO_BIN_EXE_nset"))
         .env_remove("NSET_TOKEN")
         .args([
-            "--data-dir",
+            "serve",
+            "--db-path",
             directory.path().join("not-created").to_str().unwrap(),
         ])
         .output()

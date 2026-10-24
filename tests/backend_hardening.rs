@@ -18,11 +18,11 @@ fn schema(connection: &Connection) -> Vec<(String, Option<String>)> {
 }
 
 #[test]
-fn fresh_database_is_version_two() {
+fn fresh_database_is_version_three() {
     let directory = tempfile::tempdir().unwrap();
     let _db = Database::open(directory.path()).unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 3);
     assert_eq!(version(&connection), SCHEMA_VERSION);
     for table in [
         "experiments",
@@ -30,6 +30,9 @@ fn fresh_database_is_version_two() {
         "metrics",
         "images",
         "ingest_receipts",
+        "compat_kv",
+        "compat_sequences",
+        "compat_batches",
     ] {
         assert!(schema(&connection).iter().any(|(name, _)| name == table));
     }
@@ -90,7 +93,7 @@ async fn original_unversioned_schema_is_adopted_without_losing_data() {
         .unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
     connection
-        .execute_batch("DROP TABLE ingest_receipts")
+        .execute_batch("DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches;")
         .unwrap();
     connection.pragma_update(None, "user_version", 0).unwrap();
     let original_schema = schema(&connection);
@@ -107,7 +110,7 @@ async fn original_unversioned_schema_is_adopted_without_losing_data() {
 }
 
 #[tokio::test]
-async fn version_two_preserves_schema_and_data_without_rerunning_ddl() {
+async fn current_version_preserves_schema_and_data_without_rerunning_ddl() {
     let directory = tempfile::tempdir().unwrap();
     let db = Database::open(directory.path()).unwrap();
     let (experiment, _) = db
@@ -161,12 +164,12 @@ async fn version_one_migrates_receipts_without_recreating_legacy_objects() {
     .unwrap();
     let conn = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
     conn.execute_batch(
-        "DROP TABLE ingest_receipts; DROP INDEX metrics_stream; PRAGMA user_version=1;",
+        "DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP INDEX metrics_stream; PRAGMA user_version=1;",
     )
     .unwrap();
     let original = schema(&conn);
     let reopened = Database::open(directory.path()).unwrap();
-    assert_eq!(version(&conn), 2);
+    assert_eq!(version(&conn), SCHEMA_VERSION);
     let upgraded = schema(&conn);
     assert!(original.iter().all(|item| upgraded.contains(item)));
     assert!(!upgraded.iter().any(|(name, _)| name == "metrics_stream"));
@@ -314,14 +317,17 @@ fn binary_exits_successfully_on_sigterm() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_nset"))
             .args([
-                "--listen",
-                "127.0.0.1:0",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
                 "--token",
                 "shutdown-test-secret",
-                "--data-dir",
+                "--db-path",
             ])
             .arg(directory.path().join("data"))
-            .env("RUST_LOG", "nset=info")
+            .args(["--log-level", "info"])
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()
@@ -360,4 +366,26 @@ fn binary_exits_successfully_on_sigterm() {
         assert!(Instant::now() < deadline, "server did not shut down");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(
+        !std::fs::read_to_string(&log_path)
+            .unwrap()
+            .contains("shutdown-test-secret")
+    );
+}
+
+#[tokio::test]
+async fn version_two_adds_compatibility_without_recreating_native_objects() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::open(directory.path()).unwrap();
+    let (experiment, _) = db.create_experiment("version two".into()).await.unwrap();
+    let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
+    connection.execute_batch("DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP INDEX metrics_stream; PRAGMA user_version=2;").unwrap();
+    let original = schema(&connection);
+    let reopened = Database::open(directory.path()).unwrap();
+    assert_eq!(version(&connection), SCHEMA_VERSION);
+    let upgraded = schema(&connection);
+    assert!(original.iter().all(|item| upgraded.contains(item)));
+    assert!(!upgraded.iter().any(|(name, _)| name == "metrics_stream"));
+    assert!(upgraded.iter().any(|(name, _)| name == "compat_kv"));
+    assert_eq!(reopened.experiments().await.unwrap()[0].id, experiment.id);
 }

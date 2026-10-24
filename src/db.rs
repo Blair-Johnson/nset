@@ -17,22 +17,39 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
-struct Actor(mpsc::Sender<Job>);
+struct Actor(Arc<ActorInner>);
+struct ActorInner {
+    sender: Option<mpsc::Sender<Job>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for ActorInner {
+    fn drop(&mut self) {
+        // Closing intake drains already accepted work. Do not release database
+        // ownership while a cancelled caller's job still owns a connection.
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 impl Actor {
     fn start(mut connection: Connection, name: &str, queue_capacity: usize) -> Result<Self> {
         let (tx, mut rx) = mpsc::channel::<Job>(queue_capacity);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
                 while let Some(job) = rx.blocking_recv() {
                     job(&mut connection);
                 }
             })?;
-        Ok(Self(tx))
+        Ok(Self(Arc::new(ActorInner {
+            sender: Some(tx),
+            thread: Some(thread),
+        })))
     }
     async fn call<T: Send + 'static>(
         &self,
@@ -41,6 +58,9 @@ impl Actor {
         let (tx, rx) = oneshot::channel();
         // Reject excess work instead of retaining unbounded request bodies in waiters.
         self.0
+            .sender
+            .as_ref()
+            .expect("actor intake exists until final drop")
             .try_send(Box::new(move |conn| {
                 let _ = tx.send(work(conn));
             }))
@@ -240,7 +260,7 @@ fn preflight_schema(connection: &Connection) -> Result<i64> {
         require_unique(connection, "experiments", &["name"])?;
         require_unique(connection, "images", &["filename"])?;
     }
-    if version == 2 {
+    if version >= 2 {
         require_table(
             connection,
             "ingest_receipts",
@@ -249,6 +269,24 @@ fn preflight_schema(connection: &Connection) -> Result<i64> {
             false,
         )?;
         require_unique(connection, "ingest_receipts", &["run_id", "batch_id"])?;
+    }
+    if version >= 3 {
+        for (table, columns, keys) in [
+            (
+                "compat_kv",
+                "namespace,key,value",
+                &["namespace", "key"][..],
+            ),
+            ("compat_sequences", "namespace,value", &["namespace"][..]),
+            (
+                "compat_batches",
+                "run_id,batch_id,scheme,digest",
+                &["run_id", "batch_id"][..],
+            ),
+        ] {
+            require_table(connection, table, columns, keys, false)?;
+            require_unique(connection, table, keys)?;
+        }
     }
     Ok(version)
 }
@@ -281,6 +319,22 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
             digest BLOB NOT NULL, accepted INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
             PRIMARY KEY(run_id,batch_id));",
         )?;
+    }
+    if version < 3 {
+        tx.execute_batch(
+            "CREATE TABLE compat_kv(
+                namespace TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                PRIMARY KEY(namespace,key));
+             CREATE TABLE compat_sequences(
+                namespace TEXT NOT NULL PRIMARY KEY,
+                value INTEGER NOT NULL CHECK(value >= 0 AND value < 9223372036854775807));
+             CREATE TABLE compat_batches(
+                run_id TEXT NOT NULL REFERENCES runs(id), batch_id TEXT NOT NULL,
+                scheme TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32),
+                PRIMARY KEY(run_id,batch_id));",
+        )?;
+    }
+    if version < SCHEMA_VERSION {
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     tx.commit()?;
@@ -303,6 +357,55 @@ fn sync_image_directory(directory: &Path) -> std::io::Result<()> {
     }
 }
 
+// Caller owns the transaction; compatibility mappings commit with this insert.
+fn insert_run(connection: &Connection, input: NewRun) -> Result<Run> {
+    if connection
+        .query_row(
+            "SELECT 1 FROM experiments WHERE id=?",
+            [&input.experiment_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none()
+    {
+        return Err(ApiError::missing());
+    }
+    let time = now();
+    let run = Run {
+        id: Uuid::new_v4().to_string(),
+        experiment_id: input.experiment_id,
+        name: input.name,
+        status: "running".into(),
+        params: input.params,
+        tags: input.tags,
+        created_at: time,
+        updated_at: time,
+    };
+    connection.execute(
+        "INSERT INTO runs(id,experiment_id,name,status,params,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        params![run.id, run.experiment_id, run.name, run.status,
+            serde_json::to_string(&run.params).map_err(ApiError::internal)?,
+            serde_json::to_string(&run.tags).map_err(ApiError::internal)?,
+            run.created_at, run.updated_at],
+    )?;
+    Ok(run)
+}
+
+fn compat_value(
+    connection: &Connection,
+    namespace: &str,
+    key: &str,
+) -> Result<Option<serde_json::Value>> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT value FROM compat_kv WHERE namespace=? AND key=?",
+            params![namespace, key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| serde_json::from_str(&raw).map_err(ApiError::internal))
+        .transpose()
+}
 impl Database {
     pub fn open(directory: &Path) -> Result<Self> {
         let defaults = crate::config::ConcurrencyOptions::default();
@@ -350,16 +453,184 @@ impl Database {
     /// Counts exclude executing jobs and do not change as queues fill or drain.
     pub fn queue_capacities(&self) -> (usize, Vec<usize>) {
         (
-            self.writer.0.max_capacity(),
+            self.writer.0.sender.as_ref().unwrap().max_capacity(),
             self.readers
                 .iter()
-                .map(|reader| reader.0.max_capacity())
+                .map(|reader| reader.0.sender.as_ref().unwrap().max_capacity())
                 .collect(),
         )
     }
 
     fn reader(&self) -> &Actor {
         &self.readers[self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len()]
+    }
+    // Typed compatibility operations retain actor queue bounds and FULL/WAL durability.
+    pub(crate) async fn compat_get(
+        &self,
+        namespace: String,
+        key: String,
+    ) -> Result<Option<serde_json::Value>> {
+        self.reader()
+            .call(move |conn| compat_value(conn, &namespace, &key))
+            .await
+    }
+
+    pub(crate) async fn compat_put_many(
+        &self,
+        namespace: String,
+        values: Vec<(String, serde_json::Value)>,
+    ) -> Result<()> {
+        // Serialize everything before any writes; a failure cannot leave a partial mapping.
+        let values = values
+            .into_iter()
+            .map(|(key, value)| {
+                serde_json::to_string(&value)
+                    .map(|value| (key, value))
+                    .map_err(ApiError::internal)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if values.is_empty() {
+            return Ok(());
+        }
+        self.writer.call(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            {
+                let mut statement = tx.prepare("INSERT INTO compat_kv(namespace,key,value) VALUES(?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value")?;
+                for (key, value) in values {
+                    statement.execute(params![namespace, key, value])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
+    pub(crate) async fn compat_delete(&self, namespace: String, key: String) -> Result<()> {
+        self.writer
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM compat_kv WHERE namespace=? AND key=?",
+                    params![namespace, key],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub(crate) async fn compat_items(
+        &self,
+        namespace: String,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        self.reader()
+            .call(move |conn| {
+                let mut statement =
+                    conn.prepare("SELECT key,value FROM compat_kv WHERE namespace=? ORDER BY key")?;
+                let rows = statement.query_map([namespace], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.map(|row| {
+                    let (key, raw) = row?;
+                    Ok((key, serde_json::from_str(&raw).map_err(ApiError::internal)?))
+                })
+                .collect()
+            })
+            .await
+    }
+
+    pub(crate) async fn compat_next_id(&self, namespace: String, start: i64) -> Result<i64> {
+        if !(0..i64::MAX).contains(&start) {
+            return Err(ApiError::bad(
+                "sequence start must be a nonnegative signed 64-bit integer below its maximum",
+            ));
+        }
+        self.writer.call(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let prior: Option<i64> = tx.query_row("SELECT value FROM compat_sequences WHERE namespace=?", [&namespace], |row| row.get(0)).optional()?;
+            let value = match prior {
+                Some(prior) => prior.checked_add(1).filter(|value| *value < i64::MAX)
+                    .ok_or_else(|| ApiError::bad("sequence exhausted"))?.max(start),
+                None => start,
+            };
+            tx.execute("INSERT INTO compat_sequences(namespace,value) VALUES(?,?) ON CONFLICT(namespace) DO UPDATE SET value=excluded.value", params![namespace, value])?;
+            tx.commit()?;
+            Ok(value)
+        }).await
+    }
+
+    /// Bind the entire request before the first journal chunk. Never overwrite a binding.
+    pub(crate) async fn compat_bind_batch(
+        &self,
+        run_id: String,
+        batch_id: String,
+        scheme: String,
+        digest: Vec<u8>,
+    ) -> Result<()> {
+        if digest.len() != 32 {
+            return Err(ApiError::bad("invalid compatibility digest"));
+        }
+        self.writer
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let prior: Option<(String, Vec<u8>)> = tx
+                    .query_row(
+                        "SELECT scheme,digest FROM compat_batches WHERE run_id=? AND batch_id=?",
+                        params![run_id, batch_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some(prior) = prior {
+                    if prior != (scheme, digest) {
+                        return Err(ApiError(
+                            axum::http::StatusCode::CONFLICT,
+                            "batch id already binds different metrics or identity scheme",
+                        ));
+                    }
+                    return Ok(());
+                }
+                require_run(&tx, &run_id)?;
+                tx.execute(
+                    "INSERT INTO compat_batches(run_id,batch_id,scheme,digest) VALUES(?,?,?,?)",
+                    params![run_id, batch_id, scheme, digest],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Idempotent native creation and protocol mapping are one SQLite transaction.
+    pub(crate) async fn compat_create_run(
+        &self,
+        namespace: String,
+        key: String,
+        input: NewRun,
+        mut metadata: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.writer
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                if let Some(prior) = compat_value(&tx, &namespace, &key)? {
+                    return Ok(prior);
+                }
+                name_check(&input.name)?;
+                object_keys(&input.params)?;
+                object_keys(&input.tags)?;
+                let object = metadata
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad("run metadata must be a JSON object"))?;
+                let run = insert_run(&tx, input)?;
+                object.insert("native_id".into(), serde_json::Value::String(run.id));
+                let raw = serde_json::to_string(&metadata).map_err(ApiError::internal)?;
+                tx.execute(
+                    "INSERT INTO compat_kv(namespace,key,value) VALUES(?,?,?)",
+                    params![namespace, key, raw],
+                )?;
+                tx.commit()?;
+                Ok(metadata)
+            })
+            .await
     }
     pub async fn catalog(&self) -> Result<Catalog> {
         self.reader()
@@ -501,41 +772,7 @@ impl Database {
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                if tx
-                    .query_row(
-                        "SELECT 1 FROM experiments WHERE id=?",
-                        [&input.experiment_id],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_none()
-                {
-                    return Err(ApiError::missing());
-                }
-                let time = now();
-                let run = Run {
-                    id: Uuid::new_v4().to_string(),
-                    experiment_id: input.experiment_id,
-                    name: input.name,
-                    status: "running".into(),
-                    params: input.params,
-                    tags: input.tags,
-                    created_at: time,
-                    updated_at: time,
-                };
-                tx.execute(
-                    "INSERT INTO runs VALUES(?,?,?,?,?,?,?,?)",
-                    params![
-                        run.id,
-                        run.experiment_id,
-                        run.name,
-                        run.status,
-                        serde_json::to_string(&run.params).map_err(ApiError::internal)?,
-                        serde_json::to_string(&run.tags).map_err(ApiError::internal)?,
-                        run.created_at,
-                        run.updated_at
-                    ],
-                )?;
+                let run = insert_run(&tx, input)?;
                 tx.commit()?;
                 Ok(run)
             })
@@ -827,6 +1064,210 @@ fn name_check(value: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn new_run(experiment_id: &str) -> NewRun {
+        NewRun {
+            experiment_id: experiment_id.into(),
+            name: "compat run".into(),
+            params: Object::new(),
+            tags: Object::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn compatibility_metadata_preserves_finite_float_bits() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let mut values = vec![
+            -0.0,
+            0.0,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+        ];
+        let mut bits = 1_u64;
+        for _ in 0..1024 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let value = f64::from_bits(bits);
+            if value.is_finite() {
+                values.push(value);
+            }
+        }
+        // Pending protocol payloads are persisted before ingest. Decoding them
+        // after a restart must not silently change the bound native f64 identity.
+        db.compat_put_many(
+            "pending".into(),
+            vec![("floats".into(), serde_json::json!(values))],
+        )
+        .await
+        .unwrap();
+        let decoded = db
+            .compat_get("pending".into(), "floats".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded: Vec<_> = decoded
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_f64().unwrap().to_bits())
+            .collect();
+        assert_eq!(
+            decoded,
+            values.into_iter().map(f64::to_bits).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_metadata_upserts_are_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        db.compat_put_many("test".into(), vec![("first".into(), serde_json::json!(1))])
+            .await
+            .unwrap();
+        db.writer.call(|conn| {
+            conn.execute_batch("CREATE TRIGGER reject_compat BEFORE INSERT ON compat_kv WHEN NEW.key='reject' BEGIN SELECT RAISE(ABORT,'test rejection'); END;")?;
+            Ok(())
+        }).await.unwrap();
+        assert!(
+            db.compat_put_many(
+                "test".into(),
+                vec![
+                    ("first".into(), serde_json::json!(2)),
+                    ("reject".into(), serde_json::json!(3)),
+                ]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            db.compat_items("test".into()).await.unwrap(),
+            vec![("first".into(), serde_json::json!(1))]
+        );
+        db.compat_delete("test".into(), "first".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.compat_get("test".into(), "first".into()).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_run_mapping_is_atomic_and_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let (experiment, _) = db.create_experiment("compat".into()).await.unwrap();
+        db.writer.call(|conn| {
+            conn.execute_batch("CREATE TRIGGER reject_mapping BEFORE INSERT ON compat_kv WHEN NEW.key='reject' BEGIN SELECT RAISE(ABORT,'test rejection'); END;")?;
+            Ok(())
+        }).await.unwrap();
+        assert!(
+            db.compat_create_run(
+                "runs".into(),
+                "reject".into(),
+                new_run(&experiment.id),
+                serde_json::json!({})
+            )
+            .await
+            .is_err()
+        );
+        assert!(db.runs(None).await.unwrap().is_empty());
+        assert_eq!(
+            db.compat_get("runs".into(), "reject".into()).await.unwrap(),
+            None
+        );
+        let metadata = db
+            .compat_create_run(
+                "runs".into(),
+                "run".into(),
+                new_run(&experiment.id),
+                serde_json::json!({"native_id":"untrusted","name":"original"}),
+            )
+            .await
+            .unwrap();
+        let native_id = metadata["native_id"].as_str().unwrap();
+        assert_ne!(native_id, "untrusted");
+        assert_eq!(db.run(native_id.into()).await.unwrap().name, "compat run");
+        // Existing mappings are returned unchanged even when new inputs are invalid.
+        let retry = db
+            .compat_create_run(
+                "runs".into(),
+                "run".into(),
+                new_run("missing"),
+                serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry, metadata);
+        assert_eq!(db.runs(None).await.unwrap().len(), 1);
+        drop(db);
+        let reopened = Database::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened
+                .compat_get("runs".into(), "run".into())
+                .await
+                .unwrap(),
+            Some(metadata)
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_sequences_are_monotonic_and_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        assert_eq!(db.compat_next_id("ids".into(), 5).await.unwrap(), 5);
+        assert_eq!(db.compat_next_id("ids".into(), 1).await.unwrap(), 6);
+        assert_eq!(db.compat_next_id("ids".into(), 10).await.unwrap(), 10);
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                db.compat_next_id("ids".into(), 0).await.unwrap()
+            }));
+        }
+        let mut ids = Vec::new();
+        for task in tasks {
+            ids.push(task.await.unwrap());
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, (11..27).collect::<Vec<_>>());
+        assert!(db.compat_next_id("negative".into(), -1).await.is_err());
+        assert!(db.compat_next_id("max".into(), i64::MAX).await.is_err());
+        assert_eq!(
+            db.compat_next_id("last".into(), i64::MAX - 1)
+                .await
+                .unwrap(),
+            i64::MAX - 1
+        );
+        assert!(db.compat_next_id("last".into(), 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn compatibility_batch_identity_survives_reopen_and_rejects_rebinding() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let (experiment, _) = db.create_experiment("compat".into()).await.unwrap();
+        let run = db.create_run(new_run(&experiment.id)).await.unwrap();
+        db.compat_bind_batch(run.id.clone(), "batch".into(), "v1".into(), vec![1; 32])
+            .await
+            .unwrap();
+        drop(db);
+        let db = Database::open(directory.path()).unwrap();
+        db.compat_bind_batch(run.id.clone(), "batch".into(), "v1".into(), vec![1; 32])
+            .await
+            .unwrap();
+        let error = db
+            .compat_bind_batch(run.id.clone(), "batch".into(), "v1".into(), vec![2; 32])
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+        let error = db
+            .compat_bind_batch(run.id, "batch".into(), "v2".into(), vec![1; 32])
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+    }
     #[tokio::test]
     async fn writer_uses_full_synchronous_wal() {
         let directory = tempfile::tempdir().unwrap();
@@ -844,5 +1285,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(settings, (2, "wal".to_owned()));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_actor_drop_drains_cancelled_jobs_before_releasing_ownership() {
+        use fs2::FileExt;
+        let directory = tempfile::tempdir().unwrap();
+        let lock_path = directory.path().join("nset.lock");
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        owner.try_lock_exclusive().unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let actor = Actor::start(Connection::open_in_memory().unwrap(), "drain-test", 2).unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller_actor = actor.clone();
+        let caller = tokio::spawn(async move {
+            caller_actor
+                .call(move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(actor);
+            drop(owner);
+            finished_tx.send(()).unwrap();
+        });
+        assert!(finished_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        assert!(contender.try_lock_exclusive().is_err());
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        dropping.join().unwrap();
+        contender.try_lock_exclusive().unwrap();
     }
 }

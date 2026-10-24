@@ -1,53 +1,24 @@
 mod options {
-    use clap::{CommandFactory, FromArgMatches, Parser};
-    use nset::config::{ConcurrencyOptions, Config};
+    use clap::Parser;
+    use nset::config::{Command as CliCommand, ConcurrencyOptions, Config};
     use std::process::Command;
 
-    type Case = (
-        &'static str,
-        &'static str,
-        usize,
-        fn(&mut ConcurrencyOptions, usize),
-    );
+    type Case = (&'static str, usize, fn(&mut ConcurrencyOptions, usize));
     const CASES: [Case; 5] = [
-        ("--http-workers", "NSET_HTTP_WORKERS", 256, |o, v| {
-            o.http_workers = v
+        ("NSET_HTTP_WORKERS", 256, |o, v| o.http_workers = v),
+        ("NSET_READ_WORKERS", 64, |o, v| o.read_workers = v),
+        ("NSET_DB_QUEUE_CAPACITY", 4096, |o, v| {
+            o.db_queue_capacity = v
         }),
-        ("--read-workers", "NSET_READ_WORKERS", 64, |o, v| {
-            o.read_workers = v
+        ("NSET_WRITE_CONCURRENCY", 1024, |o, v| {
+            o.write_concurrency = v
         }),
-        (
-            "--db-queue-capacity",
-            "NSET_DB_QUEUE_CAPACITY",
-            4096,
-            |o, v| o.db_queue_capacity = v,
-        ),
-        (
-            "--write-concurrency",
-            "NSET_WRITE_CONCURRENCY",
-            1024,
-            |o, v| o.write_concurrency = v,
-        ),
-        (
-            "--image-concurrency",
-            "NSET_IMAGE_CONCURRENCY",
-            64,
-            |o, v| o.image_concurrency = v,
-        ),
+        ("NSET_IMAGE_CONCURRENCY", 64, |o, v| o.image_concurrency = v),
     ];
 
-    fn parse(args: &[&str]) -> Result<Config, clap::Error> {
-        // Do not mutate the process environment in concurrent tests.
-        let matches = Config::command()
-            .mut_args(|arg| arg.env(None::<&str>))
-            .try_get_matches_from(args)?;
-        Config::from_arg_matches(&matches)
-    }
-
     #[test]
-    fn cli_defaults_match_programmatic_defaults() {
+    fn defaults_match_programmatic_defaults() {
         let options = ConcurrencyOptions::default();
-        assert_eq!(parse(&["nset"]).unwrap().concurrency, options);
         assert_eq!(
             options.http_workers,
             std::thread::available_parallelism()
@@ -65,47 +36,33 @@ mod options {
             (2, 64, 8, 2)
         );
         options.validate().unwrap();
+        assert_probe(probe("defaults"));
     }
 
     #[test]
-    fn cli_and_programmatic_bounds_are_inclusive_and_usize_safe() {
-        for (flag, _, max, set) in CASES {
+    fn programmatic_bounds_are_inclusive_and_usize_safe() {
+        for (name, max, set) in CASES {
             for value in [1, max] {
                 let mut options = ConcurrencyOptions::default();
                 set(&mut options, value);
                 options.validate().unwrap();
-                assert_eq!(
-                    parse(&["nset", flag, &value.to_string()])
-                        .unwrap()
-                        .concurrency,
-                    options
-                );
             }
             for value in [0, max + 1, usize::MAX] {
                 let mut options = ConcurrencyOptions::default();
                 set(&mut options, value);
-                assert!(options.validate().is_err(), "{flag}={value}");
-                assert!(
-                    parse(&["nset", flag, &value.to_string()]).is_err(),
-                    "{flag}={value}"
-                );
-            }
-            for value in ["-1", "1.5", "no", "18446744073709551616", "4294967297"] {
-                assert!(
-                    parse(&["nset", &format!("{flag}={value}")]).is_err(),
-                    "{flag}={value}"
-                );
+                assert!(options.validate().is_err(), "{name}={value}");
             }
         }
     }
 
     fn probe(mode: &str) -> Command {
+        // Child environments avoid process-global mutation in parallel tests.
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", "options::environment_probe", "--nocapture"]);
         command.env("NSET_CONCURRENCY_TEST_PROBE", mode);
         command.env_remove("NSET_TOKEN");
-        for (_, env, _, _) in CASES {
-            command.env_remove(env);
+        for (name, _, _) in CASES {
+            command.env_remove(name);
         }
         command
     }
@@ -121,22 +78,32 @@ mod options {
     }
 
     #[test]
-    fn environment_options_and_cli_precedence() {
+    fn environment_options_and_workers_precedence() {
         let mut command = probe("valid");
-        for (i, (_, env, _, _)) in CASES.iter().enumerate() {
-            command.env(env, (i + 3).to_string());
+        for (i, (name, _, _)) in CASES.iter().enumerate() {
+            command.env(name, (i + 3).to_string());
         }
         assert_probe(command);
-        for (_, env, max, _) in CASES {
+        for (name, max, _) in CASES {
+            for value in [1, max] {
+                let mut command = probe("boundary");
+                command.env(name, value.to_string());
+                command.env("NSET_CONCURRENCY_TEST_FIELD", name);
+                command.env("NSET_CONCURRENCY_TEST_VALUE", value.to_string());
+                assert_probe(command);
+            }
             for value in [
                 "0".to_owned(),
                 (max + 1).to_string(),
                 usize::MAX.to_string(),
                 "18446744073709551616".to_owned(),
+                "4294967297".to_owned(),
                 "-1".to_owned(),
+                "1.5".to_owned(),
+                "no".to_owned(),
             ] {
                 let mut command = probe("invalid");
-                command.env(env, value);
+                command.env(name, value);
                 assert_probe(command);
             }
         }
@@ -145,38 +112,48 @@ mod options {
     #[test]
     fn environment_probe() {
         match std::env::var("NSET_CONCURRENCY_TEST_PROBE").as_deref() {
-            Ok("valid") => {
-                assert_eq!(
-                    Config::try_parse_from(["nset"]).unwrap().concurrency,
-                    ConcurrencyOptions {
-                        http_workers: 3,
-                        read_workers: 4,
-                        db_queue_capacity: 5,
-                        write_concurrency: 6,
-                        image_concurrency: 7,
-                    }
-                );
-                assert_eq!(
-                    Config::try_parse_from([
-                        "nset",
-                        "--http-workers=1",
-                        "--read-workers=1",
-                        "--db-queue-capacity=1",
-                        "--write-concurrency=1",
-                        "--image-concurrency=1"
-                    ])
+            Ok("defaults") => assert_eq!(
+                ConcurrencyOptions::from_env(None).unwrap(),
+                ConcurrencyOptions::default()
+            ),
+            Ok("boundary") => {
+                let field = std::env::var("NSET_CONCURRENCY_TEST_FIELD").unwrap();
+                let value = std::env::var("NSET_CONCURRENCY_TEST_VALUE")
                     .unwrap()
-                    .concurrency,
+                    .parse()
+                    .unwrap();
+                let (_, _, set) = CASES.iter().find(|(name, _, _)| *name == field).unwrap();
+                let mut expected = ConcurrencyOptions::default();
+                set(&mut expected, value);
+                assert_eq!(ConcurrencyOptions::from_env(None).unwrap(), expected);
+            }
+            Ok("valid") => {
+                let CliCommand::Serve(config) =
+                    Config::try_parse_from(["nset", "serve"]).unwrap().command;
+                let expected = ConcurrencyOptions {
+                    http_workers: 3,
+                    read_workers: 4,
+                    db_queue_capacity: 5,
+                    write_concurrency: 6,
+                    image_concurrency: 7,
+                };
+                assert_eq!(
+                    ConcurrencyOptions::from_env(config.workers).unwrap(),
+                    expected
+                );
+                let CliCommand::Serve(config) =
+                    Config::try_parse_from(["nset", "serve", "--workers", "1"])
+                        .unwrap()
+                        .command;
+                assert_eq!(
+                    ConcurrencyOptions::from_env(config.workers).unwrap(),
                     ConcurrencyOptions {
                         http_workers: 1,
-                        read_workers: 1,
-                        db_queue_capacity: 1,
-                        write_concurrency: 1,
-                        image_concurrency: 1,
+                        ..expected
                     }
                 );
             }
-            Ok("invalid") => assert!(Config::try_parse_from(["nset"]).is_err()),
+            Ok("invalid") => assert!(ConcurrencyOptions::from_env(None).is_err()),
             _ => {}
         }
     }
@@ -251,25 +228,26 @@ mod backend {
     }
 
     #[test]
-    fn invalid_cli_options_never_create_data_directory() {
-        for flag in [
-            "--http-workers",
-            "--read-workers",
-            "--db-queue-capacity",
-            "--write-concurrency",
-            "--image-concurrency",
+    fn invalid_environment_options_never_create_data_directory() {
+        for name in [
+            "NSET_HTTP_WORKERS",
+            "NSET_READ_WORKERS",
+            "NSET_DB_QUEUE_CAPACITY",
+            "NSET_WRITE_CONCURRENCY",
+            "NSET_IMAGE_CONCURRENCY",
         ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("missing");
             let output = std::process::Command::new(env!("CARGO_BIN_EXE_nset"))
                 .env_clear()
-                .arg("--data-dir")
+                .env(name, "0")
+                .args(["serve", "--db-path"])
                 .arg(&path)
-                .args(["--token", "test-secret", flag, "0"])
+                .args(["--token", "test-secret"])
                 .output()
                 .unwrap();
-            assert!(!output.status.success(), "{flag}");
-            assert!(!path.exists(), "{flag}");
+            assert!(!output.status.success(), "{name}");
+            assert!(!path.exists(), "{name}");
         }
     }
 

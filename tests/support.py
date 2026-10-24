@@ -30,8 +30,8 @@ class Server:
     def start(self):
         env = dict(os.environ, NSET_TOKEN=self.token)
         self.log = open(self.directory / "server.log", "ab")
-        self.process = subprocess.Popen([str(self.binary), "--data-dir", str(self.directory / "data"),
-                                         "--listen", f"127.0.0.1:{self.port}"],
+        self.process = subprocess.Popen([str(self.binary), "serve", "--db-path", str(self.directory / "data"),
+                                         "--host", "127.0.0.1", "--port", str(self.port)],
                                         env=env, stdout=self.log, stderr=self.log)
         for _ in range(150):
             if self.process.poll() is not None:

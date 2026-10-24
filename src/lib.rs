@@ -1,6 +1,8 @@
 pub mod api;
 pub mod assets;
 pub mod auth;
+pub mod compat;
+pub mod compat_http;
 pub mod config;
 pub mod db;
 pub mod errors;
@@ -13,6 +15,7 @@ pub struct AppState {
     pub db: db::Database,
     pub ingest: ingest::DurableIngest,
     pub token: auth::Token,
+    pub compat: compat::Compat,
     pub image_slots: Arc<Semaphore>,
     pub write_slots: Arc<Semaphore>,
 }
@@ -41,7 +44,9 @@ impl AppState {
         let db =
             db::Database::open_with_options(path, options.read_workers, options.db_queue_capacity)?;
         let ingest = ingest::DurableIngest::open(path, db.clone(), ingest_options)?;
+        let compat = compat::Compat::new(db.clone(), ingest.clone());
         Ok(Self {
+            compat,
             db,
             ingest,
             token,
