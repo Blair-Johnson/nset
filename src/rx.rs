@@ -10,13 +10,13 @@ use axum::{
     http::StatusCode,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, config::DbConfig, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -30,7 +30,7 @@ const MAX_POINTS: usize = 20_000;
 const MAX_TRACES: usize = 128;
 const MAX_FIELDS: usize = 64;
 const MAX_VISITS: usize = 4096;
-const UNAVAILABLE: &str = "rx source unavailable: cannot read a live SQLite snapshot. Check permissions and readable WAL/-shm sidecars; nset never repairs or opens the source read-write. Native data remains available.";
+const UNAVAILABLE: &str = "rx source unavailable: cannot read a live SQLite snapshot. Check source/directory permissions and SQLite recovery errors in the server log; nset never repairs or opens the database read-write. Native data remains available.";
 fn unavailable(e: impl std::fmt::Display) -> ApiError {
     tracing::warn!(error=%e, "rx read-only source unavailable");
     ApiError(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE)
@@ -93,37 +93,16 @@ impl Source {
         })
     }
     fn connection(&self) -> Result<Connection> {
-        // Read-only WAL open can create missing sidecars. Refuse that case before
-        // opening; never use immutable=1 (which misses committed WAL updates).
-        let mut header = [0u8; 100];
-        std::fs::File::open(&self.path)
-            .and_then(|mut f| f.read_exact(&mut header))
-            .map_err(unavailable)?;
-        if &header[..16] != b"SQLite format 3\0" {
-            return Err(unavailable("not a SQLite database"));
-        }
-        if header[18] == 2 {
-            for suffix in ["-wal", "-shm"] {
-                if !PathBuf::from(format!("{}{suffix}", self.path.display())).is_file() {
-                    return Err(unavailable("WAL sidecars absent; refusing to create them"));
-                }
-            }
-        }
-        crate::rx_vfs::register()
-            .map_err(|code| unavailable(format!("read-only VFS registration failed: {code}")))?;
-        let encoded = percent_encoding::percent_encode(
-            self.path.as_os_str().as_encoded_bytes(),
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let uri = format!("file:{encoded}?mode=ro&readonly_shm=1");
-        let conn = Connection::open_with_flags_and_vfs(
-            uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_URI,
-            crate::rx_vfs::NAME,
+        // The main database is strictly read-only. Ordinary SQLite WAL/SHM
+        // reader coordination (including empty sidecars) is allowed, never a
+        // writable database fallback or immutable live read.
+        let conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(unavailable)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .map_err(unavailable)?;
         conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1024 * 1024)
             .map_err(unavailable)?;
         conn.busy_timeout(Duration::from_millis(100))
@@ -144,6 +123,25 @@ impl Source {
         }
         conn.execute_batch("BEGIN DEFERRED").map_err(unavailable)?;
         Ok(conn)
+    }
+    fn generation(&self) -> Result<String> {
+        let metadata = std::fs::metadata(&self.path).map_err(unavailable)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(format!(
+                "{}:{}:{:?}",
+                metadata.dev(),
+                metadata.ino(),
+                metadata.created().ok()
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            // Birth time is the available portable generation marker. Platforms
+            // with Unix file identities also include device/inode above.
+            Ok(format!("{:?}", metadata.created().map_err(unavailable)?))
+        }
     }
     async fn execute<T: Send + 'static>(
         &self,
@@ -201,13 +199,15 @@ impl Source {
         let mut next = None;
         while let Some(r) = rows.next().map_err(unavailable)? {
             if runs.len() == 200 {
-                next = runs.last().map(|v: &Value| v["id"].as_i64().unwrap());
+                next = runs
+                    .last()
+                    .map(|v: &Value| v["id"].as_str().unwrap().to_owned());
                 break;
             }
             if r.get::<_, String>(1).map_err(unavailable)?.len() > 128 {
                 return Err(unavailable("invalid oversized rx run UID"));
             }
-            runs.push(json!({"id":r.get::<_,i64>(0).map_err(unavailable)?,"run_uid":r.get::<_,String>(1).map_err(unavailable)?,"state":r.get::<_,String>(2).map_err(unavailable)?,"alias":r.get::<_,Option<String>>(3).map_err(unavailable)?,"config":r.get::<_,Option<String>>(4).map_err(unavailable)?,"created_at":r.get::<_,String>(5).map_err(unavailable)?,"started_at":r.get::<_,Option<String>>(6).map_err(unavailable)?,"finished_at":r.get::<_,Option<String>>(7).map_err(unavailable)?,"exit_code":r.get::<_,Option<i64>>(8).map_err(unavailable)?,"argv":r.get::<_,String>(9).map_err(unavailable)?}));
+            runs.push(json!({"id":r.get::<_,i64>(0).map_err(unavailable)?.to_string(),"run_uid":r.get::<_,String>(1).map_err(unavailable)?,"state":r.get::<_,String>(2).map_err(unavailable)?,"alias":r.get::<_,Option<String>>(3).map_err(unavailable)?,"config":r.get::<_,Option<String>>(4).map_err(unavailable)?,"created_at":r.get::<_,String>(5).map_err(unavailable)?,"started_at":r.get::<_,Option<String>>(6).map_err(unavailable)?,"finished_at":r.get::<_,Option<String>>(7).map_err(unavailable)?,"exit_code":r.get::<_,Option<i64>>(8).map_err(unavailable)?,"argv":r.get::<_,String>(9).map_err(unavailable)?}));
         }
         Ok(json!({"runs":runs,"next_after":next,"metadata_truncated":true}))
     }
@@ -392,27 +392,46 @@ fn scalar_group(value: &Value) -> Value {
     }
     value.clone()
 }
-fn scalar_equal(a: &Value, b: &Value) -> bool {
-    if !a.is_number() || !b.is_number() {
-        return a == b;
-    }
+// Compare represented JSON numbers without rounding integers through f64.
+fn numeric_cmp(a: &Value, b: &Value) -> Option<Ordering> {
     let integer = |v: &Value| {
         v.as_i64()
             .map(i128::from)
             .or_else(|| v.as_u64().map(i128::from))
     };
-    match (integer(a), integer(b)) {
-        (Some(a), Some(b)) => a == b,
-        (Some(i), None) | (None, Some(i)) => {
-            let f = if integer(a).is_some() {
-                b.as_f64().unwrap()
-            } else {
-                a.as_f64().unwrap()
-            };
-            f.fract() == 0.0 && f >= i64::MIN as f64 && f < 18446744073709551616.0 && f as i128 == i
+    fn int_float(i: i128, f: f64) -> Ordering {
+        if f < i64::MIN as f64 {
+            return Ordering::Greater;
         }
-        _ => a.as_f64() == b.as_f64(),
+        if f >= 18446744073709551616.0 {
+            return Ordering::Less;
+        }
+        match i.cmp(&(f.trunc() as i128)) {
+            Ordering::Equal if f.fract() > 0.0 => Ordering::Less,
+            Ordering::Equal if f.fract() < 0.0 => Ordering::Greater,
+            order => order,
+        }
     }
+    let (a_float, b_float) = (a.as_f64()?, b.as_f64()?);
+    Some(match (integer(a), integer(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(i), None) => int_float(i, b_float),
+        (None, Some(i)) => int_float(i, a_float).reverse(),
+        (None, None) => a_float.partial_cmp(&b_float)?,
+    })
+}
+fn scalar_equal(a: &Value, b: &Value) -> bool {
+    if a.is_number() && b.is_number() {
+        numeric_cmp(a, b) == Some(Ordering::Equal)
+    } else {
+        a == b
+    }
+}
+// Hint values travel through JS JSON.parse; omit unsafe integer suggestions
+// instead of presenting a rounded predicate. Their paths remain queryable.
+fn safe_hint_value(v: &Value) -> bool {
+    v.as_f64()
+        .is_none_or(|n| n.fract() != 0.0 || n.abs() <= 9007199254740991.0)
 }
 fn matches(value: &Value, filters: &[(FieldPath, &Condition)], any: bool) -> bool {
     let test = |(p, c): &(FieldPath, &Condition)| {
@@ -422,16 +441,15 @@ fn matches(value: &Value, filters: &[(FieldPath, &Condition)], any: bool) -> boo
             "missing" => v.is_none(),
             "eq" => v.is_some_and(|v| scalar_equal(v, &c.value)),
             "ne" => v.is_some_and(|v| !scalar_equal(v, &c.value)),
-            op => match (v.and_then(Value::as_f64), c.value.as_f64()) {
-                (Some(a), Some(b)) => match op {
-                    "lt" => a < b,
-                    "lte" => a <= b,
-                    "gt" => a > b,
-                    "gte" => a >= b,
+            op => v
+                .and_then(|v| numeric_cmp(v, &c.value))
+                .is_some_and(|order| match op {
+                    "lt" => order.is_lt(),
+                    "lte" => !order.is_gt(),
+                    "gt" => order.is_gt(),
+                    "gte" => !order.is_lt(),
                     _ => false,
-                },
-                _ => false,
-            },
+                }),
         }
     };
     filters.is_empty()
@@ -445,6 +463,7 @@ fn matches(value: &Value, filters: &[(FieldPath, &Condition)], any: bool) -> boo
 #[serde(deny_unknown_fields)]
 pub struct Cursor {
     scope: String,
+    generation: String,
     run: usize,
     seq: i64,
     high: Vec<i64>,
@@ -530,7 +549,7 @@ struct Trace {
     run_uid: String,
     y: String,
     group: Option<Value>,
-    points: Vec<(f64, f64, i64)>,
+    points: Vec<(f64, f64, String)>,
 }
 fn value_type(v: &Value) -> &'static str {
     match v {
@@ -598,7 +617,16 @@ impl Source {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&json!([q.source_id, q.runs, q.filters])).unwrap())
         );
+        // File identity is distinct from the stable repository source ID. Pin
+        // before opening and recheck after SQLite has read the file to catch a
+        // replacement during open. Later requests compare the cursor generation.
+        let generation = self.generation()?;
         let conn = self.connection()?;
+        if self.generation()? != generation {
+            return Err(ApiError::bad(
+                "rx database replaced during open; retry the query",
+            ));
+        }
         let mut ids = Vec::new();
         let mut highs = Vec::new();
         for uid in &q.runs {
@@ -627,12 +655,14 @@ impl Source {
         } else {
             Cursor {
                 scope: scope.clone(),
+                generation: generation.clone(),
                 run: 0,
                 seq: 0,
                 high: highs.clone(),
             }
         };
         if cursor.scope != scope
+            || cursor.generation != generation
             || cursor.run >= ids.len()
             || cursor.seq < 0
             || cursor.high.len() != ids.len()
@@ -655,7 +685,7 @@ impl Source {
         let mut visits = 0;
         let mut stopped = false;
         while cursor.run < ids.len() {
-            let mut stmt=conn.prepare("SELECT seq,substr(received_at,1,64),length(CAST(data AS BLOB)),CASE WHEN length(CAST(data AS BLOB))<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?").map_err(unavailable)?;
+            let mut stmt=conn.prepare("SELECT seq,substr(received_at,1,64),octet_length(data),CASE WHEN octet_length(data)<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?").map_err(unavailable)?;
             let mut rows = stmt
                 .query(params![
                     MAX_RECORD as i64,
@@ -703,7 +733,7 @@ impl Source {
                 match mode {
                     Mode::Records => {
                         let received_at: String = row.get(1).map_err(unavailable)?;
-                        records.push(json!({"run_uid":q.runs[cursor.run],"seq":seq,"received_at":received_at,"data":value,"raw":raw}));
+                        records.push(json!({"run_uid":q.runs[cursor.run],"seq":seq.to_string(),"received_at":received_at,"data":value,"raw":raw}));
                         if records.len() >= q.limit {
                             stopped = true;
                             break;
@@ -738,6 +768,7 @@ impl Source {
                                 hint.types.insert(value_type(v));
                                 if !v.is_array()
                                     && !v.is_object()
+                                    && safe_hint_value(v)
                                     && v.to_string().len() <= 256
                                     && hint.values.len() < 8
                                     && !hint.values.contains(v)
@@ -817,7 +848,7 @@ impl Source {
                                     points: Vec::new(),
                                 })
                                 .points
-                                .push((x, y, seq));
+                                .push((x, y, seq.to_string()));
                             d.points += 1;
                         }
                     }
@@ -838,7 +869,7 @@ impl Source {
             None
         };
         Ok(
-            json!({"diagnostics":d,"records":records,"next_cursor":next,"fields":hints.into_values().collect::<Vec<_>>(),"traces":traces.into_values().collect::<Vec<_>>(),"coverage":if mode==Mode::Fields {"sampled hints, not a complete schema"} else {"bounded committed snapshot"}}),
+            json!({"diagnostics":d,"records":records,"next_cursor":next,"fields":hints.into_values().collect::<Vec<_>>(),"traces":traces.into_values().collect::<Vec<_>>(),"coverage":if mode==Mode::Fields {"sampled hints, not a complete schema"} else if mode==Mode::Records {"bounded page; append-only sequence pagination (in-place edits/lower-sequence inserts are not frozen)"} else {"bounded committed snapshot; numeric axes use finite double precision"}}),
         )
     }
 }
@@ -906,7 +937,7 @@ mod tests {
         for trace in result["traces"].as_array().unwrap() {
             assert_eq!(trace["points"].as_array().unwrap().len(), 6);
             assert_eq!(trace["points"][0][0], 1.0);
-            assert_eq!(trace["points"][0][2], 5);
+            assert_eq!(trace["points"][0][2], "5");
         }
         assert_eq!(result["diagnostics"]["matched"], 6);
         assert_eq!(before, std::fs::read(&f.source.path).unwrap());
@@ -939,7 +970,7 @@ mod tests {
         let result = f.source.query(request(q.clone()), Mode::Plot).unwrap();
         assert_eq!(
             result["traces"][0]["points"],
-            json!([[0.1, 1.0, 16], [0.1, 2.0, 17], [0.05, 3.0, 18]])
+            json!([[0.1, 1.0, "16"], [0.1, 2.0, "17"], [0.05, 3.0, "18"]])
         );
         assert_eq!(result["traces"][1]["points"][0][1], 90.0);
         let mut fields = q;
@@ -1014,7 +1045,7 @@ mod tests {
             .query(request(json!({"limit":2})), Mode::Records)
             .unwrap();
         assert_eq!(first["records"][0]["data"]["epoch"], 1);
-        assert_eq!(first["records"][0]["seq"], 1);
+        assert_eq!(first["records"][0]["seq"], "1");
         add(&f, 859, 4, json!({"kind":"epoch","epoch":4}));
         let second = f
             .source
@@ -1024,7 +1055,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(second["records"].as_array().unwrap().len(), 1);
-        assert_eq!(second["records"][0]["seq"], 3);
+        assert_eq!(second["records"][0]["seq"], "3");
         assert!(
             f.source
                 .query(
@@ -1083,14 +1114,38 @@ mod tests {
         );
     }
     #[test]
-    fn missing_wal_sidecars_fail_without_creation_and_schema_is_never_migrated() {
+    fn stopped_wal_without_sidecars_is_readable_and_schema_is_never_migrated() {
         let f = fixture(true);
         add(&f, 859, 1, json!({}));
         let source = f.source.clone();
         drop(f.writer);
-        assert!(source.connection().is_err());
-        assert!(!PathBuf::from(format!("{}-wal", source.path.display())).exists());
-        assert!(!PathBuf::from(format!("{}-shm", source.path.display())).exists());
+        let wal = PathBuf::from(format!("{}-wal", source.path.display()));
+        let shm = PathBuf::from(format!("{}-shm", source.path.display()));
+        assert!(!wal.exists() && !shm.exists());
+        let before = std::fs::read(&source.path).unwrap();
+        for _ in 0..2 {
+            let conn = source.connection().unwrap();
+            assert!(
+                conn.db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
+                    .unwrap()
+            );
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            conn.pragma_update(None, "query_only", false).unwrap();
+            assert!(
+                conn.execute("DELETE FROM events", []).is_err(),
+                "database itself must be read-only"
+            );
+            drop(conn);
+            assert_eq!(before, std::fs::read(&source.path).unwrap());
+            assert!(
+                std::fs::metadata(&wal).map_or(true, |m| m.len() <= 32),
+                "reader must not append WAL frames"
+            );
+        }
         let f = fixture(false);
         f.writer.pragma_update(None, "user_version", 7).unwrap();
         assert!(f.source.connection().is_err());
@@ -1204,5 +1259,157 @@ mod tests {
         let result = f.source.query(request(json!({})), Mode::Records).unwrap();
         assert_eq!(result["records"][0]["raw"], raw);
         assert_eq!(result["records"][0]["data"]["id"], 9007199254740993u64);
+    }
+    #[test]
+    fn huge_utf8_rows_use_metadata_only_size_guard_and_advance_all_modes() {
+        let f = fixture(false);
+        add(&f, 859, 1, json!({"huge":"\u{1f680}".repeat(1024 * 1024)}));
+        for seq in 2..=3 {
+            add(
+                &f,
+                859,
+                seq,
+                json!({"kind":"epoch","epoch":seq,"train_loss":0.5}),
+            );
+        }
+        let conn = f.source.connection().unwrap();
+        let mut plan = conn
+            .prepare("EXPLAIN SELECT octet_length(data) FROM events")
+            .unwrap();
+        let metadata_flags = plan
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            metadata_flags
+                .iter()
+                .any(|(op, col, flags)| op == "Column" && *col == 3 && flags & 0xc0 != 0),
+            "{metadata_flags:?}"
+        );
+        for mode in [Mode::Records, Mode::Fields, Mode::Plot] {
+            let result = f.source.query(request(json!({"limit":1})), mode).unwrap();
+            assert_eq!(result["diagnostics"]["oversized"], 1);
+            assert_eq!(result["diagnostics"]["partial"], true);
+            assert!(result["diagnostics"]["bytes"].as_u64().unwrap() < 1024);
+            if mode == Mode::Records {
+                assert_eq!(result["records"][0]["seq"], "2");
+                let next = f
+                    .source
+                    .query(
+                        request(json!({"limit":1,"cursor":result["next_cursor"]})),
+                        mode,
+                    )
+                    .unwrap();
+                assert_eq!(next["records"][0]["seq"], "3");
+            } else {
+                assert_eq!(result["diagnostics"]["matched"], 2);
+            }
+        }
+    }
+    #[test]
+    fn object_keys_and_array_indices_are_distinct() {
+        let value = json!({"obj":{"0":7},"arr":[7,null],"nil":null});
+        for (path, expected) in [
+            ("obj[0]", None),
+            ("obj[\"0\"]", Some(json!(7))),
+            ("arr[0]", Some(json!(7))),
+            ("arr[\"0\"]", None),
+            ("arr.length", None),
+            ("arr[1]", Some(Value::Null)),
+            ("nil", Some(Value::Null)),
+            ("missing", None),
+        ] {
+            assert_eq!(
+                FieldPath::parse(path).unwrap().get(&value),
+                expected.as_ref(),
+                "{path}"
+            );
+        }
+    }
+    #[test]
+    fn integer_aware_ordering_including_float_boundary_and_negative_values() {
+        for (a, b) in [
+            (json!(9007199254740993u64), json!(9007199254740992u64)),
+            (json!(9007199254740993u64), json!(9007199254740992.0)),
+            (json!(-9007199254740992i64), json!(-9007199254740993i64)),
+            (json!(u64::MAX), json!(i64::MAX)),
+            (json!(0), json!(-0.5)),
+            (json!(1.5), json!(1)),
+            (json!(1e30), json!(u64::MAX)),
+            (json!(i64::MIN), json!(-1e30)),
+        ] {
+            assert_eq!(numeric_cmp(&a, &b), Some(Ordering::Greater), "{a} > {b}");
+            assert_eq!(numeric_cmp(&b, &a), Some(Ordering::Less));
+        }
+        assert_eq!(numeric_cmp(&json!(true), &json!(1)), None);
+        assert_eq!(numeric_cmp(&json!(1), &json!(1.0)), Some(Ordering::Equal));
+        assert!(!safe_hint_value(&json!(9007199254740993u64)));
+    }
+    #[test]
+    fn atomic_replacement_invalidates_cursor_without_changing_source_identity() {
+        let f = fixture(false);
+        let replacement = fixture(false);
+        for seq in 1..=3 {
+            add(&f, 859, seq, json!({"kind":"epoch","epoch":seq}));
+            add(
+                &replacement,
+                859,
+                seq,
+                json!({"kind":"epoch","epoch":100+seq}),
+            );
+        }
+        let first = f
+            .source
+            .query(request(json!({"limit":1})), Mode::Records)
+            .unwrap();
+        let id = f.source.id.clone();
+        drop(replacement.writer);
+        std::fs::rename(&replacement.source.path, &f.source.path).unwrap();
+        assert_eq!(f.source.id, id);
+        let stale = f
+            .source
+            .query(
+                request(json!({"limit":1,"cursor":first["next_cursor"]})),
+                Mode::Records,
+            )
+            .unwrap_err();
+        assert!(stale.1.contains("stale record cursor"));
+        let fresh = f
+            .source
+            .query(request(json!({"limit":1})), Mode::Records)
+            .unwrap();
+        assert_eq!(fresh["records"][0]["data"]["epoch"], 101);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_source_is_reported_without_permission_or_database_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture(false);
+        drop(f.writer);
+        let before = std::fs::read(&f.source.path).unwrap();
+        let permissions = std::fs::metadata(&f.source.path).unwrap().permissions();
+        std::fs::set_permissions(&f.source.path, std::fs::Permissions::from_mode(0)).unwrap();
+        let privileged = std::fs::File::open(&f.source.path).is_ok();
+        let result = f.source.connection();
+        let mode = std::fs::metadata(&f.source.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::set_permissions(&f.source.path, permissions).unwrap();
+        assert_eq!(mode, 0);
+        if !privileged {
+            assert_eq!(result.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+        } else {
+            eprintln!("permission denial assertion skipped for privileged user");
+        }
+        assert_eq!(before, std::fs::read(&f.source.path).unwrap());
     }
 }

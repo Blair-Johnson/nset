@@ -9,7 +9,6 @@ pub mod errors;
 pub mod ingest;
 pub mod models;
 pub mod rx;
-mod rx_vfs;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
 #[derive(Clone)]

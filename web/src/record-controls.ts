@@ -8,6 +8,7 @@ import {
   recordRuns,
   recordNotes,
   recordValue,
+  parseRecordScalar,
   type RecordBinding,
   type RecordCondition,
   type RecordFilters,
@@ -19,6 +20,12 @@ function recordCell(value: unknown): string {
   if (value === undefined) return "missing";
   if (Array.isArray(value)) return `array (${value.length})`;
   if (value !== null && typeof value === "object") return "object";
+  if (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    !Number.isSafeInteger(value)
+  )
+    return "unsafe integer (see exact raw JSON)";
   const text = JSON.stringify(value);
   return text.length > 200 ? `${text.slice(0, 200)}...` : text;
 }
@@ -463,15 +470,9 @@ export function mountRecordControls(
       try {
         for (const c of draft.conditions) {
           recordPath(c.path);
-          const value: unknown = ["exists", "missing"].includes(c.op)
+          c.value = ["exists", "missing"].includes(c.op)
             ? null
-            : JSON.parse(rowValues.get(c)!.value);
-          if (
-            value !== null &&
-            !["string", "number", "boolean"].includes(typeof value)
-          )
-            throw new Error("Use a JSON scalar, not an array/object.");
-          c.value = value as RecordCondition["value"];
+            : parseRecordScalar(rowValues.get(c)!.value);
         }
         b.filters = structuredClone(draft);
         filterError.textContent = "";

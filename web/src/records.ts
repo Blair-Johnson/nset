@@ -45,7 +45,7 @@ export interface RecordRow {
   /** Original stored JSON, including exact integer text and formatting. */
   raw?: string;
   run_uid: string;
-  seq: number;
+  seq: string;
   received_at: string;
   data: unknown;
 }
@@ -61,7 +61,7 @@ export interface RecordResult {
     run_uid: string;
     y: string;
     group: Scalar | null;
-    points: [number, number, number][];
+    points: [number, number, string][];
   }[];
 }
 /** Exact, case-sensitive path parser. Dotted names are nested; JSON bracket names
@@ -117,11 +117,35 @@ export function recordPath(text: string): (string | number)[] {
 }
 export function recordValue(value: unknown, path: string): unknown {
   for (const part of recordPath(path)) {
-    if (!value || typeof value !== "object" || !Object.hasOwn(value, part))
+    if (
+      !value ||
+      typeof value !== "object" ||
+      (typeof part === "number"
+        ? !Array.isArray(value)
+        : Array.isArray(value)) ||
+      !Object.hasOwn(value, part)
+    )
       return undefined;
     value = (value as Record<string | number, unknown>)[part];
   }
   return value;
+}
+/** Filters use JS-safe scalar transport; never silently round large integers. */
+export function validateRecordScalar(value: unknown): Scalar {
+  if (value !== null && !["string", "number", "boolean"].includes(typeof value))
+    throw new Error("Use a JSON scalar, not an array/object.");
+  if (
+    typeof value === "number" &&
+    (!Number.isFinite(value) ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value)))
+  )
+    throw new Error(
+      "Numeric filters require finite numbers and safe integers (+/-9007199254740991). Large integers must not be rounded; inspect raw JSON instead.",
+    );
+  return value as Scalar;
+}
+export function parseRecordScalar(text: string): Scalar {
+  return validateRecordScalar(JSON.parse(text));
 }
 export function validateRecordBinding(value: unknown): RecordBinding {
   const b = value as RecordBinding;
@@ -168,6 +192,7 @@ export function validateRecordBinding(value: unknown): RecordBinding {
   )
     throw new Error("Invalid record filter.");
   for (const c of b.filters.conditions) {
+    validateRecordScalar(c.value);
     recordPath(c.path);
     if (
       Object.keys(c).some((k) => !["path", "op", "value"].includes(k)) ||
@@ -292,9 +317,9 @@ export async function loadRecordPlot(
 interface RxCatalog {
   source: { id: string; name: string; readonly: true } | null;
   error?: string;
-  next_after: number | null;
+  next_after: string | null;
   runs: {
-    id: number;
+    id: string;
     run_uid: string;
     state: string;
     alias: string | null;
@@ -310,10 +335,10 @@ export async function appendRxCatalog(
   api: Api,
   catalog: Catalog,
   signal?: AbortSignal,
-  startAfter?: number,
+  startAfter?: string,
 ): Promise<Catalog> {
   // Bounded initial metadata loading. No event data is downloaded here.
-  let after: number | null = startAfter ?? null;
+  let after: string | null = startAfter ?? null;
   for (let page = 0; page < (startAfter === undefined ? 5 : 1); page++) {
     const value: RxCatalog = await api.json(
       `/rx/catalog${after === null ? "" : `?after=${after}`}`,

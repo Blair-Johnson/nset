@@ -11,6 +11,7 @@ import {
 import {
   recordPath,
   recordValue,
+  parseRecordScalar,
   validateRecordBinding,
   recordRuns,
   recordRequest,
@@ -187,7 +188,7 @@ test("rx catalog preserves stored state and readonly identity, with bounded pagi
           source: { id: "rx:test", name: "repo", readonly: true },
           runs: [
             {
-              id: calls,
+              id: String(calls),
               run_uid: `uid${calls}`,
               state: "queued",
               alias: null,
@@ -199,7 +200,7 @@ test("rx catalog preserves stored state and readonly identity, with bounded pagi
               exit_code: null,
             },
           ],
-          next_after: calls,
+          next_after: String(calls),
         }),
       );
     },
@@ -212,7 +213,7 @@ test("rx catalog preserves stored state and readonly identity, with bounded pagi
   assert.equal(calls, 5);
   assert.equal(result.runs[0].rx?.state, "queued");
   assert.equal(result.runs[0].id, "rx:test:uid1");
-  assert.equal(result.rx?.nextAfter, 5);
+  assert.equal(result.rx?.nextAfter, "5");
 });
 
 test("paired EMA follows event order and ambiguous duplicate-X cursors stay undefined", () => {
@@ -236,4 +237,76 @@ test("paired EMA follows event order and ambiguous duplicate-X cursors stay unde
   assert.deepEqual(data.observations, points);
   assert.equal(data.fn.at(1), null);
   assert.equal(data.fn.monotonic, false);
+});
+
+test("inspector paths enforce object keys vs array indices", () => {
+  const value = { obj: { "0": 7 }, arr: [7, null], nil: null };
+  for (const [path, expected] of [
+    ["obj[0]", undefined],
+    ['obj["0"]', 7],
+    ["arr[0]", 7],
+    ['arr["0"]', undefined],
+    ["arr.length", undefined],
+    ["arr[1]", null],
+    ["nil", null],
+    ["missing", undefined],
+  ] as const)
+    assert.equal(recordValue(value, path), expected, path);
+});
+test("unsafe integer and nonfinite filter input is rejected, never rounded", () => {
+  for (const text of [
+    "9007199254740992",
+    "9007199254740993",
+    "-9007199254740993",
+    "9.007199254740993e15",
+    "1e309",
+  ])
+    assert.throws(
+      () => parseRecordScalar(text),
+      /finite numbers and safe integers/,
+    );
+  assert.equal(parseRecordScalar("9007199254740991"), 9007199254740991);
+  assert.equal(parseRecordScalar('"9007199254740993"'), "9007199254740993");
+  assert.equal(parseRecordScalar("0.125"), 0.125);
+  const b = structuredClone(binding);
+  b.filters.conditions = [{ path: "id", op: "eq", value: 9007199254740992 }];
+  assert.throws(() => validateRecordBinding(b), /safe integers/);
+});
+test("large catalog IDs and continuations retain exact decimal strings", async () => {
+  const requested: string[] = [];
+  const api = new Api(
+    () => "test",
+    async (input) => {
+      requested.push(String(input));
+      const second = requested.length === 2;
+      return new Response(
+        JSON.stringify({
+          source: { id: "rx:test", name: "repo", readonly: true },
+          next_after: second ? null : "9007199254740993",
+          runs: [
+            {
+              id: second ? "9007199254740994" : "9007199254740993",
+              run_uid: second ? "large2" : "large1",
+              state: "succeeded",
+              alias: null,
+              config: null,
+              argv: "[]",
+              created_at: "now",
+              started_at: null,
+              finished_at: null,
+              exit_code: 0,
+            },
+          ],
+        }),
+      );
+    },
+  );
+  const result = await appendRxCatalog(api, {
+    experiments: [],
+    runs: [],
+    series: [],
+  });
+  assert.match(requested[1], /after=9007199254740993$/);
+  assert.equal(result.runs[0].name, "r9007199254740993");
+  assert.equal(result.runs[1].name, "r9007199254740994");
 });

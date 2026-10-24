@@ -102,7 +102,7 @@ async fn rx_routes_require_auth_validate_bounds_and_leave_native_catalog_availab
     let before = std::fs::read(&f.path).unwrap();
     let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(result["traces"][0]["points"], json!([[1.0, 0.5, 5]]));
+    assert_eq!(result["traces"][0]["points"], json!([[1.0, 0.5, "5"]]));
     let mut query = f.query();
     query["path"] = json!("/etc/passwd");
     assert!(
@@ -175,7 +175,7 @@ async fn git_common_directory_keeps_source_identity_across_worktrees() {
 }
 
 #[tokio::test]
-async fn separate_process_wal_writer_and_readonly_sidecars() {
+async fn separate_process_wal_writer_close_reopen_and_no_reader_written_frames() {
     let f = Fixture::new();
     // Only this synthetic temp database is writable. The source reader runs in a
     // separate process from the writer, so it cannot reuse writable shm mappings.
@@ -210,8 +210,8 @@ c.close()
     stdout.read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "ready");
     let wal = PathBuf::from(format!("{}-wal", f.path.display()));
-    let shm = PathBuf::from(format!("{}-shm", f.path.display()));
-    let files = [&f.path, &wal, &shm];
+    // SHM reader marks/index initialization are allowed; DB/WAL data is not.
+    let files = [&f.path, &wal];
     let before = files.map(|p| std::fs::read(p).unwrap());
     let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
     assert_eq!(status, StatusCode::OK, "{result}");
@@ -226,21 +226,111 @@ c.close()
     assert_eq!(result["diagnostics"]["matched"], 3);
     writeln!(child.0.stdin.as_mut().unwrap(), "quit").unwrap();
     child.0.wait().unwrap();
-    // A read-only final connection may leave producer-owned sidecars behind.
-    // The fixture owner checkpoints and removes its own sidecars, then verifies
-    // the source reader refuses to recreate either one.
-    let owner = Connection::open(&f.path).unwrap();
-    owner
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+    // Last writer close may checkpoint/clean up its own sidecars. The reader
+    // must work both now and when the producer later reopens and commits.
+    let before = std::fs::read(&f.path).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap_or_default();
+    let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["diagnostics"]["matched"], 3);
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+    assert_eq!(wal_before, std::fs::read(&wal).unwrap_or_default());
+    let reopened = Command::new("python3").arg("-c").arg(r#"import sqlite3,sys
+c=sqlite3.connect(sys.argv[1]); c.execute('INSERT INTO events VALUES(859,8,?,?)',('now','{"kind":"epoch","epoch":4,"loss":0.2}')); c.commit(); c.close()
+"#).arg(&f.path).status().unwrap();
+    assert!(reopened.success());
+    let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["diagnostics"]["matched"], 4);
+}
+
+#[tokio::test]
+async fn exact_integer_filters_and_decimal_string_catalog_page_boundaries() {
+    let f = Fixture::new();
+    let base = 9_007_199_254_740_992i64;
+    let db = Connection::open(&f.path).unwrap();
+    for offset in 0..=200i64 {
+        let id = base + offset;
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,'succeeded',NULL,NULL,'now',NULL,NULL,0,'[]')",
+            rusqlite::params![id, format!("u{id}")],
+        )
         .unwrap();
-    drop(owner);
-    for path in [&wal, &shm] {
-        if path.exists() {
-            std::fs::remove_file(path).unwrap();
+    }
+    for offset in 0..=1i64 {
+        let id = base + offset;
+        db.execute(
+            "INSERT INTO events VALUES(859,?,'now',?)",
+            rusqlite::params![
+                id,
+                format!("{{\"kind\":\"epoch\",\"epoch\":1,\"loss\":0.5,\"id\":{id}}}")
+            ],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let (status, first) = f
+        .request(
+            "GET",
+            &format!("/api/rx/catalog?after={}", base - 1),
+            Value::Null,
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["runs"].as_array().unwrap().len(), 200);
+    assert_eq!(first["runs"][0]["id"], base.to_string());
+    assert_eq!(first["runs"][1]["id"], (base + 1).to_string());
+    assert_eq!(first["next_after"], (base + 199).to_string());
+    let (status, next) = f
+        .request(
+            "GET",
+            &format!(
+                "/api/rx/catalog?after={}",
+                first["next_after"].as_str().unwrap()
+            ),
+            Value::Null,
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(next["runs"][0]["id"], (base + 200).to_string());
+    assert!(next["next_after"].is_null());
+    for (op, count) in [
+        ("gt", 1),
+        ("gte", 2),
+        ("lt", 0),
+        ("lte", 1),
+        ("eq", 1),
+        ("ne", 1),
+    ] {
+        let mut query = f.query();
+        query["filters"] = json!({"conditions":[{"path":"id","op":op,"value":base}]});
+        let (status, result) = f.request("POST", "/api/rx/records", query, true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        // Missing fields do not match numeric comparisons.
+        let expected = count;
+        assert_eq!(
+            result["records"].as_array().unwrap().len(),
+            expected,
+            "{op}: {result}"
+        );
+        if op == "gt" {
+            assert_eq!(result["records"][0]["seq"], (base + 1).to_string());
+            assert!(
+                result["records"][0]["raw"]
+                    .as_str()
+                    .unwrap()
+                    .contains("9007199254740993")
+            );
         }
     }
-    let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{result}");
-    assert!(!wal.exists());
-    assert!(!shm.exists());
+    let mut query = f.query();
+    query["filters"] = json!({"conditions":[{"path":"id","op":"eq","value":base+1}]});
+    let (_, plot) = f.request("POST", "/api/rx/plot", query, true).await;
+    assert_eq!(plot["traces"][0]["points"][0][2], (base + 1).to_string());
+    let mut query = f.query();
+    query["prefix"] = json!("id");
+    let (_, fields) = f.request("POST", "/api/rx/fields", query, true).await;
+    assert_eq!(fields["fields"][0]["values"], json!([]));
 }

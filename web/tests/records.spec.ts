@@ -111,7 +111,7 @@ async function fixture(page: Page, nested = false) {
           records: [
             {
               run_uid: "uid",
-              seq: body.cursor ? 10 : 5,
+              seq: body.cursor ? "10" : "5",
               received_at: "2026-10-12T23:51:22Z",
               data: rows[body.cursor ? 5 : 0],
             },
@@ -452,7 +452,7 @@ test("shell exposes rx beside native data, saves a record chart, and hides run m
         next_after: null,
         runs: [
           {
-            id: 859,
+            id: "859",
             run_uid: "uid",
             state: "succeeded",
             alias: null,
@@ -565,7 +565,7 @@ test("raw inspection retains exact JSON text rather than rounding large integers
         records: [
           {
             run_uid: "uid",
-            seq: 1,
+            seq: "9007199254740993",
             received_at: "now",
             data: JSON.parse(raw),
             raw,
@@ -582,4 +582,105 @@ test("raw inspection retains exact JSON text rather than rounding large integers
   await page.getByRole("button", { name: "Load records", exact: true }).click();
   await page.locator(".record-inspection summary").click();
   await expect(page.locator(".record-inspection pre")).toHaveText(raw);
+});
+
+test("editor rejects neighboring unsafe integers without sending rounded filters", async ({
+  page,
+}) => {
+  const { requests } = await fixture(page);
+  await page.getByText("Filter records (1)", { exact: true }).click();
+  await page.getByLabel("Record filter 1 path", { exact: true }).fill("id");
+  const input = page.getByLabel("Record filter 1 JSON value", { exact: true });
+  for (const text of [
+    "9007199254740992",
+    "9007199254740993",
+    "-9007199254740993",
+    "1e309",
+  ]) {
+    await input.fill(text);
+    await page
+      .getByRole("button", { name: "Apply record filters", exact: true })
+      .click();
+    await expect(
+      page.getByText(/Filters not applied:.*safe integers/),
+    ).toBeVisible();
+  }
+  expect(
+    requests
+      .filter((r) => r.path.endsWith("/plot"))
+      .every(
+        (r) => !r.body.filters.conditions.some((c: any) => c.path === "id"),
+      ),
+  ).toBe(true);
+  await input.fill("9007199254740991");
+  await page
+    .getByRole("button", { name: "Apply record filters", exact: true })
+    .click();
+  await expect
+    .poll(
+      () =>
+        requests.filter((r) => r.path.endsWith("/plot")).at(-1)?.body.filters
+          .conditions[0].value,
+    )
+    .toBe(9007199254740991);
+});
+
+test("raw inspector does not coerce object keys into array indices", async ({
+  page,
+}) => {
+  await fixture(page);
+  const raw = '{"obj":{"0":7},"arr":[7,null],"nil":null}';
+  await page.route("**/api/rx/records", (route) =>
+    route.fulfill({
+      json: {
+        diagnostics: {
+          scanned: 1,
+          matched: 1,
+          bytes: raw.length,
+          invalid_json: 0,
+          oversized: 0,
+          skipped_axes: 0,
+          skipped_groups: 0,
+          omitted_traces: 0,
+          points: 0,
+          partial: false,
+          reasons: [],
+        },
+        records: [
+          {
+            run_uid: "uid",
+            seq: "9007199254740993",
+            received_at: "now",
+            raw,
+            data: JSON.parse(raw),
+          },
+        ],
+        next_cursor: null,
+        fields: [],
+        traces: [],
+        coverage: "append-only page",
+      },
+    }),
+  );
+  await page.getByText("Inspect records", { exact: true }).click();
+  for (const [path, result] of [
+    ["obj[0]", "missing"],
+    ['obj["0"]', "7"],
+    ['arr["0"]', "missing"],
+    ["arr.length", "missing"],
+    ["arr[1]", "null"],
+  ]) {
+    const x = page.getByLabel("Record X path", { exact: true });
+    await x.fill(path);
+    await x.press("Enter");
+    await page
+      .getByRole("button", { name: "Load records", exact: true })
+      .click();
+    await expect(page.locator(".record-inspection summary")).toContainText(
+      `${path}=${result}`,
+    );
+    await expect(page.locator(".record-inspection summary")).toContainText(
+      "seq 9007199254740993",
+    );
+  }
 });
