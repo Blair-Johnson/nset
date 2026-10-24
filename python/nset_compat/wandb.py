@@ -275,7 +275,9 @@ def _finish_pending(ctx, key):
     if pending.get("complete"):
         ctx.native.request("PATCH", "/api/runs/" + quote(run["native_id"], safe=""), {"status": run["state"]})
     if pending.get("schema") is None:
-        # Legacy pending intents already contain their proposed full run.
+        # The pending full snapshot supersedes any older migration marker.
+        # Persist it before conversion so a crash cannot restore stale metadata.
+        ctx.state.put(MIGRATING, key, run)
         _migrate(ctx, key, run)
     elif pending["schema"] == SCHEMA:
         for name, rows in pending["rows"].items():
@@ -404,6 +406,7 @@ def _gql(ctx, request):
             v = args.get("input") or {}
             key = _identity(v.get("entityName") or "nset", v.get("projectName"), v.get("runName"))
             with ctx.lock_for("wandb.run." + key):
+                _finish_pending(ctx, key)
                 run = _load(ctx, key)
                 files = v.get("files")
                 if not isinstance(files, list):

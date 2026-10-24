@@ -413,6 +413,102 @@ class WandbProtocolTests(unittest.TestCase):
                 self.assertIsNone(self.ctx.state.get(wandb.MIGRATING, self.key))
                 self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key)["schema"], wandb.SCHEMA)
 
+    def test_legacy_pending_file_operations_recover_stale_marker_after_sqlite_reopen(self):
+        from nset_compat.context import State as DurableState
+        for operation in ("createRunFiles", "markRunFilesUploaded"):
+            for crash_stage in (None, wandb.MIGRATING, wandb.RUNS):
+                with self.subTest(operation=operation, crash_stage=crash_stage), tempfile.TemporaryDirectory() as directory:
+                    self.setUp()
+                    legacy = self.ctx.state.get(wandb.RUNS, self.key)
+                    legacy.pop("schema")
+                    legacy["streams"] = {
+                        "wandb-history.jsonl": ['{"loss":1.25,"_step":0,"_timestamp":12.5001}'],
+                        "wandb-events.jsonl": ['{"cpu":25,"_step":0,"_timestamp":12.5001}'],
+                        "output.log": ["old console"],
+                        "wandb-summary.json": ['{"loss":1.25}'],
+                    }
+                    newer = copy.deepcopy(legacy)
+                    newer["streams"]["wandb-history.jsonl"] += [
+                        '{"loss":0.625,"_step":1,"_timestamp":13.7502}', 'not-json: é']
+                    newer["streams"]["wandb-events.jsonl"] += ['{"cpu":50.5,"_step":1,"_timestamp":13.7502}']
+                    newer["streams"]["output.log"] = ["new console é", "tail"]
+                    newer["streams"]["wandb-summary.json"] = ['{"loss":0.625,"label":"new"}']
+                    newer["streams"]["extra.txt"] = ["only in pending B"]
+                    newer.update(config='{"lr":{"value":0.2}}', summaryMetrics=newer["streams"]["wandb-summary.json"][0],
+                                 displayName="pending B", notes="keep newer metadata", tags=["new"], state="finished", exitcode=0)
+                    batches = [batch for name in ("wandb-history.jsonl", "wandb-events.jsonl")
+                               for i, line in enumerate(newer["streams"][name])
+                               for batch in wandb._projection(self.key, name, line, i, newer)]
+                    # The native service may already have acknowledged B before the crash.
+                    for batch in batches:
+                        self.ctx.ingest_metrics(newer["native_id"], *batch)
+                    database = Path(directory) / "state.sqlite"
+                    self.ctx.state = DurableState(database)
+                    state = self.ctx.state
+                    try:
+                        state.put(wandb.RUNS, self.key, legacy)
+                        state.put(wandb.PENDING, self.key, {"run": newer, "batches": batches, "complete": True})
+                        if crash_stage is not None:
+                            original = state.put
+                            def crash(namespace, key, value):
+                                original(namespace, key, value)
+                                if namespace == crash_stage:
+                                    raise RuntimeError("stale migration crash")
+                            state.put = crash
+                            # Reproduce the old file-operation path: _load migrated A
+                            # without draining the newer pending B first.
+                            with self.assertRaisesRegex(RuntimeError, "stale migration crash"):
+                                with self.ctx.lock_for("wandb.run." + self.key):
+                                    wandb._load(self.ctx, self.key)
+                            state.put = original
+                            self.assertEqual(state.get(wandb.MIGRATING, self.key), legacy)
+                        self.assertEqual(state.get(wandb.PENDING, self.key)["run"], newer)
+                    finally:
+                        state.close()
+                    self.ctx.state = DurableState(database)
+                    try:
+                        self.ctx.artifacts.put(wandb._namespace(self.key), "media/test.bin", b"uploaded")
+                        fields = "runID files { name uploadUrl }" if operation == "createRunFiles" else "success"
+                        query = ('mutation { ' + operation + '(input:{entityName:"e",projectName:"p",runName:"r",'
+                                 'files:["media/test.bin"]}) { ' + fields + ' } }')
+                        response = gql(self.ctx, query)
+                        self.assertEqual(response.status, 200, response.body)
+                        if operation == "createRunFiles":
+                            self.assertEqual(response.body["data"][operation]["runID"], newer["native_id"])
+                        else:
+                            self.assertTrue(response.body["data"][operation]["success"])
+                        expected = {k: v for k, v in newer.items() if k != "streams"}
+                        expected.update(schema=wandb.SCHEMA, streams={
+                            name: {"count": len(lines), "bytes": sum(len(line.encode()) + 1 for line in lines),
+                                   "tail": lines[-1:] if name in ("wandb-history.jsonl", "wandb-events.jsonl", "wandb-summary.json") else []}
+                            for name, lines in newer["streams"].items()})
+                        # Assert before any download can independently drain pending.
+                        self.assertEqual(self.ctx.state.get(wandb.RUNS, self.key), expected)
+                        self.assertIsNone(self.ctx.state.get(wandb.PENDING, self.key))
+                        self.assertIsNone(self.ctx.state.get(wandb.MIGRATING, self.key))
+                        for name, lines in newer["streams"].items():
+                            self.assertEqual(dict(self.ctx.state.items(wandb._rows_namespace(self.key, name))),
+                                             {str(i): line for i, line in enumerate(lines)})
+                            self.assertEqual(stream_bytes(self.ctx, self.key, name)[0], ("\n".join(lines) + "\n").encode())
+                        self.assertEqual(dict(self.ctx.state.items(wandb._metric_namespace(self.key))),
+                                         {batch_id: True for batch_id, _ in batches})
+                        self.assertEqual([row for rows in self.ctx.batches.values() for row in rows], [
+                            {"key": "loss", "value": 1.25, "step": 0, "timestamp": 12500},
+                            {"key": "loss", "value": 0.625, "step": 1, "timestamp": 13750},
+                            {"key": "system/cpu", "value": 25, "step": 0, "timestamp": 12500},
+                            {"key": "system/cpu", "value": 50.5, "step": 1, "timestamp": 13750},
+                        ])
+                        self.assertEqual(len(self.ctx.attempts), 8)  # four acknowledged batches, then replay
+                        self.assertIn(("PATCH", "/api/runs/" + newer["native_id"], {"status": "finished"}), self.ctx.native.calls)
+                        self.assertEqual(gql(self.ctx, query).status, 200)
+                        for name in ("wandb-history.jsonl", "wandb-events.jsonl"):
+                            self.stream(name, newer["streams"][name])  # old-offset retry
+                            self.stream(name, newer["streams"][name], offset=len(newer["streams"][name]))  # offline repeat
+                        self.assertEqual(len(self.ctx.batches), 4)
+                        self.assertEqual(len(self.ctx.attempts), 8)
+                    finally:
+                        self.ctx.state.close()
+
     def test_legacy_pending_native_ack_is_converted_on_replay(self):
         run = self.ctx.state.get(wandb.RUNS, self.key)
         run.pop("schema")
