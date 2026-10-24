@@ -11,4 +11,7 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nset_client*"]
+include = ["nset_client*", "nset_compat*"]
+
+[project.optional-dependencies]
+tensorboard = ["tensorboard>=2,<3"]

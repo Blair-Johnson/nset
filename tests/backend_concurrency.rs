@@ -360,11 +360,27 @@ mod backend {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         drop(pending_requests);
         assert_eq!(state.write_slots.available_permits(), 3);
+        let (experiment, _) = state
+            .db
+            .create_experiment("image admission".into())
+            .await
+            .unwrap();
+        let run = state
+            .db
+            .create_run(nset::models::NewRun {
+                experiment_id: experiment.id,
+                name: "image".into(),
+                params: Default::default(),
+                tags: Default::default(),
+            })
+            .await
+            .unwrap();
+        let image_uri = format!("/api/runs/{}/images?key=image&step=0", run.id);
         let held_image = state.image_slots.try_acquire().unwrap();
         let response = app
             .clone()
             .oneshot(request(
-                "/api/runs/missing/images?key=image",
+                &image_uri,
                 Body::from("invalid image"),
                 "image/png",
             ))
@@ -375,7 +391,7 @@ mod backend {
         drop(held_image);
         let response = app
             .oneshot(request(
-                "/api/runs/missing/images?key=image",
+                &image_uri,
                 Body::from("invalid image"),
                 "image/png",
             ))
