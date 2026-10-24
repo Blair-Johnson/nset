@@ -1,6 +1,6 @@
 # Not Shitty Experiment Tracker
 
-A self-hosted experiment tracker for inspecting and comparing training runs. One executable serves the browser UI and accepts metrics over the network—no separate database service or gateway.
+A self-hosted experiment tracker for inspecting and comparing training runs. One executable serves the browser UI and accepts metrics over the network.
 
 ![Four training runs compared in nset, showing accuracy, gradient norm, learning rate, and loss.](docs/images/training-comparison.png)
 
@@ -25,7 +25,7 @@ export NSET_TOKEN='replace-this-with-your-own-random-access-token'
   --token "$NSET_TOKEN" --db-path ./nset-data
 ```
 
-Open `http://127.0.0.1:8080` and enter the same token. Use at least 40 characters for W&B clients. `--db-path` holds the server's data; the built executable needs neither Python nor Node to run.
+Open `http://127.0.0.1:8080` and enter the same token. Use at least 40 characters for W&B clients. `--db-path` sets the directory where the server stores its data.
 
 Use `--host 0.0.0.0` for remote clients, with HTTPS or a tunnel on untrusted networks. Run `./target/release/nset serve --help` for other options.
 
@@ -63,6 +63,6 @@ export WANDB_API_KEY="$NSET_TOKEN"
 export WANDB_ENTITY=local
 ```
 
-Tracking compatibility is a subset, not full vendor parity. See [supported clients](docs/client-compatibility.md) for details and TensorBoard event ingestion.
+See [supported clients](docs/client-compatibility.md) for supported MLflow and W&B features and TensorBoard event ingestion.
 
 [Chart controls](web/README.md) · [Durable delivery](docs/durable-ingestion.md) · [Build and development](docs/contributing.md)
