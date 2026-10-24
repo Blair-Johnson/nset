@@ -441,6 +441,32 @@ os._exit(0)
         self.assertEqual(self.ctx.ingest_metrics("run", "body-limit", metrics)["accepted"], 1)
         self.assertEqual(json.dumps(native.calls[0][2], allow_nan=False).encode(), body)
 
+    def test_native_origin_guard_prevents_proxy_auth_bypass_before_storage(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "absent"
+            for url in ("http://127.0.0.1/api", "http://127.0.0.1/%61pi", "https://localhost/prefix/"):
+                with self.subTest(url=url), self.assertRaisesRegex(ValueError, "origin"):
+                    CompatContext(url, TOKEN, directory, "http://localhost")
+                self.assertFalse(directory.exists())
+
+    def test_generated_chunk_names_cannot_alias_caller_batch_names(self):
+        import hashlib
+        native = FakeNative()
+        self.ctx.native = native
+        metrics = [{"key": "x", "step": i, "value": i} for i in range(10001)]
+        first = self.ctx.ingest_metrics("run", "A", metrics)
+        old_generated_name = "chunk-" + hashlib.sha256(b"A:0").hexdigest()
+        second = self.ctx.ingest_metrics("run", old_generated_name, metrics[:10000])
+        self.assertEqual(second["batch_id"], old_generated_name)
+        self.assertEqual(len(native.receipts), 3)
+        self.assertEqual(self.ctx.ingest_metrics("run", "A", metrics), first)
+        self.assertEqual(self.ctx.ingest_metrics("run", old_generated_name, metrics[:10000]), second)
+        self.assertEqual(len(native.receipts), 3)
+        self.ctx.state.put("gateway:ingest", json.dumps(["run", "legacy"], separators=(",", ":")), "old-digest")
+        with self.assertRaises(ProtocolError) as caught:
+            self.ctx.ingest_metrics("run", "legacy", metrics[:1])
+        self.assertEqual(caught.exception.code, "LEGACY_BATCH_IDENTITY")
+        self.assertEqual(len(native.receipts), 3)
     def test_missing_adapters_are_lazy_but_broken_imports_fail(self):
         def missing(name):
             raise ModuleNotFoundError(name=name)
@@ -669,7 +695,8 @@ class HTTPTests(unittest.TestCase):
         status, _, body = self.request("POST", "/compat/ingest", json.dumps(payload).encode())
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["state"], "applied")
-        native_path = "/api/runs/run/ingest/http-batch"
+        native_path = self.backend.seen[0][0]
+        self.assertTrue(native_path.startswith("/api/runs/run/ingest/gw1-"))
         self.assertEqual([p for p, _ in self.backend.seen], [native_path, native_path])
         self.assertTrue(all(auth == "Bearer " + TOKEN for _, auth in self.backend.seen))
         applied_receipt = json.loads(body)

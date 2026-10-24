@@ -277,6 +277,8 @@ def _signed_path(path):
 
 class CompatContext:
     def __init__(self, native_url, token, data_dir, public_url):
+        if urlsplit(native_url).path not in ("", "/"):
+            raise ValueError("native_url must be an HTTP(S) origin without a path prefix")
         self.native = Transport(native_url, token, timeout=10)
         parsed = urlsplit(public_url)
         if (parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username
@@ -372,15 +374,19 @@ class CompatContext:
         # count on retry must not accidentally submit a disjoint set of native IDs.
         with self.lock_for("gateway:ingest:" + identity):
             old = self.state.get("gateway:ingest", identity)
-            if old is not None and old != digest:
+            binding = {"digest": digest, "scheme": "gateway-v1"}
+            if old is not None and (not isinstance(old, dict) or old.get("scheme") != "gateway-v1"):
+                raise ProtocolError(409, "LEGACY_BATCH_IDENTITY", "Legacy gateway batch identity requires explicit migration")
+            if old is not None and old != binding:
                 raise ProtocolError(409, "RESOURCE_CONFLICT", "Batch ID already binds different metrics")
             if old is None:
-                self.state.put("gateway:ingest", identity, digest)
+                self.state.put("gateway:ingest", identity, binding)
         deadline = time.monotonic() + self.ingest_timeout
         receipts = []
         for offset in range(0, len(metrics), 10000):
             chunk = metrics[offset:offset + 10000]
-            chunk_id = batch_id if len(metrics) <= 10000 else "chunk-" + hashlib.sha256((batch_id + ":" + str(offset // 10000)).encode()).hexdigest()
+            source_id = json.dumps(["gateway-v1", run_id, batch_id, offset // 10000], separators=(",", ":"))
+            chunk_id = "gw1-" + hashlib.sha256(source_id.encode()).hexdigest()
             path = "/api/runs/" + quote(run_id, safe="") + "/ingest/" + chunk_id
             receipt = self._receipt(self.native.request("PUT", path, {"metrics": chunk}), run_id, chunk_id, len(chunk))
             while wait and receipt["state"] != "applied":
@@ -393,7 +399,7 @@ class CompatContext:
             if offset + 10000 < len(metrics) and time.monotonic() >= deadline:
                 raise ProtocolError(503, "TEMPORARILY_UNAVAILABLE", "Ingest deadline reached; retry the same batch ID")
         if len(receipts) == 1:
-            return receipts[0]
+            return {**receipts[0], "batch_id": batch_id}
         return {"batch_id": batch_id, "run_id": run_id,
                 "state": "applied" if all(r["state"] == "applied" for r in receipts) else "pending",
                 "accepted": sum(r["accepted"] for r in receipts),
