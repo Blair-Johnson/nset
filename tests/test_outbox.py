@@ -13,6 +13,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from support import IsolatedClientTestCase, isolated_env
+
 from nset_client import (APIError, BatchConflictError, Client, DurableOutbox,
                          InvalidReceiptError, OutboxFullError)
 
@@ -28,21 +30,51 @@ def receipt(method, path, *, raw):
             "accepted": len(json.loads(raw)["metrics"]), "accepted_at": 123456}
 
 
-class OutboxTests(unittest.TestCase):
+class OutboxTests(IsolatedClientTestCase):
     def setUp(self):
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "outbox.sqlite3"
-        self.client = Client("http://localhost:8080", token="never-store-this-token", timeout=.05)
+        self.destination = self.client("http://localhost:8080", token="never-store-this-token", timeout=.05)
 
     def box(self, **options):
-        box = self.client.durable_outbox(self.path, **options)
+        box = self.destination.durable_outbox(self.path, **options)
         self.addCleanup(box.close)
         return box
 
     def rows(self):
         with contextlib.closing(sqlite3.connect(self.path)) as db, db:
             return db.execute("SELECT run_id,batch_id,payload FROM outbox_pending ORDER BY id").fetchall()
+
+    def test_mocked_fixtures_leave_fake_user_spool_untouched(self):
+        from types import SimpleNamespace
+        from nset_client.client import _private_spool, _spool_path
+        from test_client import ClientTests
+        user_home = Path(self.temp.name) / "fake-user"
+        with patch.dict(os.environ, isolated_env(user_home), clear=True):
+            sentinel = _spool_path(self.destination.http.url)
+            _private_spool(sentinel)
+            with DurableOutbox(SimpleNamespace(http=self.destination.http), sentinel) as box:
+                box.enqueue("user-sentinel", METRICS, batch_id="never-acknowledge")
+            before = {p.name: p.read_bytes() for p in sentinel.parent.iterdir()}
+            fixture = OutboxTests()
+            fixture.setUp()
+            clients = fixture.clients
+            with patch("nset_client.outbox.Transport.request", side_effect=receipt) as send:
+                try:
+                    explicit = fixture.box()
+                    explicit.enqueue("test-run", METRICS)
+                    self.assertEqual(explicit.flush(), 1)
+                    self.assertNotEqual(fixture.destination.spool_path, sentinel)
+                    result = unittest.TestResult()
+                    ClientTests("test_context_preserves_training_error_when_status_update_fails").run(result)
+                    self.assertTrue(result.wasSuccessful(), (result.errors, result.failures))
+                finally:
+                    fixture.doCleanups()
+                self.assertTrue(all(c._closed and c._outbox is None for c in clients))
+                self.assertTrue(all("user-sentinel" not in call.args[1] for call in send.call_args_list))
+            self.assertEqual({p.name: p.read_bytes() for p in sentinel.parent.iterdir()}, before)
 
     def test_offline_commit_reopen_and_credentials_not_stored(self):
         with patch("nset_client.outbox.Transport.request", side_effect=OSError("offline")) as send:
@@ -61,8 +93,8 @@ class OutboxTests(unittest.TestCase):
             self.assertIsInstance(box.last_error, OSError)
             box.close()
             for file in Path(self.temp.name).iterdir():
-                self.assertNotIn(self.client.http.token.encode(), file.read_bytes())
-            self.client.http.token = "rotated-secret"
+                self.assertNotIn(self.destination.http.token.encode(), file.read_bytes())
+            self.destination.http.token = "rotated-secret"
             reopened = self.box()
             self.assertEqual(reopened.pending_count(), 1)
         with patch("nset_client.outbox.Transport.request", side_effect=receipt) as send:
@@ -239,13 +271,13 @@ class OutboxTests(unittest.TestCase):
                     self.box(**{name: value})
                 self.assertFalse(self.path.exists())
         for timeout in (None, 0, -1, True, float("nan"), float("inf"), 301):
-            self.client.http.timeout = timeout
+            self.destination.http.timeout = timeout
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 self.box()
             self.assertFalse(self.path.exists())
-        self.client.http.timeout = .05
+        self.destination.http.timeout = .05
         with self.assertRaises(ValueError):
-            DurableOutbox(self.client, ":memory:")
+            DurableOutbox(self.destination, ":memory:")
 
     def test_destination_and_unknown_schema_rejected_without_payload_loss(self):
         box = self.box()
@@ -254,7 +286,7 @@ class OutboxTests(unittest.TestCase):
         box.close()
         for url in ("http://localhost:8081", "https://localhost:8080", "http://localhost:8080/prefix"):
             with self.subTest(url=url), self.assertRaisesRegex(ValueError, "destination"):
-                DurableOutbox(Client(url, token="another"), self.path)
+                DurableOutbox(self.client(url, token="another"), self.path)
         self.assertEqual(self.rows(), original)
         with contextlib.closing(sqlite3.connect(self.path)) as db, db:
             db.execute("PRAGMA user_version=99")
@@ -375,8 +407,8 @@ class OutboxTests(unittest.TestCase):
         box = self.box(workers=3, retry_interval=.01)
         self.assertEqual(box._http.timeout, .05)
         # The owned transport pins configuration even if the caller changes its Client.
-        self.client.http.url = "http://different-host"
-        self.client.http.timeout = None
+        self.destination.http.url = "http://different-host"
+        self.destination.http.timeout = None
         self.assertEqual(box._http.url, "http://localhost:8080")
         for i in range(15):
             box.enqueue("run", METRICS, batch_id=str(i))
@@ -472,7 +504,7 @@ class OutboxTests(unittest.TestCase):
         for interrupt_at in ("join", "wait"):
             with self.subTest(interrupt_at=interrupt_at):
                 self.path = Path(self.temp.name) / f"{interrupt_at}.sqlite3"
-                box = self.client.durable_outbox(self.path)
+                box = self.destination.durable_outbox(self.path)
                 box.enqueue("run", METRICS, batch_id="pending")
                 originals = self.rows()
                 entered, release = threading.Event(), threading.Event()
@@ -596,14 +628,15 @@ class OutboxTests(unittest.TestCase):
         script = """
 import os, sys
 from nset_client import Client
+assert os.path.realpath(__import__('nset_client').__file__) == os.environ['NSET_TEST_CLIENT_SOURCE']
 box = Client(token='secret').durable_outbox(sys.argv[1])
 box.enqueue('run', [{'key': 'loss', 'step': 0, 'value': 1.25}], batch_id='crash-stable')
 box._http.request = lambda *args, **kwargs: os._exit(0)
 box.flush()
 """
         subprocess.run([sys.executable, "-c", script, str(self.path)],
-                       check=True, timeout=10)
-        box = Client(token="replacement-secret").durable_outbox(self.path)
+                       env=isolated_env(Path(self.client_home.name)), check=True, timeout=10)
+        box = self.client(token="replacement-secret").durable_outbox(self.path)
         self.addCleanup(box.close)
         self.assertEqual(box.pending_count(), 1)
         with patch("nset_client.outbox.Transport.request", side_effect=receipt):

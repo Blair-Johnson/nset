@@ -58,14 +58,13 @@ Set `NSET_TOKEN` to the server's token in that environment, then:
 import os
 from nset_client import Client
 
-client = Client("http://127.0.0.1:8080", token=os.environ["NSET_TOKEN"])
-experiment = client.experiment("My experiment")
-
-with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
-    for step, loss in enumerate([1.2, 0.7, 0.3]):
-        run.log_metrics({"train/loss": loss}, step=step)
+with Client("http://127.0.0.1:8080", token=os.environ["NSET_TOKEN"]) as client:
+    experiment = client.experiment("My experiment")
+    with client.start_run(experiment, "baseline", params={"lr": 0.001}) as run:
+        for step, loss in enumerate([1.2, 0.7, 0.3]):
+            run.log_metrics({"train/loss": loss}, step=step)
 ```
 
-Refresh the experiment list, select your runs, and open Charts to compare them.
+Scalar calls retain data locally and retry delivery automatically; exiting the contexts waits for server acceptance. Refresh the experiment list, select your runs, and open Charts to compare them.
 
 [Logging, supported SDKs, and delivery](docs/logging.md) · [Development](docs/contributing.md)

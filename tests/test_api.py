@@ -37,6 +37,7 @@ class APITests(unittest.TestCase):
         updated = self.client.http.request("PATCH", run.path, {"params": {"seed": 42}})
         self.assertEqual(updated["params"], {"lr": 0.1, "seed": 42})
         run.log_metrics({"loss": 1.0, "accuracy": 0.2}, step=0)
+        self.server.project()
         keys = self.client.http.request("GET", run.path + "/metric-keys")["keys"]
         self.assertEqual(set(keys), {"loss", "accuracy"})
         self.assertEqual(run.finish()["status"], "finished")
@@ -54,9 +55,8 @@ class APITests(unittest.TestCase):
             {"key": "", "step": 1, "value": 2},
         ]
         for bad in invalid:
-            with self.assertRaises(APIError) as caught:
+            with self.assertRaises(ValueError):
                 run.log_batch([{"key": "loss", "step": 0, "value": 1}, bad])
-            self.assertIn(caught.exception.status, (400, 422))
         self.assertEqual(list(self.client.metric_history(run.id, "loss")), [])
         with self.assertRaises(APIError) as caught:
             self.client.http.request("GET", "/api/runs/00000000-0000-0000-0000-000000000000")
