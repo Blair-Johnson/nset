@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
                 .route("/rx/fields", post(crate::rx::fields))
                 .route("/rx/records", post(crate::rx::records))
                 .route("/rx/plot", post(crate::rx::plot))
+                .route("/rx/run-filter", post(crate::rx::run_filter))
                 .layer(DefaultBodyLimit::max(32 * 1024)),
         )
         .route("/runs/{id}/ingest/{batch_id}", get(durable_receipt))

@@ -29,6 +29,7 @@ import { openChartEditor } from "./chart-editor";
 import { experimentTable, runTable, tableState } from "./browser-tables";
 import { renderRunDetail } from "./run-detail";
 import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
+import { RunFilterSession } from "./run-filter-session";
 import { createDashboardControls } from "./workspace-controls";
 import { dashboardSettings, withDashboardSettings } from "./workspace-settings";
 import type { DashboardControls } from "./dashboard-controls";
@@ -55,7 +56,33 @@ let chartSearch = "";
 let activeEditor: { close: () => void } | undefined;
 const experimentState = tableState();
 const drawerStates = new Map<string, ReturnType<typeof runDrawerState>>();
+const runFilterSessions = new Map<string, RunFilterSession>();
+let cleanupRunTable: (() => void) | undefined;
 let runDrawer: RunDrawer | undefined;
+function filterSessionFor(experimentId: string) {
+  let session = runFilterSessions.get(experimentId);
+  if (!session) {
+    session = new RunFilterSession(undefined, api);
+    runFilterSessions.set(experimentId, session);
+  }
+  session.setRuns(
+    catalog.runs.filter((run) => run.experiment_id === experimentId),
+    catalog,
+  );
+  return session;
+}
+function refreshRunFilterSessions() {
+  for (const experimentId of runFilterSessions.keys())
+    filterSessionFor(experimentId);
+}
+function disposeRunTable() {
+  cleanupRunTable?.();
+  cleanupRunTable = undefined;
+}
+function disposeRunFilterSessions() {
+  for (const session of runFilterSessions.values()) session.destroy();
+  runFilterSessions.clear();
+}
 const runStates = new Map<string, ReturnType<typeof tableState>>();
 const undo = new Map<string, Workspace[]>();
 const cards = new Map<
@@ -310,6 +337,7 @@ function renderPage() {
   detailRequest?.abort();
   detailRequest = undefined;
   if (!connected) return;
+  disposeRunTable();
   activeEditor?.close();
   activeEditor = undefined;
   if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
@@ -357,9 +385,14 @@ function renderPage() {
                 navigate(experiment.id, "charts");
             },
             onTags: async (patch) => {
+              const generation = catalogGeneration;
               const updated = await api.patchRun(run.id, { tags: patch });
-              const index = catalog.runs.findIndex((r) => r.id === run.id);
-              if (index >= 0) catalog.runs[index] = updated;
+              if (generation !== catalogGeneration || !connected) return updated;
+              catalog = {
+                ...catalog,
+                runs: catalog.runs.map((r) => (r.id === run.id ? updated : r)),
+              };
+              refreshRunFilterSessions();
               return updated;
             },
           })
@@ -386,7 +419,9 @@ function renderPage() {
         () => navigate(experiment.id, "charts"),
         openRun,
         state,
+        filterSessionFor(experiment.id),
       );
+      cleanupRunTable = () => table.destroy();
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
@@ -401,6 +436,7 @@ function renderPage() {
               const next = await appendRxCatalog(api, structuredClone(catalog), undefined, catalog.rx!.nextAfter!);
               if (generation !== catalogGeneration || !connected) return;
               catalog = next;
+              refreshRunFilterSessions();
               renderPage();
             } catch (e) { error(`Could not load rx runs: ${message(e)}`); more.disabled = false; }
           });
@@ -440,6 +476,7 @@ function renderPage() {
           (ids) => updateSelection(workspace, ids),
           () => navigate(experiment.id),
           openRun,
+          filterSessionFor(experiment.id),
         );
         layout.append(runDrawer.backdrop, runDrawer.pane, grid);
         $("page").append(tools, layout);
@@ -1357,6 +1394,7 @@ async function connect(refresh = false) {
     if (generation !== catalogGeneration || signal.aborted) return;
     store.clear();
     catalog = next;
+    refreshRunFilterSessions();
     connected = true;
     sessionStorage.setItem("nset.token", token);
     $("connection").textContent = "Connected";
@@ -1400,7 +1438,11 @@ $("logout").onclick = () => {
   request?.abort();
   activeEditor?.close();
   activeEditor = undefined;
+  disposeRunTable();
   disposeCards();
+  disposeRunFilterSessions();
+  drawerStates.clear();
+  runStates.clear();
   store.clear();
   token = "";
   connected = false;
@@ -1454,7 +1496,9 @@ window.addEventListener("beforeunload", () => {
   detailRequest?.abort();
   detailRequest = undefined;
   request?.abort();
+  disposeRunTable();
   disposeCards();
+  disposeRunFilterSessions();
   store.clear();
 });
 try {

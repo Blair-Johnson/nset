@@ -135,7 +135,9 @@ for (const width of [1440, 390])
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBeLessThanOrEqual(width);
     await search.press("Escape");
-    await expect(page.locator(".menu > summary")).toBeFocused();
+    await expect(
+      page.locator(".menu > summary").filter({ hasText: /^Columns$/ }),
+    ).toBeFocused();
     await expect(
       page.getByRole("button", {
         name: "validation/loss · latest",

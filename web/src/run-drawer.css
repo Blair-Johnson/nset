@@ -163,6 +163,26 @@
 .run-filter-slot {
   display: contents;
 }
+.run-filter-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.run-filter-progress {
+  max-width: 180px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.run-filter-progress:empty {
+  display: none;
+}
+.run-filter-scope {
+  flex: 0 0 auto;
+  width: auto !important;
+  max-width: 80px;
+}
 .run-filter-menu {
   flex: none;
 }

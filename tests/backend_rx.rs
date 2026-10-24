@@ -87,7 +87,12 @@ impl Fixture {
 #[tokio::test]
 async fn rx_routes_require_auth_validate_bounds_and_leave_native_catalog_available() {
     let f = Fixture::new();
-    for path in ["/api/rx/fields", "/api/rx/plot", "/api/rx/records"] {
+    for path in [
+        "/api/rx/fields",
+        "/api/rx/plot",
+        "/api/rx/records",
+        "/api/rx/run-filter",
+    ] {
         assert_eq!(
             f.request("POST", path, f.query(), false).await.0,
             StatusCode::UNAUTHORIZED
@@ -749,4 +754,385 @@ async fn field_search_exact_identity_preserves_case_unicode_and_literal_paths() 
         field_paths(&result),
         vec!["$[\"\u{65e5}\u{672c}\"]", "$[\"\u{65e5}\u{672c}\u{8a9e}\"]"]
     );
+}
+
+fn run_filter_query(f: &Fixture, conditions: Value) -> Value {
+    json!({"source_id":f.source_id,"runs":["u859"],"conditions":conditions})
+}
+
+#[tokio::test]
+async fn run_filter_matches_independent_events_and_exact_typed_paths_readonly() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(859,6,'now',?)",
+        [json!({
+            "config":{"model":"wide","lr":0.01}, "metrics.loss":7,
+            "nil":null,"disabled":false,"zero":0,"text":"007","label":"Hello World",
+            "large":9007199254740993_u64
+        })
+        .to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(859,7,'now',?)",
+        [json!({"metrics":{"loss":0.2}}).to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let before = std::fs::read(&f.path).unwrap();
+    let q = run_filter_query(
+        &f,
+        json!([
+            {"path":"config.model","op":"eq","value":"wide"},
+            {"path":"metrics.loss","op":"lt","value":0.3},
+            {"path":"$[\"metrics.loss\"]","op":"eq","value":7},
+            {"path":"metrics.loss","op":"eq","value":7},
+            {"path":"nil","op":"exists"},
+            {"path":"disabled","op":"exists"},
+            {"path":"zero","op":"exists"},
+            {"path":"nil","op":"eq","value":null},
+            {"path":"text","op":"eq","value":7},
+            {"path":"disabled","op":"eq","value":0},
+            {"path":"text","op":"eq","value":"007"},
+            {"path":"label","op":"contains","value":"World"},
+            {"path":"label","op":"contains","value":"world"},
+            {"path":"zero","op":"contains","value":"0"},
+            {"path":"large","op":"eq","value":9007199254740992_u64},
+            {"path":"large","op":"gt","value":9007199254740992_u64}
+        ]),
+    );
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        result["runs"],
+        json!([{"uid":"u859","conditions":[true,true,true,false,true,true,true,true,false,false,true,true,false,false,false,true]}])
+    );
+    assert_eq!(result["cursor"], Value::Null);
+    assert_eq!(result["diagnostics"]["partial"], false);
+    assert_eq!(result["diagnostics"]["scanned"], 3);
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+}
+
+#[tokio::test]
+async fn run_filter_negative_clauses_require_presence_or_complete_absence() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("INSERT INTO events VALUES(859,6,'now','{\"loss\":0.4,\"nil\":null,\"off\":false,\"zero\":0}'); INSERT INTO runs VALUES(860,'empty','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]');").unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"ne","value":0.5},
+            {"path":"absent","op":"ne","value":1},
+            {"path":"absent","op":"missing"},
+            {"path":"nil","op":"missing"},
+            {"path":"off","op":"missing"},
+            {"path":"zero","op":"missing"},
+            {"path":"loss","op":"gte","value":0.5},
+            {"path":"loss","op":"lte","value":0.4},
+            {"path":"nil","op":"ne","value":null}
+        ]),
+    );
+    q["runs"] = json!(["u859", "empty"]);
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        result["runs"][0]["conditions"],
+        json!([true, false, true, false, false, false, true, true, false])
+    );
+    assert_eq!(
+        result["runs"][1]["conditions"],
+        json!([false, false, true, true, true, true, false, false, false])
+    );
+}
+
+#[tokio::test]
+async fn run_filter_unreadable_events_leave_unknown_and_continue_to_next_candidate() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("INSERT INTO events VALUES(859,6,'now','{invalid'); INSERT INTO events VALUES(859,7,'now',NULL); INSERT INTO runs VALUES(860,'later','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]'); INSERT INTO events VALUES(860,1,'now','{\"loss\":0.5}');").unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(859,8,'now',?)",
+        [format!("{{\"padding\":\"{}\"}}", "x".repeat(300_000))],
+    )
+    .unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"eq","value":0.5},
+            {"path":"absent","op":"eq","value":1},
+            {"path":"absent","op":"missing"},
+            {"path":"loss","op":"missing"}
+        ]),
+    );
+    q["runs"] = json!(["u859", "later"]);
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        result["runs"][0]["conditions"],
+        json!([true, null, null, false])
+    );
+    assert_eq!(
+        result["runs"][1]["conditions"],
+        json!([true, false, true, false])
+    );
+    assert_eq!(result["cursor"], Value::Null);
+    assert_eq!(result["diagnostics"]["partial"], true);
+    assert_eq!(result["diagnostics"]["invalid_json"], 2);
+    assert_eq!(result["diagnostics"]["oversized"], 1);
+}
+
+#[tokio::test]
+async fn run_filter_cursor_retains_proofs_pins_high_water_and_rejects_scope_tampering() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(6) UNION ALL SELECT x+1 FROM n WHERE x<20006) INSERT INTO events SELECT 859,x,'now','{\"kind\":\"config\"}' FROM n; INSERT INTO runs VALUES(860,'later','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]'); INSERT INTO events VALUES(860,1,'now','{\"loss\":0.5}');").unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"eq","value":0.5},
+            {"path":"absent","op":"missing"},
+            {"path":"absent","op":"exists"},
+            {"path":"loss","op":"missing"}
+        ]),
+    );
+    q["runs"] = json!(["u859", "later"]);
+    let (status, first) = f
+        .request("POST", "/api/rx/run-filter", q.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(
+        first["runs"][0]["conditions"],
+        json!([true, null, null, null])
+    );
+    assert_eq!(
+        first["runs"][1]["conditions"],
+        json!([null, null, null, null])
+    );
+    assert!(first["cursor"].is_string(), "{first}");
+    assert_eq!(first["diagnostics"]["partial"], true);
+    q["cursor"] = first["cursor"].clone();
+    let mut changed = q.clone();
+    changed["conditions"][0]["value"] = json!(9);
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", changed, true)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut changed = q.clone();
+    changed["runs"] = json!(["later", "u859"]);
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", changed, true)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut changed = q.clone();
+    changed["cursor"] = json!(format!("{}x", first["cursor"].as_str().unwrap()));
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", changed, true)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // New events are outside this cursor's fixed high-water scope.
+    db.execute_batch("INSERT INTO events VALUES(859,20007,'now','{\"absent\":1}');")
+        .unwrap();
+    let mut final_page = Value::Null;
+    for _ in 0..10 {
+        let (status, page) = f
+            .request("POST", "/api/rx/run-filter", q.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["runs"][0]["conditions"][0], true);
+        if page["cursor"].is_null() {
+            final_page = page;
+            break;
+        }
+        q["cursor"] = page["cursor"].clone();
+    }
+    assert_eq!(
+        final_page["runs"][0]["conditions"],
+        json!([true, true, false, false])
+    );
+    assert_eq!(
+        final_page["runs"][1]["conditions"],
+        json!([true, true, false, false])
+    );
+    assert_eq!(final_page["diagnostics"]["partial"], false);
+    // A truncated high water is stale, even if the source path is unchanged.
+    db.execute_batch("DELETE FROM events WHERE run_id=859 AND seq>=6;")
+        .unwrap();
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn run_filter_validates_bounds_and_preserves_large_exact_identities() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    let uid = "9".repeat(128);
+    db.execute(
+        "INSERT INTO runs VALUES(9007199254740993,?,'succeeded',NULL,NULL,'now',NULL,NULL,0,'[]')",
+        [&uid],
+    )
+    .unwrap();
+    db.execute_batch(
+        "INSERT INTO events VALUES(9007199254740993,9007199254740993,'now','{\"ok\":true}');",
+    )
+    .unwrap();
+    let base = run_filter_query(&f, json!([{"path":"ok","op":"exists"}]));
+    let mut q = base.clone();
+    q["runs"] = json!([uid]);
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["runs"], json!([{"uid":uid,"conditions":[true]}]));
+    for runs in [
+        json!([]),
+        json!(["u859", "u859"]),
+        json!(["x".repeat(129)]),
+        json!([859]),
+        json!(vec!["u859"; 33]),
+        json!(["not-a-run"]),
+    ] {
+        let mut q = base.clone();
+        q["runs"] = runs;
+        assert!(
+            f.request("POST", "/api/rx/run-filter", q, true)
+                .await
+                .0
+                .is_client_error()
+        );
+    }
+    for condition in [
+        json!({"path":"ok","op":"wat"}),
+        json!({"path":"ok","op":"contains","value":5}),
+        json!({"path":"ok","op":"lt","value":"1"}),
+        json!({"path":"ok","op":"eq","value":{}}),
+        json!({"path":"ok..bad","op":"exists"}),
+    ] {
+        let mut q = base.clone();
+        q["conditions"] = json!([condition]);
+        assert_eq!(
+            f.request("POST", "/api/rx/run-filter", q, true).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut q = base.clone();
+    q["conditions"] = json!(vec![json!({"path":"ok","op":"exists"}); 17]);
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut q = base.clone();
+    q["source_id"] = json!("wrong");
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut q = base.clone();
+    q["unexpected"] = json!(true);
+    assert!(
+        f.request("POST", "/api/rx/run-filter", q, true)
+            .await
+            .0
+            .is_client_error()
+    );
+    let mut q = base;
+    q["conditions"][0]["path"] = json!("x".repeat(40_000));
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
+#[tokio::test]
+async fn run_filter_byte_pages_retain_unreadable_state_and_reject_replaced_source() {
+    let f = Fixture::new();
+    let mut db = Connection::open(&f.path).unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute_batch("INSERT INTO events VALUES(859,6,'now','bad json');")
+        .unwrap();
+    let data = json!({"padding":"x".repeat(200_000)}).to_string();
+    for seq in 7..60 {
+        tx.execute(
+            "INSERT INTO events VALUES(859,?,'now',?)",
+            rusqlite::params![seq, data],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"eq","value":0.5},
+            {"path":"absent","op":"missing"},
+            {"path":"absent","op":"exists"}
+        ]),
+    );
+    let (status, first) = f
+        .request("POST", "/api/rx/run-filter", q.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["cursor"].is_string(), "{first}");
+    assert!(first["diagnostics"]["bytes"].as_u64().unwrap() <= 8 * 1024 * 1024);
+    q["cursor"] = first["cursor"].clone();
+    let mut final_page = Value::Null;
+    for _ in 0..10 {
+        let (status, page) = f
+            .request("POST", "/api/rx/run-filter", q.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if page["cursor"].is_null() {
+            final_page = page;
+            break;
+        }
+        q["cursor"] = page["cursor"].clone();
+    }
+    assert_eq!(
+        final_page["runs"][0]["conditions"],
+        json!([true, null, null])
+    );
+    assert_eq!(final_page["diagnostics"]["partial"], true);
+    drop(db);
+    // Identical content at a different file identity must not reuse proofs.
+    let replacement = f.path.with_extension("replacement");
+    std::fs::copy(&f.path, &replacement).unwrap();
+    std::fs::rename(replacement, &f.path).unwrap();
+    assert_eq!(
+        f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn run_filter_batches_are_not_a_permanent_catalog_cap() {
+    let f = Fixture::new();
+    let mut db = Connection::open(&f.path).unwrap();
+    let tx = db.transaction().unwrap();
+    for id in 1..=40 {
+        tx.execute(
+            "INSERT INTO runs VALUES(?,?,'succeeded',NULL,NULL,'now',NULL,NULL,0,'[]')",
+            rusqlite::params![id, format!("candidate-{id}")],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO events VALUES(?,1,'now','{\"ok\":true}')", [id])
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    for (start, end) in [(1, 32), (33, 40)] {
+        let mut q = run_filter_query(&f, json!([{"path":"ok","op":"exists"}]));
+        let uids: Vec<_> = (start..=end).map(|id| format!("candidate-{id}")).collect();
+        q["runs"] = json!(uids);
+        let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["runs"].as_array().unwrap().len(), uids.len());
+        for (run, uid) in result["runs"].as_array().unwrap().iter().zip(&uids) {
+            assert_eq!(run["uid"], *uid);
+            assert_eq!(run["conditions"], json!([true]));
+        }
+    }
 }

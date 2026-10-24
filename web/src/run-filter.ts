@@ -7,12 +7,20 @@ import { scalarParameters, displayPath } from "./run-table-fields";
  * literal dots in keys never become nested lookups.
  */
 export type FilterOp =
-  "eq" | "neq" | "lt" | "lte" | "gt" | "gte" | "contains" | "exists";
+  | "eq"
+  | "neq"
+  | "lt"
+  | "lte"
+  | "gt"
+  | "gte"
+  | "contains"
+  | "exists"
+  | "missing";
 /** What to do with a run that does not have the condition's path. */
 export type MissingPolicy = "exclude" | "include" | "default";
 export interface FilterCondition {
   /** "params" (run config) or "tags". */
-  scope: "params" | "tags";
+  scope: "params" | "tags" | "event";
   /** Exact JSONPath identity, e.g. `$["train"]["optim"]["lr"]`. */
   path: string;
   op: FilterOp;
@@ -40,6 +48,7 @@ export const OPS: { op: FilterOp; label: string }[] = [
   { op: "gte", label: "≥" },
   { op: "contains", label: "contains" },
   { op: "exists", label: "exists" },
+  { op: "missing", label: "not exists" },
 ];
 
 export function parseFilterValue(text: string): unknown {
@@ -53,13 +62,14 @@ export function parseFilterValue(text: string): unknown {
 }
 
 export interface FilterField {
-  scope: "params" | "tags";
+  scope: "params" | "tags" | "event";
   path: string;
   label: string;
   /** Number of runs that have this path. */
   count: number;
   /** A few example values (as JSON text) for the value picker. */
   examples: string[];
+  types?: string[];
 }
 
 /** Every scalar leaf path present in any of the runs, with coverage counts. */
@@ -131,6 +141,8 @@ function compare(actual: unknown, op: FilterOp, expected: unknown): boolean {
   switch (op) {
     case "exists":
       return true;
+    case "missing":
+      return false;
     case "eq":
       return JSON.stringify(actual) === JSON.stringify(expected);
     case "neq":
@@ -181,7 +193,9 @@ function compare(actual: unknown, op: FilterOp, expected: unknown): boolean {
 }
 
 export function conditionMatches(run: Run, c: FilterCondition): boolean {
+  if (c.scope === "event") return c.op === "missing" && !run.rx;
   let actual = readPath(run[c.scope] ?? {}, c.path);
+  if (c.op === "missing") return actual === undefined;
   if (actual === undefined) {
     if (c.op === "exists") return c.missing === "include";
     if (c.missing === "include") return true;
@@ -196,16 +210,35 @@ export function activeConditions(filter: RunFilter | undefined) {
   return (filter?.conditions ?? []).filter((c) => c.path);
 }
 
-export function runMatchesFilter(run: Run, filter: RunFilter | undefined) {
+/** Event evidence is three-valued; unrelated native clauses can still prove AND/OR. */
+export function runFilterResult(
+  run: Run,
+  filter: RunFilter | undefined,
+  event: (condition: FilterCondition) => boolean | null = () => null,
+): boolean | null {
   const conditions = activeConditions(filter);
   if (!conditions.length) return true;
-  return filter!.combine === "any"
-    ? conditions.some((c) => conditionMatches(run, c))
-    : conditions.every((c) => conditionMatches(run, c));
+  const results = conditions.map((c) =>
+    c.scope === "event"
+      ? run.rx
+        ? event(c)
+        : c.op === "missing"
+      : conditionMatches(run, c),
+  );
+  if (filter!.combine === "any")
+    return results.includes(true)
+      ? true
+      : results.includes(null)
+        ? null
+        : false;
+  return results.includes(false) ? false : results.includes(null) ? null : true;
+}
+export function runMatchesFilter(run: Run, filter: RunFilter | undefined) {
+  return runFilterResult(run, filter) === true;
 }
 
 export function describeCondition(c: FilterCondition, label?: string) {
-  const name = label ?? c.path;
+  const name = `${c.scope === "event" ? "Event: " : ""}${label ?? c.path}`;
   const op = OPS.find((o) => o.op === c.op)?.label ?? c.op;
   const missing =
     c.missing === "include"
@@ -213,8 +246,8 @@ export function describeCondition(c: FilterCondition, label?: string) {
       : c.missing === "default"
         ? ` (missing = ${c.fallback ?? ""})`
         : "";
-  return c.op === "exists"
-    ? `${name} exists${missing}`
+  return c.op === "exists" || c.op === "missing"
+    ? `${name} ${op}${missing}`
     : `${name} ${op} ${c.value}${missing}`;
 }
 

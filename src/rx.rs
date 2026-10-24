@@ -41,6 +41,7 @@ pub struct Source {
     pub id: String,
     pub name: String,
     slots: Arc<Semaphore>,
+    run_filter_key: [u8; 32],
 }
 impl Source {
     pub fn resolve(repo: &Path) -> Result<Self> {
@@ -90,6 +91,12 @@ impl Source {
                 .to_string_lossy()
                 .into_owned(),
             slots: Arc::new(Semaphore::new(2)),
+            run_filter_key: {
+                let mut key = [0; 32];
+                key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                key
+            },
         })
     }
     fn connection(&self) -> Result<Connection> {
@@ -1116,6 +1123,7 @@ mod tests {
             id: "rx:test".into(),
             name: "fixture".into(),
             slots: Arc::new(Semaphore::new(2)),
+            run_filter_key: [7; 32],
         };
         Fixture {
             _dir: dir,
@@ -1630,5 +1638,320 @@ mod tests {
             eprintln!("permission denial assertion skipped for privileged user");
         }
         assert_eq!(before, std::fs::read(&f.source.path).unwrap());
+    }
+}
+
+// RUN clauses are independent existential queries, not a conjunction on one event.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunFilterRequest {
+    source_id: String,
+    runs: Vec<String>,
+    conditions: Vec<Condition>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunProof {
+    // A witnessed match (or witnessed presence for `missing`). Never undone.
+    found: Vec<bool>,
+    after: Option<i64>,
+    complete: bool,
+    tainted: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunFilterCursor {
+    scope: String,
+    generation: String,
+    ids: Vec<i64>,
+    high: Vec<Option<i64>>,
+    run: usize,
+    proofs: Vec<RunProof>,
+}
+
+pub async fn run_filter(
+    State(state): State<AppState>,
+    Json(q): Json<RunFilterRequest>,
+) -> Result<Json<Value>> {
+    let source = state
+        .rx
+        .ok_or_else(|| ApiError::bad("no rx repository is configured"))?;
+    source.execute(move |s| s.filter_runs(q)).await.map(Json)
+}
+
+impl Source {
+    // HMAC-SHA256 over the cursor bytes. A process-local source key means restart
+    // invalidates cursors; clients cannot manufacture proof state or high waters.
+    fn run_filter_mac(&self, payload: &[u8]) -> Vec<u8> {
+        let mut inner_pad = [0x36; 64];
+        let mut outer_pad = [0x5c; 64];
+        for (i, b) in self.run_filter_key.iter().enumerate() {
+            inner_pad[i] ^= b;
+            outer_pad[i] ^= b;
+        }
+        let mut inner = Sha256::new();
+        inner.update(inner_pad);
+        inner.update(payload);
+        let mut outer = Sha256::new();
+        outer.update(outer_pad);
+        outer.update(inner.finalize());
+        outer.finalize().to_vec()
+    }
+
+    fn filter_runs(&self, q: RunFilterRequest) -> Result<Value> {
+        if q.source_id != self.id {
+            return Err(ApiError::bad(
+                "saved rx source is unavailable; configure the same repository",
+            ));
+        }
+        if q.runs.is_empty()
+            || q.runs.len() > 32
+            || q.runs.iter().any(|s| s.is_empty() || s.len() > 128)
+            || q.runs.iter().collect::<BTreeSet<_>>().len() != q.runs.len()
+        {
+            return Err(ApiError::bad("select 1-32 distinct rx run identities"));
+        }
+        if q.conditions.len() > 16 {
+            return Err(ApiError::bad("at most 16 run conditions are allowed"));
+        }
+        let paths = q.conditions.iter().map(|c| {
+            if !["eq", "ne", "lt", "lte", "gt", "gte", "contains", "exists", "missing"].contains(&c.op.as_str())
+                || c.value.is_array() || c.value.is_object() || c.value.to_string().len() > 1024
+                || (c.op == "contains" && !c.value.is_string())
+                || (["lt", "lte", "gt", "gte"].contains(&c.op.as_str()) && !c.value.is_number())
+            {
+                return Err(ApiError::bad("invalid run condition (use a typed JSON scalar; contains requires a string and ordering requires a number)"));
+            }
+            FieldPath::parse(&c.path)
+        }).collect::<Result<Vec<_>>>()?;
+        let scope = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&json!(["run-filter-v1", q.source_id, q.runs, q.conditions]))
+                    .unwrap()
+            )
+        );
+        let generation = self.generation()?;
+        let conn = self.connection()?;
+        if self.generation()? != generation {
+            return Err(ApiError::bad(
+                "rx database replaced during open; retry the query",
+            ));
+        }
+        let mut ids = Vec::new();
+        let mut high = Vec::new();
+        for uid in &q.runs {
+            let id: i64 = conn
+                .query_row("SELECT id FROM runs WHERE run_uid=?", [uid], |r| r.get(0))
+                .map_err(|_| ApiError::bad("an rx run is unavailable"))?;
+            let last: Option<i64> = conn
+                .query_row("SELECT max(seq) FROM events WHERE run_id=?", [id], |r| {
+                    r.get(0)
+                })
+                .map_err(unavailable)?;
+            ids.push(id);
+            high.push(last);
+        }
+        let stale = || ApiError::bad("invalid/stale run filter cursor; restart filtering");
+        let mut cursor = if let Some(encoded) = &q.cursor {
+            if encoded.len() > 16 * 1024 {
+                return Err(stale());
+            }
+            let (payload, signature) = encoded.split_once('.').ok_or_else(stale)?;
+            let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| stale())?;
+            let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| stale())?;
+            use subtle::ConstantTimeEq;
+            if !bool::from(self.run_filter_mac(&payload).ct_eq(&signature)) {
+                return Err(stale());
+            }
+            serde_json::from_slice::<RunFilterCursor>(&payload).map_err(|_| stale())?
+        } else {
+            RunFilterCursor {
+                scope: scope.clone(),
+                generation: generation.clone(),
+                ids: ids.clone(),
+                high: high.clone(),
+                run: 0,
+                proofs: high
+                    .iter()
+                    .map(|h| RunProof {
+                        found: vec![false; paths.len()],
+                        after: None,
+                        complete: h.is_none(),
+                        tainted: false,
+                    })
+                    .collect(),
+            }
+        };
+        if cursor.scope != scope
+            || cursor.generation != generation
+            || cursor.ids != ids
+            || cursor.run >= ids.len()
+            || cursor.high.len() != ids.len()
+            || cursor.proofs.len() != ids.len()
+            || cursor.high.iter().zip(&high).any(|(old, now)| old > now)
+            || cursor
+                .proofs
+                .iter()
+                .zip(&cursor.high)
+                .any(|(p, h)| p.found.len() != paths.len() || p.after > *h)
+        {
+            return Err(stale());
+        }
+
+        let mut d = Diagnostics::default();
+        let started = Instant::now();
+        // The producer's UNIQUE(run_id, seq) index serves both high waters and
+        // keyset pages. Separate initial/resume predicates also cover signed seq.
+        while cursor.run < ids.len() {
+            let index = cursor.run;
+            let proof = &mut cursor.proofs[index];
+            if proof.complete || paths.is_empty() {
+                proof.complete = true;
+                cursor.run += 1;
+                continue;
+            }
+            let sql = if proof.after.is_some() {
+                "SELECT seq,octet_length(data),CASE WHEN octet_length(data)<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?"
+            } else {
+                "SELECT seq,octet_length(data),CASE WHEN octet_length(data)<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>=? AND seq<=? ORDER BY seq LIMIT ?"
+            };
+            let mut stmt = conn.prepare(sql).map_err(unavailable)?;
+            let mut rows = stmt
+                .query(params![
+                    MAX_RECORD as i64,
+                    ids[index],
+                    proof.after.unwrap_or(i64::MIN),
+                    cursor.high[index],
+                    MAX_SCAN as i64 + 1
+                ])
+                .map_err(unavailable)?;
+            let mut stopped = false;
+            while let Some(row) = rows.next().map_err(unavailable)? {
+                if d.scanned >= MAX_SCAN
+                    || d.bytes >= MAX_BYTES
+                    || started.elapsed() > Duration::from_millis(500)
+                {
+                    d.limit("scan budget reached");
+                    stopped = true;
+                    break;
+                }
+                let seq: i64 = row.get(0).map_err(unavailable)?;
+                let bytes = row
+                    .get::<_, Option<i64>>(1)
+                    .map_err(unavailable)?
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                if bytes <= MAX_RECORD && d.bytes + bytes > MAX_BYTES {
+                    d.limit("byte budget reached");
+                    stopped = true;
+                    break;
+                }
+                proof.after = Some(seq);
+                d.scanned += 1;
+                if bytes > MAX_RECORD {
+                    proof.tainted = true;
+                    d.oversized += 1;
+                    d.limit("oversized records skipped");
+                    continue;
+                }
+                d.bytes += bytes;
+                // SQLite permits malformed producer rows; a blob/NULL is not
+                // evidence of absence, just like invalid JSON or oversized text.
+                let value = row
+                    .get::<_, String>(2)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+                let Some(value) = value else {
+                    proof.tainted = true;
+                    d.invalid_json += 1;
+                    d.limit("invalid JSON records skipped");
+                    continue;
+                };
+                for ((path, c), found) in paths.iter().zip(&q.conditions).zip(&mut proof.found) {
+                    if *found {
+                        continue;
+                    }
+                    let v = path.get(&value);
+                    *found = match c.op.as_str() {
+                        "exists" | "missing" => v.is_some(),
+                        "eq" => v.is_some_and(|v| scalar_equal(v, &c.value)),
+                        "ne" => v.is_some_and(|v| !scalar_equal(v, &c.value)),
+                        "contains" => v
+                            .and_then(Value::as_str)
+                            .is_some_and(|v| v.contains(c.value.as_str().unwrap())),
+                        op => {
+                            v.and_then(|v| numeric_cmp(v, &c.value))
+                                .is_some_and(|order| match op {
+                                    "lt" => order.is_lt(),
+                                    "lte" => !order.is_gt(),
+                                    "gt" => order.is_gt(),
+                                    "gte" => !order.is_lt(),
+                                    _ => false,
+                                })
+                        }
+                    };
+                }
+            }
+            if stopped {
+                break;
+            }
+            proof.complete = true;
+            cursor.run += 1;
+        }
+        let runs = q
+            .runs
+            .iter()
+            .zip(&cursor.proofs)
+            .map(|(uid, proof)| {
+                let conditions: Vec<Option<bool>> = q
+                    .conditions
+                    .iter()
+                    .zip(&proof.found)
+                    .map(|(c, found)| {
+                        if c.op == "missing" {
+                            if !proof.complete {
+                                None
+                            } else if *found {
+                                Some(false)
+                            } else if !proof.tainted {
+                                Some(true)
+                            } else {
+                                None
+                            }
+                        } else if *found {
+                            Some(true)
+                        } else if proof.complete && !proof.tainted {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if conditions.iter().any(Option::is_none) {
+                    d.limit("unproved run conditions");
+                }
+                json!({"uid":uid,"conditions":conditions})
+            })
+            .collect::<Vec<_>>();
+        if cursor.proofs.iter().any(|p| p.tainted) {
+            d.limit("scan contains unreadable records");
+        }
+        let next = if cursor.run < ids.len() {
+            d.limit("scan incomplete");
+            let payload = serde_json::to_vec(&cursor).unwrap();
+            Some(format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(&payload),
+                URL_SAFE_NO_PAD.encode(self.run_filter_mac(&payload))
+            ))
+        } else {
+            None
+        };
+        Ok(json!({"runs":runs,"cursor":next,"diagnostics":d}))
     }
 }

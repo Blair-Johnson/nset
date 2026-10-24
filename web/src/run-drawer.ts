@@ -3,13 +3,8 @@ import type { Catalog } from "./workspace-types";
 import type { Run } from "./api";
 import { element } from "./utils";
 import { runColorButton } from "./run-color-picker";
-import { RunFilterMenu } from "./run-filter-menu";
-import {
-  activeConditions,
-  emptyFilter,
-  runMatchesFilter,
-  type RunFilter,
-} from "./run-filter";
+import { RunFilterControl, RunFilterSession } from "./run-filter-session";
+import { activeConditions, emptyFilter, type RunFilter } from "./run-filter";
 
 export interface RunDrawerState {
   open: boolean;
@@ -79,12 +74,13 @@ export class RunDrawer {
   private readonly clearFilters = this.button("Clear filters", () => {
     this.state.query = this.search.value = "";
     this.state.status = this.status.value = "all";
-    this.state.filter = emptyFilter();
-    this.filterMenu = this.makeFilterMenu();
+    this.session.setFilter(emptyFilter());
     this.filter();
     this.search.focus({ preventScroll: true });
   });
-  private filterMenu?: RunFilterMenu;
+  private readonly session: RunFilterSession;
+  private readonly ownsSession: boolean;
+  private readonly filterControl: RunFilterControl;
   private readonly filterSlot = element("span", "run-filter-slot");
   private readonly empty = element("p", "drawer-empty muted");
   private readonly matching = element("span", "muted");
@@ -117,7 +113,16 @@ export class RunDrawer {
     private readonly onSelection: (ids: string[]) => void,
     onTable: () => void,
     private readonly onDetails: (run: Run) => void,
+    session?: RunFilterSession,
   ) {
+    this.ownsSession = !session;
+    this.session = session ?? new RunFilterSession(state.filter);
+    this.filterControl = new RunFilterControl(this.session, () => {
+      this.state.filter = this.session.filter;
+      this.filter();
+    });
+    this.state.filter = this.session.filter;
+    this.filterSlot.append(this.filterControl.root);
     this.root.id = `runs-${crypto.randomUUID()}`;
     this.root.setAttribute("aria-label", "Chart runs");
     this.toggle.type = "button";
@@ -189,9 +194,8 @@ export class RunDrawer {
     const searchTools = element("div", "run-drawer-search");
     this.clearFilters.className = "drawer-clear-filters";
     this.clearFilters.title =
-      "Clear text and status filters; keep Selected mode";
+      "Clear text, status and structured filters; keep Selected mode";
     searchTools.append(this.search, this.filterSlot, this.status);
-    this.filterMenu = this.makeFilterMenu();
     this.list.append(this.empty);
     this.root.addEventListener("focusin", (event) => {
       this.previousFocus = event.target as HTMLElement;
@@ -223,7 +227,14 @@ export class RunDrawer {
     actions.append(
       this.button("Select matching", () =>
         this.onSelection([
-          ...new Set([...this.selected, ...this.matches().map((r) => r.id)]),
+          ...new Set([
+            ...this.selected,
+            ...this.matches()
+              .filter(
+                (run) => !this.state.selectedOnly || this.selected.has(run.id),
+              )
+              .map((run) => run.id),
+          ]),
         ]),
       ),
       this.button("Clear selection", () => this.onSelection([])),
@@ -268,22 +279,6 @@ export class RunDrawer {
     window.addEventListener("keydown", this.onCancel);
     this.setOpen(state.open, false, false);
   }
-  private makeFilterMenu() {
-    const menu = new RunFilterMenu(
-      this.state.filter ?? emptyFilter(),
-      (filter) => {
-        this.state.filter = filter;
-        this.filter();
-      },
-      (filter) =>
-        [...this.rows.values()].filter((row) =>
-          runMatchesFilter(row.run, filter),
-        ).length,
-    );
-    menu.setRuns([...this.rows.values()].map((row) => row.run));
-    this.filterSlot.replaceChildren(menu.root);
-    return menu;
-  }
   private button(label: string, action: () => void) {
     const button = element("button", "", label);
     button.type = "button";
@@ -298,7 +293,7 @@ export class RunDrawer {
       .filter(
         (run) =>
           (this.state.status === "all" || run.status === this.state.status) &&
-          runMatchesFilter(run, this.state.filter) &&
+          this.session.matches(run) &&
           (!query ||
             `${run.name} ${JSON.stringify(run.params)} ${JSON.stringify(run.tags)}`
               .toLowerCase()
@@ -330,7 +325,7 @@ export class RunDrawer {
     this.clearFilters.hidden =
       !this.state.query &&
       this.state.status === "all" &&
-      !activeConditions(this.state.filter).length;
+      !activeConditions(this.session.filter).length;
     this.matching.textContent = this.state.selectedOnly
       ? `${visible} of ${this.selected.size} selected shown`
       : `${matches.size} matching`;
@@ -339,7 +334,9 @@ export class RunDrawer {
       ? this.selected.size
         ? "No selected runs match these filters. Clear filters or turn off Selected."
         : "No runs selected. Turn off Selected to browse runs."
-      : "No runs match these filters. Clear filters to browse runs.";
+      : this.session.pending
+        ? "No verified matches yet."
+        : "No runs match these filters. Clear filters to browse runs.";
     // Only move focus when its keyed row actually disappears. Rollback leaves
     // the accepted selection unchanged, so failed writes keep the same checkbox.
     if (focusedIndex >= 0 && rows[focusedIndex][1].root.hidden) {
@@ -501,7 +498,7 @@ export class RunDrawer {
         );
         this.list.append(row.root);
       }
-      this.filterMenu?.setRuns(runs);
+      this.session.setRuns(runs, catalog);
       this.list.scrollTop = this.state.scrollTop;
     }
     for (const [id, row] of this.rows)
@@ -512,6 +509,8 @@ export class RunDrawer {
     this.list.scrollTop = this.state.scrollTop;
   }
   destroy() {
+    this.filterControl.destroy();
+    if (this.ownsSession) this.session.destroy();
     this.finishResize(true);
     this.observer.disconnect();
     this.narrow.removeEventListener("change", this.onViewport);
