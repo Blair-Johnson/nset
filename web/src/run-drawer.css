@@ -62,9 +62,9 @@
   top: 50%;
   left: 100%;
   transform: translate(-50%, -50%);
-  width: 24px;
-  height: 24px;
-  min-width: 24px;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -93,9 +93,6 @@
 }
 .is-collapsed .run-pane-toggle {
   left: 8px;
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
 }
 .run-pane-toggle:hover {
   border-color: var(--accent);

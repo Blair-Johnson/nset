@@ -71,6 +71,45 @@ async function charts(page: Page) {
   await page.locator(".dashboard-cell canvas").first().waitFor();
 }
 
+for (const width of [1440, 390]) {
+  test(`run drawer toggle keeps its closed size when open at ${width}px`, async ({
+    page,
+  }, info) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixture(page);
+    await charts(page);
+    const toggle = page.locator(".run-pane-toggle");
+    if (await page.getByLabel("Collapse run list").isVisible())
+      await toggle.click();
+    await expect(toggle).toHaveAccessibleName("Expand run list");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const closed = (await toggle.boundingBox())!;
+    await page.screenshot({ path: info.outputPath("toggle-closed.png") });
+
+    await toggle.focus();
+    await toggle.press("Enter");
+    await expect(toggle).toHaveAccessibleName("Collapse run list");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator(".run-drawer")).toBeVisible();
+    const open = (await toggle.boundingBox())!;
+    await page.screenshot({ path: info.outputPath("toggle-open.png") });
+    await writeFile(
+      info.outputPath("toggle-bounds.json"),
+      JSON.stringify({ viewportWidth: width, closed, open }, null, 2),
+    );
+    expect(closed.width).toBe(32);
+    expect(closed.height).toBe(32);
+    expect(open.width).toBe(closed.width);
+    expect(open.height).toBe(closed.height);
+
+    await toggle.press("Space");
+    await expect(page.locator(".run-drawer")).toBeHidden();
+    await expect(toggle).toHaveAccessibleName("Expand run list");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle).toBeFocused();
+  });
+}
+
 test("dense tables have no selection tint, preserve hover/focus, and route to details", async ({
   page,
 }, info) => {
