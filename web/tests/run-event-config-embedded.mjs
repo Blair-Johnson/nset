@@ -112,7 +112,10 @@ try {
   await clause(1, "metrics.accuracy", "exists");
   await expect(menu.locator(".run-filter-count")).toHaveText("1 verified");
   await clause(2, "config.optimizer.lr", "eq", "0.001");
-  await expect(menu.locator(".run-filter-count")).toHaveText("1 verified");
+  await expect(menu.locator(".run-filter-count")).toHaveText([
+    "1 verified",
+    "2 verified",
+  ]);
   await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await expect(
     page.getByRole("checkbox", {
