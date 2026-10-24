@@ -48,6 +48,8 @@ function preview(value: unknown): string {
 export interface ConfigTreeOptions {
   maxFields?: number;
   maxDepth?: number;
+  /** Bound exact serialized UTF-8 path bytes before building descendant strings. */
+  maxPathBytes?: number;
   /** Event subtrees retain exact keys rather than grouping literal dots. */
   exact?: boolean;
   sourcePath?: ConfigPath;
@@ -60,6 +62,19 @@ function* configEntries(value: object): Generator<[string | number, unknown]> {
       if (Object.hasOwn(value, key))
         yield [key, (value as Record<string, unknown>)[key]];
   }
+}
+// Reject large components before JSON serialization/UTF-8 allocation. Never
+// shorten an address: an omitted subtree remains available in the raw event.
+function pathWithinBytes(path: ConfigPath, limit: number): boolean {
+  if (limit === Infinity) return true;
+  let bytes = 1; // $
+  const encoder = new TextEncoder();
+  for (const part of path) {
+    if (typeof part === "string" && part.length > limit - bytes) return false;
+    bytes += encoder.encode(JSON.stringify(part)).length + 2; // brackets
+    if (bytes > limit) return false;
+  }
+  return bytes <= limit;
 }
 export function buildConfigTree(
   params: Record<string, unknown>,
@@ -88,6 +103,7 @@ export function buildConfigTree(
   let truncated = false;
   const maxFields = options.maxFields ?? Infinity;
   const maxDepth = options.maxDepth ?? Infinity;
+  const maxPathBytes = options.maxPathBytes ?? Infinity;
   while (pending.length) {
     const frame = pending[pending.length - 1];
     const next = frame.entries.next();
@@ -109,6 +125,13 @@ export function buildConfigTree(
           ? options.sourcePath
           : [...frame.path, key],
     };
+    if (
+      (typeof key === "string" && key.length > maxPathBytes) ||
+      !pathWithinBytes(item.path, maxPathBytes)
+    ) {
+      truncated = true;
+      continue;
+    }
     let node = item.parent;
     const parts =
       typeof item.key === "number"
@@ -416,7 +439,7 @@ export function renderRunConfig(
         element(
           "p",
           "muted",
-          "Tree preview limited to 1,000 values / 16 levels. Copy or inspect raw event for all values.",
+          "Tree preview limited to 1,000 values / 16 levels / 4,096 path bytes. Copy or inspect raw event for all values.",
         ),
       );
   } else section.append(heading, tools, hint, rows, more);

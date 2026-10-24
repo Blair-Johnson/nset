@@ -562,3 +562,171 @@ test("discovered escaped keys remain visible and missing clipboard offers raw-te
     section.getByText("Copy unavailable. Select the path text."),
   ).toBeVisible();
 });
+
+test("oversized descendant paths truncate the added preview without changing raw evidence", async ({
+  page,
+}) => {
+  const value = {
+    config: {
+      ["x".repeat(200000)]: Object.fromEntries(
+        Array.from({ length: 999 }, (_, i) => [`f${i}`, i]),
+      ),
+      safe: 7,
+    },
+  };
+  const stored = JSON.stringify(value);
+  expect(Buffer.byteLength(stored)).toBeLessThan(256 * 1024);
+  await fixture(page, async (route, request) => {
+    if (!request.path.endsWith("/records")) return false;
+    await route.fulfill({
+      json: result({ records: [{ ...record("1"), data: value, raw: stored }] }),
+    });
+    return true;
+  });
+  await inspect(page, "config");
+  const section = await add(page, "config");
+  await expect(section).toContainText("4,096 path bytes");
+  await expect(section.locator(".run-config-row")).toHaveCount(2);
+  await expect(
+    section.locator('[data-source-path=\'$["config"]["safe"]\']'),
+  ).toContainText("7");
+  expect((await section.textContent())!.length).toBeLessThan(2048);
+  await section.getByRole("button", { name: "Copy raw event" }).click();
+  expect(await page.evaluate(() => (window as any).__copied)).toBe(stored);
+  await section.getByText("Stored event JSON", { exact: true }).click();
+  await expect(section.locator(".run-event-raw pre")).toHaveText(stored);
+});
+
+for (const teardown of ["logout", "beforeunload"] as const) {
+  for (const phase of ["debounce", "fields", "records"] as const) {
+    test(`production ${teardown} cancels event config ${phase} work`, async ({
+      page,
+    }) => {
+      const calls: string[] = [];
+      let release: (() => void) | undefined;
+      await page.addInitScript(() => {
+        const original = window.fetch.bind(window);
+        (window as any).__eventRequests = [];
+        window.fetch = (input, init) => {
+          const path = String(input);
+          if (/\/rx\/(fields|records)$/.test(path)) {
+            const entry = { path, aborted: init?.signal?.aborted ?? false };
+            (window as any).__eventRequests.push(entry);
+            init?.signal?.addEventListener("abort", () => {
+              entry.aborted = true;
+            });
+          }
+          return original(input, init);
+        };
+      });
+      await page.route("**/api/**", async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (path === "/api/catalog") {
+          await route.fulfill({
+            json: { experiments: [], runs: [], series: [], rx_enabled: true },
+          });
+        } else if (path === "/api/rx/catalog") {
+          await route.fulfill({
+            json: {
+              source: { id: "rx:fixture", name: "fixture" },
+              next_after: null,
+              runs: [
+                {
+                  id: 1,
+                  run_uid: "uid-one",
+                  state: "succeeded",
+                  alias: null,
+                  config: "fixture",
+                  argv: [],
+                  exit_code: 0,
+                  created_at: "2026-10-01T00:00:00Z",
+                  started_at: null,
+                  finished_at: null,
+                },
+              ],
+            },
+          });
+        } else if (path.endsWith("/fields") || path.endsWith("/records")) {
+          calls.push(path);
+          if (path.endsWith(`/${phase}`))
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          await route.fulfill({
+            json: result({ fields: hints, records: [record("1")] }),
+          });
+        } else
+          await route.fulfill({
+            status: 404,
+            json: { error: "unexpected endpoint" },
+          });
+      });
+      try {
+        await page.goto(
+          "/#/experiments/rx%3Afixture/runs/rx%3Afixture%3Auid-one",
+        );
+        await page
+          .getByLabel("Access token", { exact: true })
+          .fill("fixture-token");
+        await page
+          .getByRole("button", { name: "Connect", exact: true })
+          .click();
+        await expect(search(page)).toBeVisible();
+        if (phase === "debounce") {
+          // Both events run in one task, before the discovery debounce can fire.
+          await page.evaluate((teardown) => {
+            const input = document.querySelector<HTMLInputElement>(
+              '.run-config input[type="search"]',
+            )!;
+            input.value = "config";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            if (teardown === "logout")
+              document.getElementById("logout")!.click();
+            else window.dispatchEvent(new Event("beforeunload"));
+          }, teardown);
+        } else {
+          if (phase === "records") await inspect(page, "config");
+          else await search(page).fill("config");
+          await expect
+            .poll(
+              () => calls.filter((path) => path.endsWith(`/${phase}`)).length,
+            )
+            .toBe(1);
+          if (teardown === "logout") await page.locator("#logout").click();
+          else
+            await page.evaluate(() =>
+              window.dispatchEvent(new Event("beforeunload")),
+            );
+          await expect
+            .poll(() =>
+              page.evaluate(
+                (phase) =>
+                  (window as any).__eventRequests.find((r: any) =>
+                    r.path.endsWith(`/${phase}`),
+                  )?.aborted,
+                phase,
+              ),
+            )
+            .toBe(true);
+        }
+        await page.waitForTimeout(350);
+        const expected =
+          phase === "debounce"
+            ? []
+            : phase === "fields"
+              ? ["/api/rx/fields"]
+              : ["/api/rx/fields", "/api/rx/records"];
+        expect(calls).toEqual(expected);
+        expect(
+          await page.evaluate(() => (window as any).__eventRequests.length),
+        ).toBe(expected.length);
+        if (teardown === "logout") {
+          await expect(page.locator("#connection")).toHaveText("Disconnected");
+          await expect(page.locator(".run-detail")).toHaveCount(0);
+        }
+      } finally {
+        release?.();
+      }
+    });
+  }
+}

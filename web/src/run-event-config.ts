@@ -206,6 +206,7 @@ export function attachEventConfig(
         sourcePath: recordPath(path),
         maxFields: 1000,
         maxDepth: 16,
+        maxPathBytes: 4096,
       },
     );
     const tree = renderRunConfig({}, "event", {
@@ -322,6 +323,7 @@ export function attachEventConfig(
       );
   }
   async function discover(cursor: unknown = null) {
+    if (!live(revision)) return;
     fieldController?.abort();
     const controller = (fieldController = new AbortController());
     const version = revision;

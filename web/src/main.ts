@@ -1394,6 +1394,8 @@ $("login-form").onsubmit = (e) => {
 };
 $("refresh").onclick = () => void connect(true);
 $("logout").onclick = () => {
+  detailRequest?.abort();
+  detailRequest = undefined;
   catalogGeneration++;
   request?.abort();
   activeEditor?.close();
@@ -1449,6 +1451,8 @@ document.addEventListener(
   true,
 );
 window.addEventListener("beforeunload", () => {
+  detailRequest?.abort();
+  detailRequest = undefined;
   request?.abort();
   disposeCards();
   store.clear();
