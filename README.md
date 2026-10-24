@@ -42,7 +42,7 @@ Add `--rx-repo /path/to/repository` to `nset serve` to browse that repository’
 
 Select runs, open Charts, and add an **rx records** chart. Enter a numeric X field and add Y fields with Tab completion. **Filter records** selects observations within those runs; **Group by** separates curves using a scalar field on each record. For example, filter `kind = "epoch"`, choose X `epoch`, and add `train_loss` and `val_loss`. Use `metrics.loss` for a nested field and `$["metrics.loss"]` for a literal dotted key. **Inspect records** pages through the underlying JSON.
 
-Charts retain fractional, repeated, and restarted X coordinates in event order. Preview notes show sampled discovery coverage, skipped values, and query limits. Refresh reads a new committed snapshot. WAL-mode sources require existing readable producer-owned `-wal` and `-shm` files; an unavailable source is reported without changing the repository.
+Charts retain fractional, repeated, and restarted X coordinates in event order. Preview notes show sampled discovery coverage, skipped values, and query limits. Refresh reads a new committed snapshot. The database is opened read-only; normal SQLite WAL/shared-memory reader coordination is allowed. Permission or recovery failures are reported without a writable fallback. Inspection pages assume append-only event sequences and detect database replacement; in-place edits are not frozen across pages. Numeric axes use finite double precision; the filter editor rejects unsafe integers rather than rounding them.
 
 ## Log data
 
