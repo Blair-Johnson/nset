@@ -25,3 +25,12 @@ benchmark = { cmd = "python scripts/benchmark.py", depends-on = ["build"], env =
 rust = ">=1.85,<2"
 nodejs = ">=22.12,<23"
 python = ">=3.12,<3.14"
+
+[feature.compat.pypi-dependencies]
+mlflow-skinny = ">=3, <4"
+wandb = ">=0.20, <1"
+tensorboard = ">=2, <3"
+pillow = "*"
+
+[environments]
+compat = ["compat"]
