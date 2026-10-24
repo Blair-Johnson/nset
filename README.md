@@ -77,6 +77,6 @@ Authenticated `GET /api/catalog` returns `{experiments, runs, series}` for table
 
 `docs/contract.md` describes the native API, and `docs/compat-gateway-contract.md` describes the in-process Rust compatibility boundary (the filename is retained for existing references). Source build and development checks are in `docs/contributing.md`. The UX contracts are in `docs/ux-contract.md` and `docs/ux-refinement-contract.md`.
 
-`docs/verification.md` and the ingestion evidence documents retain earlier results under explicit historical headings. Those results do not establish single-command SDK parity, release readiness or measured performance. Current acceptance must identify its exact source and executed gates.
+`docs/single-command-evidence.md` records the standalone Rust/SDK, copied-executable and browser gates, including exact source, binary checksum and platform limits. `docs/verification.md` and the ingestion evidence documents retain earlier results under explicit historical headings; those earlier results are not current standalone-server evidence.
 
 The server uses a configurable multithreaded HTTP runtime, bounded SQLite read actors, one query writer, and a separate durable journal intake worker/projector. Pending limits reject overload without evicting accepted data; raising thread counts is not a promise of higher sustained throughput. Very large histories remain complete but consume browser memory. There is no claim of unlimited scale; later rendering acceleration must preserve the numerical inspection contract.

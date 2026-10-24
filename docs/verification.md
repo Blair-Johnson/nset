@@ -1,5 +1,9 @@
 # Verification record
 
+## Current standalone server
+
+See `docs/single-command-evidence.md` for the Rust single-listener implementation, direct official-SDK gates, optimized-binary smoke and browser verification. The older records below are historical and are not substituted for those gates.
+
 ## Pre-single-command historical evidence
 
 **The records below predate the single Rust `nset serve` integration.** They describe their recorded revisions and architectures, not current standalone-server SDK parity, performance or release acceptance. Old gateway references are historical, not setup instructions. Current source-specific gates must be recorded separately. For live setup use `README.md` and `docs/client-compatibility.md`.
