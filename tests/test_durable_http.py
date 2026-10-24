@@ -73,3 +73,46 @@ class DurableHTTPTests(unittest.TestCase):
             self.assertEqual(outbox.pending_count(), 0)
         self.applied(run.path + "/ingest/second")
         self.assertEqual([r["value"] for r in self.client.metric_history(run.id, "v")], [1, 2])
+
+    def test_concurrent_replays_conflicts_and_authentication(self):
+        self.start(NSET_WRITE_CONCURRENCY="4", NSET_READ_WORKERS="3", NSET_HTTP_WORKERS="4")
+        run = self.run_record()
+        path = run.path + "/ingest/shared"
+        payload = {"metrics": [{"key": "v", "step": 0, "value": 4, "timestamp": 1000}]}
+
+        def submit(_):
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    return self.client.http.request("PUT", path, payload)
+                except APIError as error:
+                    if error.status != 503 or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.02)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            receipts = list(pool.map(submit, range(32)))
+        self.assertEqual(len({r["accepted_at"] for r in receipts}), 1)
+        self.applied(path)
+        self.assertEqual(len(list(self.client.metric_history(run.id, "v"))), 1)
+        with self.assertRaises(APIError) as caught:
+            self.client.http.request("PUT", path, {"metrics": [{"key": "v", "step": 0, "value": 5}]})
+        self.assertEqual(caught.exception.status, 409)
+        from nset_client import Client
+        for method, endpoint, body in [("PUT", path, payload), ("GET", path, None), ("GET", "/api/ingest/status", None)]:
+            with self.assertRaises(APIError) as caught:
+                Client(self.server.url, token="wrong").http.request(method, endpoint, body)
+            self.assertEqual(caught.exception.status, 401)
+        with self.assertRaises(APIError) as caught:
+            self.client.http.request("POST", path, payload)
+        self.assertEqual(caught.exception.status, 405)
+        with self.assertRaises(APIError) as caught:
+            self.client.http.request("GET", run.path + "/ingest/unknown")
+        self.assertEqual(caught.exception.status, 404)
+        status = self.client.http.request("GET", "/api/ingest/status")
+        self.assertEqual(status["pending_batches"], 0)
+        self.assertEqual(status["pending_bytes"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

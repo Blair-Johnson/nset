@@ -80,6 +80,7 @@ async fn saturated_writes_fail_before_body_extraction_with_busy_headers() {
         ("POST", "/api/runs"),
         ("PATCH", "/api/runs/missing"),
         ("POST", "/api/runs/missing/metrics"),
+        ("PUT", "/api/runs/missing/ingest/batch"),
         ("POST", "/api/runs/missing/images?key=image"),
     ] {
         let (body, polls) = tracked_body();
