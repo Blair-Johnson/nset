@@ -230,7 +230,7 @@ export class RunFilterMenu {
       }
       const n = this.count({ combine: "all", conditions: [c] });
       const field = this.fieldFor(c);
-      out.textContent = `${n} ${c.scope === "event" ? "verified" : "match"}${field && c.scope !== "event" ? ` · ${this.runs.length - field.count} lack path` : ""}`;
+      out.textContent = `${n} match${field ? ` · ${this.runs.length - field.count} lack path` : ""}`;
     });
   }
 
@@ -507,18 +507,6 @@ export class RunFilterMenu {
       missingLabel.append(missing);
       if (!eventScope && condition.op !== "missing")
         missingLine.append(missingLabel);
-      if (eventScope) {
-        const hint = element(
-          "span",
-          "muted",
-          condition.op === "missing"
-            ? "No event has this path"
-            : condition.op === "neq"
-              ? "Any present, unequal Event value"
-              : "Any logged Event",
-        );
-        missingLine.append(hint);
-      }
       if (!eventScope && condition.missing === "default") {
         const fallback = element("input", "run-filter-fallback");
         fallback.type = "text";
@@ -531,8 +519,11 @@ export class RunFilterMenu {
         fallback.oninput = () => update({ fallback: fallback.value });
         missingLine.append(fallback);
       }
-      missingLine.append(element("span", "run-filter-count muted"));
-      row.append(line, missingLine);
+      row.append(line);
+      if (!eventScope) {
+        missingLine.append(element("span", "run-filter-count muted"));
+        row.append(missingLine);
+      }
       if (index > 0) {
         const joiner = element(
           "div",

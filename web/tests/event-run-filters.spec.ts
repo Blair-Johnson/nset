@@ -146,6 +146,44 @@ async function openMenu(page: Page) {
     await root.locator("summary").click();
   return root;
 }
+async function expectEventControls(
+  page: Page,
+  path: string,
+  op: string,
+  value = "",
+) {
+  const root = menu(page);
+  await expect(
+    root.locator(".run-filter-count, .run-filter-missing"),
+  ).toHaveCount(0);
+  expect(await root.evaluate((node) => node.outerHTML)).not.toMatch(
+    /any logged event|\bverified\b|any present, unequal event value|no event has this path/i,
+  );
+  await expect(
+    root.getByLabel("Condition 1 scope", { exact: true }),
+  ).toHaveValue("event");
+  await expect(
+    root.getByLabel("Condition 1 path", { exact: true }),
+  ).toHaveValue(path);
+  await expect(
+    root.getByLabel("Condition 1 operator", { exact: true }),
+  ).toHaveValue(op);
+  const input = root.getByLabel("Condition 1 value", { exact: true });
+  if (op === "missing" || op === "exists") await expect(input).toBeHidden();
+  else await expect(input).toHaveValue(value);
+  await expect(
+    root.getByRole("button", { name: "Remove condition 1", exact: true }),
+  ).toBeVisible();
+  await expect(
+    root.getByRole("button", { name: "+ Add condition", exact: true }),
+  ).toBeVisible();
+  await expect(
+    root.getByRole("button", { name: "Clear all", exact: true }),
+  ).toBeVisible();
+  await expect(
+    root.getByLabel("Combine conditions", { exact: true }),
+  ).toBeVisible();
+}
 async function addEvent(page: Page, path: string, op: string, value = "") {
   const root = await openMenu(page);
   await root
@@ -162,6 +200,7 @@ async function addEvent(page: Page, path: string, op: string, value = "") {
     .selectOption(op);
   if (op !== "missing" && op !== "exists")
     await root.getByLabel("Condition 1 value", { exact: true }).fill(value);
+  await expectEventControls(page, path, op, value);
   return root;
 }
 const selected = (page: Page) =>
@@ -195,7 +234,8 @@ test("Event Tab completion and shared table/drawer filtering never deselect hidd
     .getByLabel("Condition 1 operator", { exact: true })
     .selectOption("lt");
   await root.getByLabel("Condition 1 value", { exact: true }).fill("0.5");
-  await expect(root.locator(".run-filter-count")).toHaveText("1 verified");
+  await expect(root.locator(".run-filter-count")).toHaveCount(0);
+  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await root.locator("summary").click();
   await expect(
     page.getByRole("checkbox", { name: /^Select r\d/, exact: false }),
@@ -283,7 +323,8 @@ test("exact unsuggested Event paths accept quoted scalars and reject unsafe nume
   await expect(
     root.getByLabel("Condition 1 path", { exact: true }),
   ).toHaveValue('config["rare.dot"]');
-  await expect(root.locator(".run-filter-count")).toHaveText("1 verified");
+  await expect(root.locator(".run-filter-count")).toHaveCount(0);
+  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await expect(
     page.getByRole("checkbox", { name: "Select r2", exact: true }),
   ).toBeVisible();
@@ -322,11 +363,17 @@ test("Event and Config scopes remain separate even for the same exact path", asy
     "neq",
     "native-only",
   );
-  await expect(root).toContainText("Any present, unequal Event value");
+  await expectEventControls(
+    page,
+    '$["rx config summary"]',
+    "neq",
+    "native-only",
+  );
   await expect(
     root.getByLabel("Condition 1 missing-path handling", { exact: true }),
   ).toHaveCount(0);
-  await expect(root.locator(".run-filter-count")).toHaveText("1 verified");
+  await expect(root.locator(".run-filter-count")).toHaveCount(0);
+  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   expect(
     calls.filter((c) => c.path.endsWith("/run-filter")).at(-1)!.body
       .conditions[0],
@@ -735,6 +782,9 @@ for (const surface of ["table", "drawer"] as const) {
     await capture("idle");
     try {
       await addEvent(page, "metrics.loss", "lt", "0.5");
+      await expect(menu(page).locator(".run-filter-progress")).toHaveText("…");
+      await expectEventControls(page, "metrics.loss", "lt", "0.5");
+      await capture("loading-popup");
       await menu(page).locator("summary").click();
       await expect(menu(page).locator(".run-filter-progress")).toHaveText("…");
       const loading = await geometry();
@@ -784,6 +834,7 @@ for (const surface of ["table", "drawer"] as const) {
         calls.filter((call) => call.path === "/api/rx/run-filter"),
       ).toHaveLength(failedCalls);
       const root = await openMenu(page);
+      await expectEventControls(page, "metrics.loss", "lt", "0.5");
       await expect(root.locator(".run-filter-error")).toHaveText(
         `Filter failed: ${detail}`,
       );
@@ -825,6 +876,9 @@ for (const surface of ["table", "drawer"] as const) {
         .click();
       await expect(root.locator(".run-filter-progress")).toHaveText("");
       await expect(root.locator(".run-filter-failure")).toBeHidden();
+      await openMenu(page);
+      await expectEventControls(page, "metrics.loss", "lt", "0.5");
+      await capture("success-popup");
       await root.locator("summary").click();
       const success = await geometry();
       expect(success).toEqual(loading);

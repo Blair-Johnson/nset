@@ -110,12 +110,22 @@ try {
         .fill(value);
   }
   await clause(1, "metrics.accuracy", "exists");
-  await expect(menu.locator(".run-filter-count")).toHaveText("1 verified");
+  await expect(menu.locator(".run-filter-count")).toHaveCount(0);
+  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await clause(2, "config.optimizer.lr", "eq", "0.001");
-  await expect(menu.locator(".run-filter-count")).toHaveText([
-    "1 verified",
-    "2 verified",
-  ]);
+  await expect(menu.locator(".run-filter-count")).toHaveCount(0);
+  assert.doesNotMatch(
+    await menu.textContent(),
+    /any logged event|\bverified\b/i,
+  );
+  // Check the original independent-condition membership without UI count labels.
+  await menu
+    .getByLabel("Combine conditions", { exact: true })
+    .selectOption("any");
+  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(2);
+  await menu
+    .getByLabel("Combine conditions", { exact: true })
+    .selectOption("all");
   await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
   await expect(
     page.getByRole("checkbox", {

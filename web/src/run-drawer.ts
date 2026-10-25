@@ -339,7 +339,7 @@ export class RunDrawer {
         ? "No selected runs match these filters. Clear filters or turn off Selected."
         : "No runs selected. Turn off Selected to browse runs."
       : this.session.error || this.session.pending
-        ? "No verified matches yet."
+        ? ""
         : "No runs match these filters. Clear filters to browse runs.";
     // Only move focus when its keyed row actually disappears. Rollback leaves
     // the accepted selection unchanged, so failed writes keep the same checkbox.

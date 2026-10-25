@@ -554,7 +554,7 @@ export function runTable(
       const td = cell(
         runs.length
           ? filterSession.pending
-            ? "No verified matches yet."
+            ? ""
             : "No runs match your filters."
           : "No runs in this experiment yet.",
         "empty-table",
