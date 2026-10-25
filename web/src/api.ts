@@ -5,6 +5,7 @@ export interface Experiment {
   created_at: number;
 }
 export interface Run {
+  rx?: { sourceId: string; uid: string; state: string };
   id: string;
   experiment_id: string;
   name: string;
@@ -52,6 +53,17 @@ export class Api {
   }
   async json<T>(path: string, signal?: AbortSignal): Promise<T> {
     return (await this.response(path, signal)).json();
+  }
+  async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    const response = await this.fetcher(`/api${path}`, {
+      method: "POST", headers: { Authorization: `Bearer ${this.token()}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal, cache: "no-store",
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error ?? `HTTP ${response.status}`);
+    }
+    return response.json();
   }
   /** Merge tags into a run; a null value removes that tag. */
   async patchRun(

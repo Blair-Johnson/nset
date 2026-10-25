@@ -57,6 +57,14 @@ export function ema(points: XY[], alpha: number): XY[] {
   return result;
 }
 
+/** EMA over paired event order. X is a recorded coordinate, not a sort key. */
+export function emaInOrder(points: XY[], alpha: number): XY[] {
+  if (!(finite(alpha, 'alpha') > 0 && alpha <= 1)) throw new RangeError('alpha must be in (0, 1]');
+  const result = points.map(([x, y]): XY => [finite(x, 'x'), finite(y, 'y')]);
+  for (let i = 1; i < result.length; i++) result[i][1] = mix(result[i - 1][1], result[i][1], alpha);
+  return result;
+}
+
 function sameSign(a: number, b: number): boolean {
   return a !== 0 && b !== 0 && Math.sign(a) === Math.sign(b);
 }

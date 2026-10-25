@@ -13,6 +13,14 @@ export interface CatalogSeries {
   last_value: number | null;
 }
 export interface Catalog {
+  rx?: {
+    id: string;
+    name: string;
+    error?: string;
+    nextAfter?: string | null;
+    highWater?: string;
+    sourceGeneration?: string;
+  };
   experiments: Experiment[];
   runs: Run[];
   series: CatalogSeries[];
@@ -34,13 +42,13 @@ export type ChartSource =
  *   experiment (one-off comparisons).
  * Either binding combines with either Y source mode. */
 export type XBinding =
-  | { mode: "key"; key: string }
-  | { mode: "series"; series: SeriesRef };
+  { mode: "key"; key: string } | { mode: "series"; series: SeriesRef };
 export interface CardLayout {
   width: number;
   height: number;
 }
 export interface ChartSpec {
+  records?: import("./records").RecordBinding;
   id: string;
   title: string;
   kind: "timeseries" | "image";
@@ -118,6 +126,6 @@ export interface PlotInteraction {
   onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
   /** A direct-gesture placement click completed after pointer capture release. */
   onPlacementComplete?: (pin: "a" | "b" | "threshold" | "yA" | "yB") => void;
-  onHover?: (x: number | null) => void;
+  onHover?: (x: number | null, pointer?: [number, number]) => void;
   onViewChange?: () => void;
 }

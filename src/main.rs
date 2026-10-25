@@ -39,6 +39,11 @@ fn lock_root(path: &Path) -> Result<std::fs::File> {
 fn run(config: ServeConfig) -> Result<()> {
     // Validate secrets and all tuning before creating storage or starting workers.
     let token = config.load_token()?;
+    let rx = config
+        .rx_repo
+        .as_deref()
+        .map(nset::rx::Source::resolve)
+        .transpose()?;
     let concurrency = ConcurrencyOptions::from_env(config.workers)?;
     let ingest = IngestConfig::from_env()?.options()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -50,8 +55,9 @@ fn run(config: ServeConfig) -> Result<()> {
         // Bind before touching disk; an unavailable address cannot create a new root.
         let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
         ownership = Some(lock_root(&config.db_path)?);
-        let state =
+        let mut state =
             AppState::open_with_ingest_options(&config.db_path, token, &concurrency, ingest)?;
+        state.rx = rx;
         tracing::info!(
             http_workers = concurrency.http_workers,
             read_workers = concurrency.read_workers,

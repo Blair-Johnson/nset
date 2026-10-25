@@ -1,3 +1,4 @@
+import { appendRxCatalog } from "./records";
 import type { Api, Experiment, Run } from "./api";
 import { assertSafe } from "./config";
 import type { Point } from "./math";
@@ -45,7 +46,7 @@ export async function fetchCatalog(
   const data = record(JSON.parse(body));
   if (
     Object.keys(data).some(
-      (key) => !["experiments", "runs", "series"].includes(key),
+      (key) => !["experiments", "runs", "series", "rx_enabled"].includes(key),
     )
   )
     throw new Error("Unknown catalog field.");
@@ -106,7 +107,8 @@ export async function fetchCatalog(
   distinct(
     series.map((s) => seriesId({ runId: s.run_id, key: s.key, kind: s.kind })),
   );
-  return { experiments, runs, series };
+  const catalog = { experiments, runs, series };
+  return data.rx_enabled === true ? appendRxCatalog(api, catalog, signal) : catalog;
 }
 
 const aborted = () => new DOMException("Aborted", "AbortError");

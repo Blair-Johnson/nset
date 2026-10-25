@@ -202,8 +202,12 @@
   font-weight: 550;
   margin-bottom: 5px;
 }
-.chart-editor input:not([type="checkbox"]):not([type="range"]),
-.chart-editor select {
+.chart-editor
+  input:not([type="checkbox"]):not([type="range"]):not(.run-filter-path):not(
+    .run-filter-value
+  ),
+.chart-editor
+  select:not(.run-filter-scope):not(.run-filter-op):not(.run-filter-combine) {
   width: 100%;
   min-width: 0;
   min-height: 34px;
@@ -214,7 +218,8 @@
   color: var(--ce-text);
   font: inherit;
 }
-.chart-editor select {
+.chart-editor
+  select:not(.run-filter-scope):not(.run-filter-op):not(.run-filter-combine) {
   padding-right: 30px;
 }
 .chart-editor input[type="range"] {
@@ -655,3 +660,13 @@
   font-size: 11px;
   margin: -10px 0 12px;
 }
+
+.ce-record-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.record-inspection { max-height: 320px; overflow: auto; font-size: 12px; }
+.record-inspection summary { overflow-wrap: anywhere; }
+.record-inspection pre { max-height: 220px; overflow: auto; white-space: pre-wrap; }

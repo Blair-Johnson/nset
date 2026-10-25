@@ -20,8 +20,7 @@ export function rankSuggestions(
     const text = item.value.toLowerCase();
     const at = text.indexOf(q);
     if (at < 0) return;
-    const score =
-      at === 0 ? 0 : /[.:/_\-\s[]/.test(text[at - 1]) ? 1 : 2;
+    const score = at === 0 ? 0 : /[.:/_\-\s[]/.test(text[at - 1]) ? 1 : 2;
     scored.push([score, order, item]);
   });
   return scored
@@ -59,7 +58,9 @@ export function attachSuggestions(
   input: HTMLInputElement,
   source: () => Suggestion[],
   onPick: (value: string) => void,
-): void {
+  complete: () => boolean = () => true,
+  prepareTab?: () => Promise<void> | undefined,
+): { refresh: () => void; close: () => void; dispose: () => void } {
   const id = `suggest-${++nextId}`;
   const list = element("div", "suggest-list");
   list.id = id;
@@ -72,6 +73,10 @@ export function attachSuggestions(
   input.autocomplete = "off";
   let shown: Suggestion[] = [];
   let active = -1;
+  let dismissed = false;
+  let tabVersion = 0;
+  let awaitingTab = false;
+  const lifetime = new AbortController();
 
   const isOpen = () => input.getAttribute("aria-expanded") === "true";
   const close = () => {
@@ -111,6 +116,10 @@ export function attachSuggestions(
         const option = element("div", "suggest-option");
         option.id = `${id}-${i}`;
         option.setAttribute("role", "option");
+        option.setAttribute(
+          "aria-label",
+          [item.value, item.detail].filter(Boolean).join(" "),
+        );
         option.append(element("span", "suggest-value", item.value));
         if (item.detail)
           option.append(element("span", "suggest-detail", item.detail));
@@ -133,47 +142,154 @@ export function attachSuggestions(
     highlight(-1);
   };
 
-  input.addEventListener("focus", open);
-  input.addEventListener("input", open);
-  input.addEventListener("blur", close);
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (!isOpen()) open();
-      if (!shown.length) return;
-      event.preventDefault();
-      // Cycle through the options and a "none highlighted" slot (-1).
-      const slots = shown.length + 1;
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      highlight(((active + 1 + step + slots) % slots) - 1);
-    } else if (event.key === "Enter" && isOpen() && active >= 0) {
-      event.preventDefault();
+  const completeTab = (): boolean => {
+    if (isOpen() && active >= 0) {
       pick(shown[active].value);
-    } else if (event.key === "Tab" && !event.shiftKey && isOpen()) {
-      const matches = shown.map((item) => item.value);
-      const typed = input.value;
-      if (active >= 0) {
-        event.preventDefault();
-        pick(matches[active]);
-      } else if (matches.length === 1) {
-        event.preventDefault();
-        pick(matches[0]);
-      } else {
-        // Extend to the shared prefix when the matches all start with what was typed.
-        const prefix = commonPrefix(matches);
-        if (
-          prefix.length > typed.length &&
-          prefix.toLowerCase().startsWith(typed.toLowerCase())
-        ) {
-          event.preventDefault();
-          input.value = prefix;
-          open();
-        }
-      }
-    } else if (event.key === "Escape" && isOpen()) {
-      // First Escape closes suggestions; the next one closes the menu.
-      event.preventDefault();
-      event.stopPropagation();
-      close();
+      return true;
     }
-  });
+    if (!complete()) return false;
+    const matches = [
+      ...new Set(
+        rankSuggestions(input.value, source(), Infinity).map(
+          (item) => item.value,
+        ),
+      ),
+    ];
+    const typed = input.value;
+    // An exact offered field is an intentional choice, even when longer paths
+    // share it (loss vs loss_mean). Otherwise only extend an unambiguous prefix.
+    if (matches.includes(typed)) {
+      pick(typed);
+      return true;
+    }
+    if (matches.length === 1) {
+      pick(matches[0]);
+      return true;
+    }
+    const prefix = commonPrefix(matches);
+    if (
+      prefix.length > typed.length &&
+      prefix.toLowerCase().startsWith(typed.toLowerCase())
+    ) {
+      input.value = prefix;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      open();
+      return true;
+    }
+    return false;
+  };
+  const advanceFocus = () => {
+    // A deferred Tab cannot replay the browser's trusted default action. Move
+    // through visible enabled controls in the same dialog's normal tab order.
+    const dialog = input.closest('dialog, [role="dialog"]');
+    const controls = [
+      ...(dialog ?? document.body).querySelectorAll<HTMLElement>(
+        'input, button, select, textarea, a[href], summary, [tabindex], [contenteditable="true"]',
+      ),
+    ]
+      .filter(
+        (el) =>
+          el.tabIndex >= 0 &&
+          !el.matches(":disabled") &&
+          !el.closest("[inert]") &&
+          el.getClientRects().length > 0 &&
+          getComputedStyle(el).visibility !== "hidden",
+      )
+      .sort((a, b) => (a.tabIndex || Infinity) - (b.tabIndex || Infinity));
+    const next =
+      controls[controls.indexOf(input) + 1] ??
+      (dialog ? controls[0] : undefined);
+    if (next) next.focus();
+    else input.blur();
+  };
+  const reset = () => {
+    dismissed = false;
+    awaitingTab = false;
+    tabVersion++;
+    open();
+  };
+  input.addEventListener("focus", reset, { signal: lifetime.signal });
+  input.addEventListener("input", reset, { signal: lifetime.signal });
+  input.addEventListener(
+    "blur",
+    () => {
+      tabVersion++;
+      awaitingTab = false;
+      close();
+    },
+    { signal: lifetime.signal },
+  );
+  input.addEventListener(
+    "keydown",
+    (event) => {
+      const wasWaiting = awaitingTab;
+      if (event.key !== "Tab" || event.shiftKey) {
+        tabVersion++;
+        awaitingTab = false;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!isOpen()) open();
+        if (!shown.length) return;
+        event.preventDefault();
+        // Cycle through the options and a "none highlighted" slot (-1).
+        const slots = shown.length + 1;
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        highlight(((active + 1 + step + slots) % slots) - 1);
+      } else if (event.key === "Enter" && isOpen() && active >= 0) {
+        event.preventDefault();
+        pick(shown[active].value);
+      } else if (event.key === "Tab" && !event.shiftKey && !dismissed) {
+        const pending = prepareTab?.();
+        if (pending) {
+          awaitingTab = true;
+          event.preventDefault();
+          const version = ++tabVersion,
+            typed = input.value;
+          let timer: ReturnType<typeof setTimeout>;
+          const timeout = new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), 1500);
+          });
+          void Promise.race([
+            pending.then(
+              () => true,
+              () => false,
+            ),
+            timeout,
+          ]).then((ready) => {
+            clearTimeout(timer);
+            if (version === tabVersion) awaitingTab = false;
+            if (
+              version !== tabVersion ||
+              dismissed ||
+              lifetime.signal.aborted ||
+              !input.isConnected ||
+              document.activeElement !== input ||
+              input.value !== typed
+            )
+              return;
+            if (!ready || !completeTab()) advanceFocus();
+          });
+        } else if (isOpen() && completeTab()) event.preventDefault();
+      } else if (event.key === "Escape" && (isOpen() || wasWaiting)) {
+        // First Escape closes suggestions; the next one closes the menu.
+        event.preventDefault();
+        event.stopPropagation();
+        dismissed = true;
+        close();
+      }
+    },
+    { signal: lifetime.signal },
+  );
+  return {
+    refresh: () => {
+      if (!dismissed && document.activeElement === input) open();
+    },
+    close,
+    dispose: () => {
+      tabVersion++;
+      close();
+      lifetime.abort();
+      list.remove();
+    },
+  };
 }

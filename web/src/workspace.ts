@@ -1,3 +1,5 @@
+import { uuid } from "./uuid";
+import { validateRecordBinding, recordRuns } from "./records";
 import { assertSafe, defaults, parseSafeJson, validateConfig } from "./config";
 import type {
   Catalog,
@@ -14,7 +16,7 @@ import type { Run } from "./api";
 const STORAGE_KEY = "nset.workspaces.v2";
 const forbidden = new Set(["__proto__", "constructor", "prototype"]);
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-const uniqueId = (prefix: string) => `${prefix}:${crypto.randomUUID()}`;
+const uniqueId = (prefix: string) => `${prefix}:${uuid()}`;
 function object(value: unknown, fields?: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected an object.");
@@ -60,6 +62,7 @@ export function seriesId(ref: SeriesRef): string {
 /** Identity of what a chart's X coordinate means. Cameras, cursors and zoom
  * history are only meaningful while this is unchanged. */
 export function cameraAxis(card: ChartSpec): string {
+  if (card.records) return JSON.stringify(["records", card.records.sourceId, card.records.x]);
   const x = card.kind === "timeseries" ? card.x : undefined;
   if (!x) return card.config.axis;
   return JSON.stringify([
@@ -72,6 +75,13 @@ export function resolveSources(
   selectedRunIds: string[],
   catalog: Catalog,
 ): ResolvedSeries[] {
+  if (card.records) {
+    const b = card.records;
+    const uids = recordRuns(b, catalog, selectedRunIds);
+    return catalog.runs.filter(run => run.rx?.sourceId === b.sourceId && uids.includes(run.rx.uid)).flatMap(run => b.ys.map(key => ({
+      id: JSON.stringify([b.sourceId, run.rx!.uid, key, null]), runId: run.id, key, kind: "metric" as const, run, label: `${run.name} · ${key}`,
+    })));
+  }
   const kind = card.kind === "image" ? "image" : "metric";
   const runs = new Map(catalog.runs.map((run) => [run.id, run]));
   const available = new Set(
@@ -253,6 +263,7 @@ export function validateChart(value: unknown): ChartSpec {
     "outliers",
     "size",
     "layout",
+    "records",
   ]);
   const kind = enumValue(v.kind, ["timeseries", "image"]);
   const source = object(v.source);
@@ -276,6 +287,8 @@ export function validateChart(value: unknown): ChartSpec {
     distinct(series.map(seriesId), "series identity");
     binding = { mode: "explicit", series };
   } else throw new Error("Unknown source mode.");
+  const records = v.records === undefined ? undefined : validateRecordBinding(v.records);
+  if (records && (kind !== "timeseries" || v.x !== undefined)) throw new Error("Record charts use their own paired X field.");
   let x: XBinding | undefined;
   if (v.x !== undefined) {
     if (kind !== "timeseries")
@@ -323,6 +336,7 @@ export function validateChart(value: unknown): ChartSpec {
     title: text(v.title, "chart title", 256),
     kind,
     source: binding,
+    ...(records ? { records } : {}),
     ...(x ? { x } : {}),
     config: validateConfig(v.config),
     outliers: enumValue(v.outliers, ["all", "robust"]),

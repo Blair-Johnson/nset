@@ -170,6 +170,21 @@ export function formatXValue(
   );
 }
 
+/** Moving coordinates use the effective axis notation. Static label arrays
+ * describe only their explicit splits, so arbitrary coordinates use base format. */
+export function coordinateFormatter(config: ViewConfig, quantity: XQuantity, index: number): (value: number) => string {
+  const axes = config.advanced?.axes as { values?: unknown }[] | undefined;
+  const override = axes?.[index]?.values;
+  if (typeof override === "string") {
+    return index === 0 && quantity === "relative"
+      ? (value) => formatXValue(value, quantity, override as Formatter)
+      : (value) => formatValue(value, override as Formatter);
+  }
+  return index === 0
+    ? (value) => formatXValue(value, quantity, config.xFormat)
+    : (value) => formatValue(value, config.yFormat);
+}
+
 /** All user literals pass validation; internal callbacks/series/hooks are never patched. */
 export function resolveOptions(
   config: ViewConfig,
@@ -264,12 +279,10 @@ export function resolveOptions(
   if (resolved.cursor?.hover?.skip)
     resolved.cursor.hover.skip = [undefined, ...resolved.cursor.hover.skip];
   resolved.axes?.forEach((axis, index) => {
-    if (typeof axis.values === "string")
-      axis.values =
-        index === 0 && quantity === "relative"
-          ? xFormatter(quantity, axis.values as Formatter)
-          : formatter(axis.values as Formatter);
-    else if (Array.isArray(axis.values)) {
+    if (typeof axis.values === "string") {
+      const format = coordinateFormatter(config, quantity, index);
+      axis.values = (_u, values) => values.map((value) => value == null ? "" : format(value));
+    } else if (Array.isArray(axis.values)) {
       // Static labels must stay attached to their split value when zoomed or
       // when uPlot filters log ticks. Resolve to trusted callbacks, not index labels.
       const labels = axis.values as (string | number | null)[];

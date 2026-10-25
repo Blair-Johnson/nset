@@ -446,7 +446,7 @@ export class PlotNavigation {
       if (e.type === "pointermove")
         this.u.root.classList.remove("plot-pan-hover-hidden");
       const value = this.u.posToVal(x, "x");
-      this.options.onHover?.(inside && Number.isFinite(value) ? value : null);
+      this.options.onHover?.(inside && Number.isFinite(value) ? value : null, [x, y]);
     }
     if (!g || e.pointerId !== g.id || !w || !h) return;
     g.moved ||= Math.hypot(x - g.x, y - g.y) >= MIN_DRAG;

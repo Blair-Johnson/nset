@@ -1,18 +1,14 @@
-import type { Catalog, CatalogSeries } from "./workspace-types";
+import type { Catalog } from "./workspace-types";
 import type { Experiment, Run } from "./api";
 import { element } from "./utils";
 import { runSwatch } from "./run-drawer";
-import {
-  scalarParameters,
-  parameterLabel,
-  compareParameters,
-} from "./run-table-fields";
+import { RunFilterControl, RunFilterSession } from "./run-filter-session";
+import { parameterLabel } from "./run-table-fields";
+import { createRunOrder, runSortState, type RunSortState } from "./run-order";
 
-export interface TableState {
+export interface TableState extends RunSortState {
   query: string;
   status: string;
-  sort: string;
-  descending: boolean;
   page: number;
   metrics: string[] | null;
   parameters?: string[];
@@ -21,8 +17,7 @@ export interface TableState {
 export const tableState = (): TableState => ({
   query: "",
   status: "all",
-  sort: "created_at",
-  descending: true,
+  ...runSortState(),
   page: 0,
   metrics: null,
 });
@@ -212,34 +207,27 @@ export function runTable(
   onCharts: () => void,
   onDetails: (run: Run) => void,
   state = tableState(),
-): HTMLElement {
+  session?: RunFilterSession,
+): HTMLElement & { destroy(): void } {
   const host = element("section", "browser-panel");
+  const filterSession = session ?? new RunFilterSession();
+  let destroyed = false;
+  let renderedRows: Run[] = [];
+  let renderedPending = false;
+  let renderedError = "";
   let selection = new Set(selectedIds);
   const runs = catalog.runs.filter((r) => r.experiment_id === experiment.id);
-  const runIds = new Set(runs.map((r) => r.id));
-  const summaries = new Map<string, Map<string, CatalogSeries>>();
-  for (const series of catalog.series) {
-    if (series.kind !== "metric" || !runIds.has(series.run_id)) continue;
-    let map = summaries.get(series.run_id);
-    if (!map) {
-      map = new Map();
-      summaries.set(series.run_id, map);
-    }
-    map.set(series.key, series);
-  }
+  filterSession.setRuns(
+    runs,
+    catalog,
+    catalog.rx?.id === experiment.id ? catalog.rx : undefined,
+  );
+  const { summaries, parameters, sort } = createRunOrder(runs, catalog.series);
   const keys = [
     ...new Set([...summaries.values()].flatMap((m) => [...m.keys()])),
   ].sort();
   if (state.metrics === null) state.metrics = keys.slice(0, 3);
   state.parameters ??= [];
-  const parameters = new Map(
-    runs.map((run) => [
-      run.id,
-      new Map(
-        scalarParameters(run.params).map((field) => [field.sourcePath, field]),
-      ),
-    ]),
-  );
   const parameterFields = new Map(
     [...parameters.values()].flatMap((fields) => [...fields]),
   );
@@ -354,7 +342,16 @@ export function runTable(
     },
     "text-link",
   );
-  tools.append(search, status, columns, selected, clear, chartButton);
+  const filterSlot = element("span", "run-filter-slot");
+  tools.append(
+    search,
+    filterSlot,
+    status,
+    columns,
+    selected,
+    clear,
+    chartButton,
+  );
   const wrap = element("div", "table-scroll run-table-scroll");
   wrap.tabIndex = 0;
   wrap.setAttribute("role", "region");
@@ -375,7 +372,9 @@ export function runTable(
   host.classList.add("run-browser");
   host.append(tools, wrap, footer);
   // "More below" tracks the native scroll viewport, not the page.
+  let belowFrame = 0;
   const updateBelow = () => {
+    if (destroyed) return;
     const hiddenPx = wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop;
     const rowHeight =
       body.querySelector("tr")?.getBoundingClientRect().height || 35;
@@ -384,7 +383,8 @@ export function runTable(
     below.textContent = `↓ ${rows} more below`;
   };
   wrap.addEventListener("scroll", updateBelow, { passive: true });
-  new ResizeObserver(updateBelow).observe(wrap);
+  const observer = new ResizeObserver(updateBelow);
+  observer.observe(wrap);
   // Fill exactly to the bottom of the viewport from wherever the panel starts.
   const fit = () => {
     if (!host.isConnected) {
@@ -395,7 +395,7 @@ export function runTable(
     host.style.setProperty("--run-browser-top", `${Math.max(0, top)}px`);
   };
   window.addEventListener("resize", fit);
-  requestAnimationFrame(fit);
+  const fitFrame = requestAnimationFrame(fit);
   function changed() {
     if (onSelection([...selection]) === false) selection = new Set(selectedIds);
     else selectedIds = [...selection];
@@ -403,39 +403,21 @@ export function runTable(
   }
   function visible() {
     const q = state.query.trim().toLowerCase();
-    return runs
-      .filter(
+    return sort(
+      runs.filter(
         (r) =>
+          filterSession.matches(r) &&
           (state.status === "all" || r.status === state.status) &&
           (!q ||
             `${r.name} ${JSON.stringify(r.params)} ${JSON.stringify(r.tags)}`
               .toLowerCase()
               .includes(q)),
-      )
-      .sort((a, b) => {
-        let result = 0;
-        if (state.sort === "name") result = a.name.localeCompare(b.name);
-        else if (state.sort === "status")
-          result = a.status.localeCompare(b.status);
-        else if (state.sort.startsWith("metric:")) {
-          const key = state.sort.slice(7),
-            av = summaries.get(a.id)?.get(key)?.last_value,
-            bv = summaries.get(b.id)?.get(key)?.last_value;
-          if (av == null) return bv == null ? 0 : 1;
-          if (bv == null) return -1;
-          result = av - bv;
-        } else if (state.sort.startsWith("parameter:")) {
-          const key = state.sort.slice(10);
-          return compareParameters(
-            parameters.get(a.id)?.get(key)?.value,
-            parameters.get(b.id)?.get(key)?.value,
-            state.descending,
-          );
-        } else result = a.created_at - b.created_at;
-        return (state.descending ? -1 : 1) * result;
-      });
+      ),
+      state,
+    );
   }
   function render() {
+    if (destroyed) return;
     // Filtering/sorting rebuilds the header and rows. Retain identity, not a detached
     // element or row index (names may repeat and sorting may change).
     const active = document.activeElement;
@@ -451,6 +433,9 @@ export function runTable(
         : undefined;
     let restoreFocus: HTMLElement | undefined;
     const rows = visible();
+    renderedRows = rows;
+    renderedPending = filterSession.pending > 0;
+    renderedError = filterSession.error;
     state.page = Math.min(
       state.page,
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
@@ -564,11 +549,13 @@ export function runTable(
       }
       body.append(tr);
     }
-    if (!rows.length) {
+    if (!rows.length && !filterSession.error) {
       const tr = element("tr");
       const td = cell(
         runs.length
-          ? "No runs match your filters."
+          ? filterSession.pending
+            ? ""
+            : "No runs match your filters."
           : "No runs in this experiment yet.",
         "empty-table",
       );
@@ -586,7 +573,8 @@ export function runTable(
     ]
       .filter(Boolean)
       .join(" · ");
-    requestAnimationFrame(updateBelow);
+    cancelAnimationFrame(belowFrame);
+    belowFrame = requestAnimationFrame(updateBelow);
     restoreFocus?.focus({ preventScroll: true });
   }
   search.oninput = () => {
@@ -599,6 +587,32 @@ export function runTable(
     state.page = 0;
     render();
   };
+  const filterControl = new RunFilterControl(filterSession, () => {
+    if (destroyed) return;
+    // Scan progress may change without changing any verified matches. Keep the
+    // table (and keyboard focus) intact until its actual row set changes.
+    const rows = visible();
+    if (
+      filterSession.error !== renderedError ||
+      filterSession.pending > 0 !== renderedPending ||
+      rows.length !== renderedRows.length ||
+      rows.some((run, index) => run !== renderedRows[index])
+    )
+      render();
+  });
+  filterSlot.append(filterControl.root);
   render();
-  return host;
+  return Object.assign(host, {
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      filterControl.destroy();
+      if (!session) filterSession.destroy();
+      observer.disconnect();
+      wrap.removeEventListener("scroll", updateBelow);
+      window.removeEventListener("resize", fit);
+      cancelAnimationFrame(fitFrame);
+      cancelAnimationFrame(belowFrame);
+    },
+  });
 }

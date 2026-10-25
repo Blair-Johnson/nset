@@ -4,6 +4,7 @@ import uPlot from "uplot";
 import { defaults, validateConfig, styleFor } from "./config";
 import {
   resolveOptions,
+  coordinateFormatter,
   formatDuration,
   resolveScale,
   rawMarkerOptions,
@@ -364,4 +365,19 @@ test("relative axes preserve explicit labels and numeric formatting overrides", 
     { axis: "relative" },
   );
   assert.deepEqual(axisValues(y, [0], 1), ["1970-01-01 00:00:00Z"]);
+});
+
+
+test("coordinate formatters share advanced notation with axes and fall back for static labels", () => {
+  const config = validateConfig({ xFormat: "fixed-2", yFormat: "scientific", advanced: {
+    axes: [{ values: "scientific" }, { values: "fixed-2" }],
+  } });
+  const opts = resolveOptions(config, 900, [{}]);
+  for (const [index, value] of [50, 75].entries()) {
+    assert.equal(coordinateFormatter(config, "step", index)(value),
+      (opts.axes![index].values as uPlot.Axis.DynamicValues)({} as uPlot, [value], index, 50, 25)[0]);
+  }
+  const labels = validateConfig({ xFormat: "fixed-2", advanced: { axes: [{ splits: [0, 100], values: ["low", "high"] }] } });
+  assert.equal(coordinateFormatter(labels, "step", 0)(50), "50.00");
+  assert.equal(coordinateFormatter(validateConfig({ advanced: { axes: [{ values: "number" }] } }), "timestamp", 0)(50), "50");
 });

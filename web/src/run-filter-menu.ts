@@ -2,13 +2,18 @@ import type { Run } from "./api";
 import { element } from "./utils";
 import { plotIcon } from "./plot-icons";
 import { attachSuggestions } from "./suggest";
+import { recordPath, validateRecordScalar } from "./records";
+import { parseFilterValue } from "./run-filter";
+import type { FieldPage } from "./run-filter-session";
 import {
   activeConditions,
   describeCondition,
   filterFields,
+  formatFilterValue,
   OPS,
   type FilterCondition,
   type FilterField,
+  type FilterOp,
   type MissingPolicy,
   type RunFilter,
 } from "./run-filter";
@@ -41,6 +46,21 @@ function displayValue(text: string): string {
   }
 }
 
+export interface FilterHintContext {
+  filter: RunFilter;
+  index: number;
+}
+
+/** Restrict the shared editor without attaching run-level matching/session state. */
+export interface FilterMenuOptions {
+  label?: string;
+  scope?: FilterCondition["scope"];
+  operators?: readonly FilterOp[];
+  maxConditions?: number;
+  livePaths?: boolean;
+  topLayer?: boolean;
+}
+
 /**
  * Filter icon + popover for building AND/OR conditions on nested run config
  * and tags. Calls onChange with a fresh filter whenever a condition changes.
@@ -51,21 +71,47 @@ export class RunFilterMenu {
   private readonly badge = element("span", "run-filter-badge");
   private readonly popover = element("div", "menu-popover run-filter-popover");
   private readonly list = element("div", "run-filter-conditions");
-  private readonly combine = element("select");
+  private readonly failure = element("div", "run-filter-failure");
+  private readonly error = element("p", "run-filter-error");
+  private readonly combine = element("select", "run-filter-combine");
   private fields: FilterField[] = [];
   private runs: Run[] = [];
+  private cleanups: (() => void)[] = [];
+  private destroyed = false;
+  private retryHints?: () => void;
+  private readonly lifetime = new AbortController();
 
   constructor(
     private filter: RunFilter,
     private readonly onChange: (filter: RunFilter) => void,
     private readonly count: (filter: RunFilter) => number,
+    private readonly events?: {
+      retry(): void;
+      discover(
+        prefix: string,
+        signal: AbortSignal,
+        more?: boolean,
+        context?: FilterHintContext,
+      ): Promise<FieldPage>;
+      values?(
+        path: string,
+        signal: AbortSignal,
+        context: FilterHintContext,
+      ): Promise<FieldPage>;
+      hintError?(message: string): void;
+    },
+    private readonly options: FilterMenuOptions = {},
   ) {
     this.root.dataset.menu = "run-filter";
-    this.summary.setAttribute("aria-label", "Filter runs by config or tags");
-    this.summary.title = "Filter runs by config values or tags";
+    this.summary.setAttribute(
+      "aria-label",
+      this.options.label ?? "Filter runs by config, tags or events",
+    );
+    this.summary.title =
+      this.options.label ?? "Filter runs by config values, tags or events";
     this.summary.append(plotIcon("filter"), this.badge);
     const head = element("div", "run-filter-head");
-    head.append(element("strong", "", "Filter runs"));
+    head.append(element("strong", "", this.options.label ?? "Filter runs"));
     this.combine.setAttribute("aria-label", "Combine conditions");
     for (const [value, label] of [
       ["all", "Match all (AND)"],
@@ -87,12 +133,19 @@ export class RunFilterMenu {
     const add = element("button", "run-filter-add", "+ Add condition");
     add.type = "button";
     add.onclick = () => {
+      if (
+        this.filter.conditions.length >=
+        (this.options.maxConditions ?? Infinity)
+      )
+        return;
       this.filter = {
         ...this.filter,
         conditions: [
           ...this.filter.conditions,
           {
-            scope: "params",
+            scope:
+              this.options.scope ??
+              (this.runs.some((run) => run.rx) ? "event" : "params"),
             path: "",
             op: "eq",
             value: "",
@@ -100,6 +153,7 @@ export class RunFilterMenu {
           },
         ],
       };
+      this.emit();
       this.render();
       this.list
         .querySelector<HTMLInputElement>(
@@ -116,9 +170,65 @@ export class RunFilterMenu {
     };
     const foot = element("div", "run-filter-foot");
     foot.append(add, clear);
-    this.popover.append(head, this.list, foot);
+    const retry = element("button", "text-link run-filter-retry", "Retry");
+    retry.type = "button";
+    retry.setAttribute("aria-label", "Retry filter search");
+    retry.onclick = () => this.events?.retry();
+    this.error.setAttribute("role", "status");
+    this.failure.hidden = true;
+    this.failure.append(this.error, retry);
+    this.popover.append(head, this.failure, this.list, foot);
     this.root.append(this.summary, this.popover);
+    if (this.options.topLayer) {
+      this.popover.setAttribute("popover", "manual");
+      this.popover.classList.add("run-filter-floating");
+      const position = () => {
+        if (!this.root.open) return;
+        const anchor = this.summary.getBoundingClientRect();
+        const box = this.popover.getBoundingClientRect();
+        this.popover.style.left = `${Math.max(12, Math.min(anchor.left, innerWidth - box.width - 12))}px`;
+        this.popover.style.top = `${Math.max(12, Math.min(anchor.bottom + 4, innerHeight - box.height - 12))}px`;
+      };
+      this.root.addEventListener(
+        "toggle",
+        () => {
+          if (this.root.open && this.root.isConnected) {
+            this.popover.showPopover();
+            position();
+          } else if (this.popover.matches(":popover-open"))
+            this.popover.hidePopover();
+        },
+        { signal: this.lifetime.signal },
+      );
+      const resize = new ResizeObserver(position);
+      resize.observe(this.popover);
+      this.lifetime.signal.addEventListener(
+        "abort",
+        () => resize.disconnect(),
+        { once: true },
+      );
+      window.addEventListener("resize", position, {
+        signal: this.lifetime.signal,
+      });
+      document.addEventListener("scroll", position, {
+        capture: true,
+        signal: this.lifetime.signal,
+      });
+      document.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (e.target instanceof Node && !this.root.contains(e.target))
+            this.root.open = false;
+        },
+        { signal: this.lifetime.signal },
+      );
+    }
     this.root.addEventListener("keydown", (e) => {
+      // A condition editor embedded in a form must never submit its host.
+      if (e.key === "Enter" && e.target instanceof HTMLInputElement) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       if (e.key === "Escape" && this.root.open) {
         e.preventDefault();
         e.stopPropagation();
@@ -131,15 +241,52 @@ export class RunFilterMenu {
 
   setRuns(runs: Run[]) {
     this.runs = runs;
+    this.summary.setAttribute(
+      "aria-label",
+      this.options.label ??
+        (runs.some((run) => run.rx)
+          ? "Filter runs by config, tags or events"
+          : "Filter runs by config or tags"),
+    );
     this.fields = filterFields(runs);
     this.render();
+  }
+
+  setFilter(filter: RunFilter) {
+    if (
+      this.destroyed ||
+      JSON.stringify(this.filter) === JSON.stringify(filter)
+    )
+      return;
+    this.filter = structuredClone(filter);
+    this.render();
+  }
+  setError(error: string) {
+    this.error.textContent = error ? `Filter failed: ${error}` : "";
+    this.failure.hidden = !error;
+  }
+
+  refreshHints() {
+    this.retryHints?.();
+  }
+
+  refreshCounts() {
+    if (!this.destroyed) this.updateCounts();
+  }
+  destroy() {
+    this.destroyed = true;
+    this.lifetime.abort();
+    if (this.popover.matches(":popover-open")) this.popover.hidePopover();
+    this.cleanups.splice(0).forEach((cleanup) => cleanup());
   }
 
   private fieldFor(c: FilterCondition) {
     return this.fields.find((f) => f.scope === c.scope && f.path === c.path);
   }
-  private fieldByLabel(label: string) {
-    return this.fields.find((f) => f.label === label.trim());
+  private fieldByLabel(label: string, event: boolean) {
+    return this.fields.find(
+      (f) => f.label === label.trim() && (f.scope === "event") === event,
+    );
   }
   label(c: FilterCondition) {
     return this.fieldFor(c)?.label ?? c.path;
@@ -161,7 +308,7 @@ export class RunFilterMenu {
         )
           .map((c) => describeCondition(c, this.label(c)))
           .join(this.filter.combine === "any" ? " OR " : " AND ")}`
-      : "Filter runs by config values or tags";
+      : (this.options.label ?? "Filter runs by config values, tags or events");
   }
   private updateCounts() {
     const rows = this.list.querySelectorAll<HTMLElement>(".run-filter-row");
@@ -179,6 +326,13 @@ export class RunFilterMenu {
   }
 
   private render() {
+    this.cleanups.splice(0).forEach((cleanup) => cleanup());
+    this.retryHints = undefined;
+    const add = this.root.querySelector<HTMLButtonElement>(".run-filter-add");
+    if (add)
+      add.disabled =
+        this.filter.conditions.length >=
+        (this.options.maxConditions ?? Infinity);
     this.combine.value = this.filter.combine;
     this.combine.disabled = this.filter.conditions.length < 2;
     this.list.replaceChildren();
@@ -187,7 +341,9 @@ export class RunFilterMenu {
         element(
           "p",
           "muted run-filter-empty",
-          "No conditions. Add one to filter on any config path (e.g. train.optim.lr) or tag.",
+          this.options.scope
+            ? "Add a condition."
+            : "Add a condition on run config, tags, or logged Event fields.",
         ),
       );
     this.filter.conditions.forEach((condition, index) => {
@@ -197,50 +353,227 @@ export class RunFilterMenu {
         conditions[index] = { ...conditions[index], ...patch };
         this.filter = { ...this.filter, conditions };
         this.emit();
-        if (rerender) this.render();
+        if (rerender) {
+          const label = document.activeElement?.getAttribute("aria-label");
+          this.render();
+          if (label)
+            [...this.list.querySelectorAll<HTMLElement>("[aria-label]")]
+              .find((node) => node.getAttribute("aria-label") === label)
+              ?.focus();
+        }
       };
+      const scope = element("select", "run-filter-scope");
+      scope.setAttribute("aria-label", `Condition ${index + 1} scope`);
+      for (const [key, label] of [
+        ["params", "Config"],
+        ["tags", "Tag"],
+        ["event", "Event"],
+      ]) {
+        if (this.options.scope && key !== this.options.scope) continue;
+        if (
+          key === "event" &&
+          !this.runs.some((run) => run.rx) &&
+          condition.scope !== "event"
+        )
+          continue;
+        const option = element("option", "", label);
+        option.value = key;
+        scope.append(option);
+      }
+      scope.value = condition.scope;
+      scope.disabled = !!this.options.scope;
+      scope.onchange = () => {
+        update(
+          {
+            scope: scope.value as FilterCondition["scope"],
+            path: "",
+            missing: "exclude",
+          },
+          true,
+        );
+        this.list
+          .querySelectorAll<HTMLInputElement>(".run-filter-path")
+          [index]?.focus();
+      };
+      const eventScope = condition.scope === "event";
       const path = element("input", "run-filter-path");
       path.type = "text";
-      path.placeholder = "config path or tag:key";
+      path.placeholder = eventScope
+        ? "metrics.accuracy"
+        : "config path or tag:key";
       path.setAttribute("aria-label", `Condition ${index + 1} path`);
       path.value = condition.path ? this.label(condition) : "";
       const commitPath = () => {
-        const field = this.fieldByLabel(path.value);
-        if (field) update({ scope: field.scope, path: field.path }, true);
-        else if (path.value.trim().startsWith("$"))
-          update({ scope: "params", path: path.value.trim() }, true);
-        else if (!path.value.trim()) update({ path: "" }, true);
+        path.setCustomValidity("");
+        const text = path.value.trim();
+        const field = this.fieldByLabel(text, eventScope);
+        if (field) {
+          scope.value = field.scope;
+          update({ scope: field.scope, path: field.path });
+        } else if (eventScope && text) {
+          try {
+            recordPath(text);
+            update({ path: text });
+          } catch (error) {
+            path.setCustomValidity(
+              error instanceof Error ? error.message : String(error),
+            );
+            path.reportValidity();
+          }
+        } else if (text.startsWith("$")) update({ path: text });
+        else if (!text) update({ path: "" });
         else {
-          path.setCustomValidity("Unknown path. Pick one from the suggestions.");
+          path.setCustomValidity(
+            "Unknown path. Pick one from the suggestions.",
+          );
           path.reportValidity();
         }
       };
       path.onchange = commitPath;
-      path.oninput = () => path.setCustomValidity("");
-      // Suggest config paths and tags; the hint shows a few values seen.
-      attachSuggestions(
-        path,
-        () =>
-          this.fields.map((f) => ({
+      path.oninput = () => {
+        path.setCustomValidity("");
+        if (this.options.livePaths) update({ path: path.value.trim() });
+      };
+      let pending: AbortController | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let version = 0,
+        ready = -1;
+      let inFlight: Promise<void> | undefined;
+      let eventFields: FilterField[] = [];
+      const suggestions = () => {
+        const query = path.value.trim().toLowerCase();
+        const fields = eventScope
+          ? eventFields
+          : this.fields.filter((f) => f.scope !== "event");
+        const rank = (f: FilterField) =>
+          f.label === path.value.trim()
+            ? 0
+            : f.label.toLowerCase() === query
+              ? 1
+              : f.label.toLowerCase().startsWith(query)
+                ? 2
+                : 3;
+        return [...fields]
+          .sort((a, b) => rank(a) - rank(b))
+          .map((f) => ({
             value: f.label,
-            detail: f.examples
-              .slice(0, 3)
-              .map(displayValue)
-              .join(", "),
-          })),
+            detail: `${f.scope === "event" ? `Event · ${f.types?.join("/") ?? ""} · ` : ""}${f.examples.slice(0, 3).map(displayValue).join(", ")}`,
+          }));
+      };
+      const adapter = attachSuggestions(
+        path,
+        suggestions,
         () => {
+          const completedVersion = version;
           commitPath();
-          // Picking a path moves on to the value, like completing a word.
-          requestAnimationFrame(() =>
-            this.list
-              .querySelectorAll<HTMLInputElement>(".run-filter-value")
-              [index]?.focus(),
-          );
+          requestAnimationFrame(() => {
+            if (
+              this.destroyed ||
+              document.activeElement !== path ||
+              version !== completedVersion
+            )
+              return;
+            const row =
+              this.list.querySelectorAll<HTMLElement>(".run-filter-row")[index];
+            const value =
+              row?.querySelector<HTMLInputElement>(".run-filter-value");
+            (value && !value.hidden
+              ? value
+              : row?.querySelector<HTMLSelectElement>(".run-filter-op")
+            )?.focus();
+          });
+        },
+        () => true,
+        () => {
+          if (eventScope && ready !== version) {
+            clearTimeout(timer);
+            return inFlight ?? (inFlight = discover());
+          }
         },
       );
+      const discover = async () => {
+        if (!this.events || !eventScope) return;
+        pending?.abort();
+        const abort = (pending = new AbortController());
+        const requested = version,
+          text = path.value.trim();
+        try {
+          const context = { filter: structuredClone(this.filter), index };
+          const page = await this.events.discover(
+            text,
+            abort.signal,
+            false,
+            context,
+          );
+          if (abort.signal.aborted || requested !== version || this.destroyed)
+            return;
+          this.events.hintError?.("");
+          eventFields = page.fields;
+          if (!this.events.values)
+            this.fields = [
+              ...this.fields.filter((f) => f.scope !== "event"),
+              ...eventFields,
+            ];
+          path.title = page.note;
+          ready = version;
+          adapter.refresh();
+        } catch (error) {
+          if (
+            !abort.signal.aborted &&
+            requested === version &&
+            !this.destroyed
+          ) {
+            path.title = "Hints unavailable; enter an exact path";
+            this.events?.hintError?.(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        } finally {
+          if (requested === version) {
+            inFlight = undefined;
+          }
+        }
+      };
+      const schedule = () => {
+        if (!eventScope) return;
+        version++;
+        this.retryHints = () => {
+          version++;
+          inFlight = discover();
+        };
+        pending?.abort();
+        clearTimeout(timer);
+        inFlight = undefined;
+        eventFields = [];
+        adapter.close();
+        timer = setTimeout(() => {
+          inFlight = discover();
+        }, 180);
+      };
+      path.addEventListener("input", schedule);
+      path.addEventListener("focus", schedule);
+      path.addEventListener("blur", () => {
+        pending?.abort();
+        clearTimeout(timer);
+        version++;
+        inFlight = undefined;
+      });
+      path.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.defaultPrevented) {
+          e.preventDefault();
+          commitPath();
+        }
+      });
+      this.cleanups.push(() => {
+        pending?.abort();
+        clearTimeout(timer);
+        adapter.dispose();
+      });
       const op = element("select", "run-filter-op");
       op.setAttribute("aria-label", `Condition ${index + 1} operator`);
       for (const o of OPS) {
+        if (this.options.operators && !this.options.operators.includes(o.op))
+          continue;
         const option = element("option", "", o.label);
         option.value = o.op;
         op.append(option);
@@ -253,17 +586,106 @@ export class RunFilterMenu {
       value.placeholder = "value";
       value.setAttribute("aria-label", `Condition ${index + 1} value`);
       value.value = condition.value;
-      value.hidden = condition.op === "exists";
-      const examples = this.fieldFor(condition)?.examples ?? [];
-      value.oninput = () => update({ value: value.value });
+      value.hidden = condition.op === "exists" || condition.op === "missing";
+      if (eventScope)
+        value.title = 'Typed JSON scalar; quote numeric strings ("0.001")';
+      const commitValue = () => {
+        value.setCustomValidity("");
+        if (eventScope) {
+          try {
+            validateRecordScalar(parseFilterValue(value.value));
+          } catch (error) {
+            value.setCustomValidity(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }
+        update({ value: value.value });
+      };
+      value.oninput = commitValue;
       const line = element("div", "run-filter-line");
-      line.append(path, op, value);
-      if (examples.length)
-        attachSuggestions(
-          value,
-          () => examples.map((text) => ({ value: displayValue(text) })),
-          () => update({ value: value.value }),
-        );
+      line.append(scope, path, op, value);
+      const values = attachSuggestions(
+        value,
+        () =>
+          (
+            (this.events?.values
+              ? valueFields.find(
+                  (f) => f.path === this.filter.conditions[index].path,
+                )
+              : this.fieldFor(this.filter.conditions[index])
+            )?.examples ?? []
+          ).map((text) => ({
+            value: eventScope
+              ? formatFilterValue(JSON.parse(text))
+              : displayValue(text),
+            detail: eventScope
+              ? JSON.parse(text) === null
+                ? "null"
+                : typeof JSON.parse(text)
+              : undefined,
+          })),
+        commitValue,
+        // Samples are not exhaustive. Never rewrite a complete typed scalar
+        // (e.g. 1 to the sampled 10); explicit highlighted picks still work.
+        () =>
+          !this.events?.values ||
+          (!!value.value.trim() &&
+            typeof parseFilterValue(value.value) === "string" &&
+            !value.value.trim().startsWith('"')),
+        () => (valueReady ? undefined : (valueFlight ??= discoverValues())),
+      );
+      let valueFields: FilterField[] = [];
+      let valuePending: AbortController | undefined;
+      let valueFlight: Promise<void> | undefined;
+      let valueReady = !this.events?.values;
+      const discoverValues = async () => {
+        if (!this.events?.values) return;
+        valuePending?.abort();
+        const abort = (valuePending = new AbortController());
+        const current = this.filter.conditions[index];
+        try {
+          const page = await this.events.values(current.path, abort.signal, {
+            filter: structuredClone(this.filter),
+            index,
+          });
+          if (abort.signal.aborted || this.destroyed) return;
+          this.events.hintError?.("");
+          valueFields = page.fields;
+          valueReady = true;
+          values.refresh();
+        } catch (error) {
+          if (!abort.signal.aborted && !this.destroyed) {
+            valueReady = true;
+            this.events.hintError?.(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        } finally {
+          if (!abort.signal.aborted) valueFlight = undefined;
+        }
+      };
+      value.addEventListener("focus", () => {
+        if (!this.events?.values) return;
+        valueReady = false;
+        // Never complete from another row's or a previous query's examples.
+        valueFields = [];
+        values.close();
+        this.retryHints = () => {
+          valueReady = false;
+          valueFlight = discoverValues();
+        };
+        valueFlight = discoverValues();
+      });
+      value.addEventListener("blur", () => {
+        valuePending?.abort();
+        valueFlight = undefined;
+        valueReady = !this.events?.values;
+      });
+      this.cleanups.push(() => {
+        valuePending?.abort();
+        values.dispose();
+      });
       const remove = element("button", "run-filter-remove", "×");
       remove.type = "button";
       remove.setAttribute("aria-label", `Remove condition ${index + 1}`);
@@ -294,8 +716,9 @@ export class RunFilterMenu {
       missing.onchange = () =>
         update({ missing: missing.value as MissingPolicy }, true);
       missingLabel.append(missing);
-      missingLine.append(missingLabel);
-      if (condition.missing === "default") {
+      if (!eventScope && condition.op !== "missing")
+        missingLine.append(missingLabel);
+      if (!eventScope && condition.missing === "default") {
         const fallback = element("input", "run-filter-fallback");
         fallback.type = "text";
         fallback.placeholder = "value";
@@ -307,8 +730,11 @@ export class RunFilterMenu {
         fallback.oninput = () => update({ fallback: fallback.value });
         missingLine.append(fallback);
       }
-      missingLine.append(element("span", "run-filter-count muted"));
-      row.append(line, missingLine);
+      row.append(line);
+      if (!eventScope) {
+        missingLine.append(element("span", "run-filter-count muted"));
+        row.append(missingLine);
+      }
       if (index > 0) {
         const joiner = element(
           "div",

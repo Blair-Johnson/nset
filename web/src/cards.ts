@@ -1,3 +1,5 @@
+import { nearestCrossingRuns, plottedSeries } from "./crossings";
+import { loadRecordPlot, recordConfig } from "./records";
 import {
   analyze,
   PlotPanel,
@@ -189,6 +191,7 @@ export class ChartCard {
   }
 
   private displayConfig(): ViewConfig {
+    if (this.spec.records) return recordConfig(withRunColors(this.spec.config, this.sources, this.context.catalog), this.spec.records);
     return withMetricLabel(
       withRunColors(this.spec.config, this.sources, this.context.catalog),
       this.spec.source,
@@ -197,7 +200,7 @@ export class ChartCard {
   }
   /** What the X axis shows; XY charts read X in metric units. */
   private xAxis(): XQuantity {
-    return this.spec.kind === "timeseries" && this.spec.x
+    return this.spec.kind === "timeseries" && (this.spec.x || this.spec.records)
       ? "metric"
       : this.spec.config.axis;
   }
@@ -550,26 +553,24 @@ export class ChartCard {
         this.mode = first ? "inspect" : "zoom";
         this.configure(false);
       },
-      onHover: (x) => {
+      onHover: (x, pointer) => {
         this.hover.replaceChildren();
-        if (x === null) return;
+        if (x === null || !pointer) return;
         this.lastHoverX = x;
         this.updateLegendReadout();
-        for (const [index, series] of this.data.slice(0, 3).entries()) {
+        const crossings = this.plot!.hoverCrossings(pointer, this.cursorAxis);
+        const rows = nearestCrossingRuns(crossings.rows,
+          (index) => this.sources[index]?.runId ?? this.data[index].run.id,
+          crossings.mouse);
+        for (const { index, positions } of rows) {
           const row = element("div", "card-hover-row");
-          const name = element("span", "", this.seriesLabel(index));
+          const name = element("span", "", this.sources[index]?.run.name ?? this.data[index].run.name);
           name.title = name.textContent ?? "";
-          row.append(name, element("span", "", this.number(series.fn.at(x))));
+          const values = positions.map(crossings.value).sort((a, b) => a - b)
+            .map((value) => this.cursorAxis === "x" ? this.number(value) : this.xText(value));
+          row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
           this.hover.append(row);
         }
-        if (this.data.length > 3)
-          this.hover.append(
-            element(
-              "div",
-              "card-hover-more",
-              `${this.data.length - 3} more in legend`,
-            ),
-          );
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
@@ -692,6 +693,7 @@ export class ChartCard {
     const mixed = new Set(this.sources.map((source) => source.key)).size > 1;
     this.legend.classList.toggle("card-legend-mixed", mixed);
     this.data.forEach((series, index) => {
+      if (!plottedSeries(series, config, index)) return;
       const style = styleFor(config, series.run.id, index);
       const item = element("span", "card-legend-item");
       item.setAttribute("role", "listitem");
@@ -733,6 +735,7 @@ export class ChartCard {
     return value === null ? "—" : formatValue(value, this.spec.config.yFormat);
   }
   private seriesLabel(index: number) {
+    if (this.spec.records) return this.data[index].run.name;
     const source = this.sources[index];
     if (!source) return this.data[index].run.name;
     const mixed = new Set(this.sources.map((item) => item.key)).size > 1;
@@ -950,17 +953,15 @@ export class ChartCard {
     }
     this.status.textContent = "Loading…";
     try {
-      const data = await loadPlotRuns(
-        sources,
-        this.context.store,
-        controller.signal,
-      );
+      const recordResult = this.spec.records ? await loadRecordPlot(this.context.api, this.spec.records, this.context.catalog, this.context.selectedRunIds, controller.signal) : undefined;
+      const data = recordResult?.data ?? await loadPlotRuns(sources, this.context.store, controller.signal);
       if (
         this.destroyed ||
         generation !== this.generation ||
         controller.signal.aborted
       )
         return;
+      if (recordResult) { this.notice.textContent = recordResult.warning; this.sources = recordResult.sources; }
       this.raw = data;
       this.data = analyze(data, this.spec.config);
       const display = this.displayConfig();

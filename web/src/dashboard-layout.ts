@@ -1,3 +1,4 @@
+import { uuid } from "./uuid";
 import { defaultSections } from "./workspace";
 import type { Catalog, ChartSpec, Workspace } from "./workspace-types";
 
@@ -17,7 +18,7 @@ export function addMissingCharts(workspace: Workspace, catalog: Catalog): void {
     );
     if (!missing.length) continue;
     for (const card of missing) {
-      if (cardIds.has(card.id)) card.id = crypto.randomUUID();
+      if (cardIds.has(card.id)) card.id = uuid();
       cardIds.add(card.id);
       existing.add(signature(card));
     }
@@ -26,7 +27,7 @@ export function addMissingCharts(workspace: Workspace, catalog: Catalog): void {
       workspace.sections.find((value) => value.title === section.title);
     if (target) target.cards.push(...missing);
     else {
-      if (sectionIds.has(section.id)) section.id = crypto.randomUUID();
+      if (sectionIds.has(section.id)) section.id = uuid();
       sectionIds.add(section.id);
       workspace.sections.push({ ...section, cards: missing });
     }

@@ -1,6 +1,8 @@
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { installMouseAxisTicks } from "./mouse-axis-ticks";
 import { type XY } from "./math";
+import { CrossingPath, crossingNeighbors, drawablePoint, markerEnabled, plottedSeries, type HoverCrossing } from "./crossings";
 import { analyze, xQuantity, type Analyzed, type PlotRun } from "./analysis";
 export { analyze, xQuantity, type Analyzed, type PlotRun };
 import {
@@ -12,10 +14,12 @@ import {
 import { extent, unionSorted } from "./utils";
 import {
   resolveOptions,
+  coordinateFormatter,
   fillColor,
   rawMarkerOptions,
   pairedVisibility,
   formatDuration,
+  formatXValue,
   type XQuantity,
 } from "./options";
 import { matchedPath } from "./matched-path";
@@ -48,6 +52,7 @@ function tracePath(
   style: { path: string; fill: number; fillTo?: number },
   yLog: boolean,
   param: "x" | "chord",
+  remember: (path: CrossingPath) => void,
 ): uPlot.Series.PathBuilder {
   const kind: TraceKind =
     style.path === "spline" ||
@@ -60,6 +65,8 @@ function tracePath(
     const project = (run: XY[]) =>
       run.map(([x, y]): XY => [u.valToPos(x, "x", true), u.valToPos(y, "y", true)]);
     const stroke = new Path2D();
+    const geometry = new CrossingPath(stroke);
+    remember(geometry);
     const fill = style.fill > 0 ? new Path2D() : null;
     const base = u.valToPos(
       style.fillTo ?? (yLog ? u.scales.y.min! : 0),
@@ -68,7 +75,7 @@ function tracePath(
     );
     for (const run of runs) {
       const px = project(run);
-      traceRun(stroke, px, kind, param);
+      traceRun(geometry, px, kind, param);
       if (fill && px.length > 1) {
         traceRun(fill, px, kind, param);
         fill.lineTo(px[px.length - 1][0], base);
@@ -89,6 +96,12 @@ export class PlotPanel {
   private resize: ResizeObserver;
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
+  private geometry: (CrossingPath | undefined)[] = [];
+  private markerShown: boolean[] = [];
+  private plotted: boolean[] = [];
+  private hoverPointer?: XY;
+  private hoverClient?: XY;
+  private mouseAxisTicks?: ReturnType<typeof installMouseAxisTicks>;
   private pinLabels: PinLabel[] = [];
   private pins: Pins = { a: null, b: null, threshold: null };
   constructor(
@@ -146,6 +159,12 @@ export class PlotPanel {
   }
 
   clear() {
+    this.hoverPointer = undefined;
+    this.hoverClient = undefined;
+    this.interaction?.onHover?.(null);
+    this.geometry = [];
+    this.markerShown = [];
+    this.mouseAxisTicks?.update(null);
     this.generation++;
     this.navigation?.destroy();
     this.navigation = undefined;
@@ -163,17 +182,98 @@ export class PlotPanel {
   }
   configureInteraction(options: PlotInteraction): void {
     this.interaction = { ...options };
-    if (this.navigation) this.navigation.configure(this.interaction);
+    const pointer = this.hoverPointer, client = this.hoverClient;
+    if (this.navigation) this.navigation.configure(this.navigationOptions());
     else this.attachNavigation();
+    this.hoverPointer = pointer;
+    this.hoverClient = client;
+    this.mouseAxisTicks?.update(pointer ?? null);
+    this.publishHover();
   }
   private attachNavigation() {
     if (!this.chart || !this.interaction || !readViewport(this.chart)) return;
     this.navigation = new PlotNavigation(
       this.chart,
-      this.interaction,
+      this.navigationOptions(),
       () => this.pins,
       (pin, value) => this.setPins({ ...this.pins, [pin]: value }),
     );
+  }
+  private navigationOptions(): PlotInteraction {
+    return {
+      ...this.interaction!,
+      onHover: (x, pointer) => {
+        this.hoverPointer = x === null ? undefined : pointer;
+        if (x === null) this.hoverClient = undefined;
+        this.mouseAxisTicks?.update(this.hoverPointer ?? null);
+        this.interaction?.onHover?.(x, pointer);
+      },
+    };
+  }
+  private publishHover() {
+    const u = this.chart;
+    if (!u || !this.hoverPointer) return;
+    const rect = u.over.getBoundingClientRect();
+    const p: XY = this.hoverClient ? [this.hoverClient[0] - rect.left, this.hoverClient[1] - rect.top] : this.hoverPointer;
+    this.hoverPointer = p;
+    this.mouseAxisTicks?.update(p);
+    if (p[0] < 0 || p[1] < 0 || p[0] > rect.width || p[1] > rect.height) {
+      this.hoverPointer = undefined;
+      this.hoverClient = undefined;
+      this.mouseAxisTicks?.update(null);
+      this.interaction?.onHover?.(null);
+      return;
+    }
+    this.interaction?.onHover?.(u.posToVal(p[0], "x"), p);
+  }
+  /** Crossing coordinates are device pixels for exact agreement with Canvas
+   * geometry and spline thinning. Formatting converts only the final neighbors. */
+  hoverCrossings(pointer: XY, axis: "x" | "y"): { rows: HoverCrossing[]; mouse: number; value: (p: number) => number } {
+    const u = this.chart, config = this.config;
+    if (!u || !config) return { rows: [], mouse: 0, value: (p) => p };
+    const free = axis === "x" ? "y" : "x";
+    const fixed = u.valToPos(u.posToVal(pointer[axis === "x" ? 0 : 1], axis), axis, true);
+    const mouse = u.valToPos(u.posToVal(pointer[axis === "x" ? 1 : 0], free), free, true);
+    const bounds: XY = free === "y" ? [u.bbox.top, u.bbox.top + u.bbox.height] : [u.bbox.left, u.bbox.left + u.bbox.width];
+    const level = u.posToVal(fixed, axis, true);
+    const rows: HoverCrossing[] = [];
+    this.analyzed.forEach((d, index) => {
+      if (!this.plotted[index] || u.series[2 * index + 1]?.show === false) return;
+      const style = styleFor(config, d.run.id, index);
+      const positions: number[] = [];
+      const add = (x: number, y: number) => {
+        if (!drawablePoint([x, y], config)) return;
+        const p = u.valToPos(free === "x" ? x : y, free, true);
+        if (Number.isFinite(p) && p >= bounds[0] - 1e-7 && p <= bounds[1] + 1e-7) positions.push(p);
+      };
+      if (style.width > 0 || style.fill > 0) {
+        if (!d.x && style.path === "matched" && d.points.length > 1) {
+          // Matched curves use the existing exact native interpolation/root
+          // semantics, not the adaptive display's approximation vertices.
+          if (axis === "x") {
+            const y = d.fn.at(level);
+            if (y !== null) add(level, y);
+          } else {
+            const roots = d.fn.crossings(level);
+            roots.points.forEach((x) => add(x, level));
+            for (const [a, b] of roots.plateaus) {
+              const lo = Math.max(Math.min(a, b), u.scales.x.min!);
+              const hi = Math.min(Math.max(a, b), u.scales.x.max!);
+              if (lo <= hi) add(Math.max(lo, Math.min(hi, u.posToVal(mouse, "x", true))), level);
+            }
+          }
+        } else {
+          for (const position of this.geometry[index]?.crossings(axis, fixed, mouse, bounds) ?? []) positions.push(position);
+        }
+      }
+      const markers = markerEnabled(config, d.run.id, index) && this.markerShown[2 * index + 2] && u.series[2 * index + 2]?.show !== false ? d.observations : [];
+      const singleton = d.points.length === 1 && this.markerShown[2 * index + 1] && (style.markers?.size ?? style.pointSize) > 0 ? d.points : [];
+      for (const [x, y] of [...markers, ...singleton]) {
+        if (drawablePoint([x, y], config) && Math.abs(u.valToPos(axis === "x" ? x : y, axis, true) - fixed) <= 1e-7) add(x, y);
+      }
+      if (positions.length) rows.push({ index, positions: crossingNeighbors(positions, mouse) });
+    });
+    return { rows, mouse, value: (p) => u.posToVal(p, free, true) };
   }
   private restoreNavigation(snapshot: NavigationSnapshot) {
     this.navigation?.restore(snapshot);
@@ -214,6 +314,7 @@ export class PlotPanel {
     pins: Pins,
     options: { preserveView?: boolean; initialView?: Viewport | null } = {},
   ) {
+    const hoverPointer = this.hoverPointer, hoverClient = this.hoverClient;
     // Same axes, different settings: keep the user's camera (and back-history).
     const sameAxes =
       !!this.chart &&
@@ -240,6 +341,7 @@ export class PlotPanel {
     const xy = quantity === "metric";
     const valid = (x: number, y: number | null) =>
       y !== null &&
+      Number.isFinite(x) &&
       Number.isFinite(y) &&
       (config.xScale !== "log" || x > 0) &&
       (config.yScale !== "log" || y > 0)
@@ -313,6 +415,7 @@ export class PlotPanel {
       }
     };
     const rawEnabled: boolean[] = [];
+    const geometry: (CrossingPath | undefined)[] = [];
     if ((config.advanced.legend as { live?: boolean } | undefined)?.live)
       warnings.push(
         "Live hover legend reports the nearest aligned observation-grid point, not an exact interpolated cursor value. The pinned inspector remains authoritative.",
@@ -388,6 +491,7 @@ export class PlotPanel {
                   s,
                   config.yScale === "log",
                   xy ? "chord" : "x",
+                  (path) => { geometry[i] = path; },
                 ),
         spanGaps: false,
         points: { ...rawMarkerOptions(s), show: d.points.length === 1 },
@@ -419,12 +523,27 @@ export class PlotPanel {
       return;
     }
     let visibilityChanges = 0;
+    const markerShown: boolean[] = [];
     const opts = resolveOptions(
       config,
       this.host.clientWidth,
       series,
       {
+      init: [
+        (u) => u.series.forEach((series, index) => {
+          if (!index || !series.points) return;
+          const show = series.points.show;
+          // Capture the renderer's actual density decision, not permission in
+          // the config. Recomputed on every draw (including zoom and resize).
+          series.points.show = (...args) => {
+            const visible = typeof show === "function" ? show(...args) : show;
+            markerShown[index] = !!visible;
+            return visible;
+          };
+        }),
+      ],
       draw: [
+        (u) => { if (this.chart === u) this.publishHover(); },
         (u) =>
           this.drawPins(
             u,
@@ -447,6 +566,13 @@ export class PlotPanel {
             });
           let down: { x: number; y: number; distance: number } | undefined;
           const moved = (e: PointerEvent) => {
+            const rect = u.over.getBoundingClientRect();
+            const pointer: XY = [e.clientX - rect.left, e.clientY - rect.top];
+            if (this.chart === u) {
+              this.hoverClient = [e.clientX, e.clientY];
+              if (!this.interaction) this.hoverPointer = pointer;
+            }
+            mouseAxisTicks.update(pointer);
             if (down)
               down.distance = Math.max(
                 down.distance,
@@ -462,6 +588,11 @@ export class PlotPanel {
             down = undefined;
           });
           u.over.addEventListener("pointerleave", () => {
+            mouseAxisTicks.update(null);
+            if (this.chart === u) {
+              this.hoverPointer = undefined;
+              this.hoverClient = undefined;
+            }
             down = undefined;
           });
           u.over.addEventListener("pointerup", (e) => {
@@ -487,6 +618,10 @@ export class PlotPanel {
       },
       quantity,
     );
+    const mouseAxisTicks = installMouseAxisTicks(opts, {
+      x: coordinateFormatter(config, quantity, 0),
+      y: coordinateFormatter(config, quantity, 1),
+    });
     if (this.fillHost) {
       opts.width = Math.max(1, this.host.clientWidth);
       opts.height = Math.max(100, this.host.clientHeight);
@@ -552,6 +687,10 @@ export class PlotPanel {
     this.chart?.destroy();
     this.host.replaceChildren(...staging.childNodes);
     this.chart = candidate;
+    this.mouseAxisTicks = mouseAxisTicks;
+    this.geometry = geometry;
+    this.markerShown = markerShown;
+    this.plotted = data.map((d, i) => plottedSeries(d, config, i));
     this.config = config;
     this.analyzed = data;
     this.pins = pins;
@@ -563,6 +702,10 @@ export class PlotPanel {
         options.initialView,
       );
     this.interaction?.onViewChange?.();
+    this.hoverPointer = hoverPointer;
+    this.hoverClient = hoverClient;
+    this.mouseAxisTicks.update(hoverPointer ?? null);
+    this.publishHover();
     publishWarnings();
   }
   private drawPins(

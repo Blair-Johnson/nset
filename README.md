@@ -37,6 +37,14 @@ Open `http://127.0.0.1:8080` and enter the same token. Use at least 40 character
 
 Use `--host 0.0.0.0` for remote clients, with HTTPS or a secure tunnel on untrusted networks. `--log-level debug` enables diagnostic logs. Run `./target/release/nset serve --help` for other options.
 
+## Read local rx records
+
+Add `--rx-repo /path/to/repository` to `nset serve` to browse that repository’s recorded structured events alongside native data. The repository appears as a read-only source; Git worktrees resolve to their shared repository storage.
+
+Select runs, open Charts, and add an **rx records** chart. Enter a numeric X field and add Y fields with Tab completion. **Filter records** selects observations within those runs; **Group by** separates curves using a scalar field on each record. For example, filter `kind = "epoch"`, choose X `epoch`, and add `train_loss` and `val_loss`. Use `metrics.loss` for a nested field and `$["metrics.loss"]` for a literal dotted key. **Inspect records** pages through the underlying JSON.
+
+Charts retain fractional, repeated, and restarted X coordinates in event order. Preview notes show sampled discovery coverage, skipped values, and query limits. Refresh reads a new committed snapshot. The database is opened read-only; normal SQLite WAL/shared-memory reader coordination is allowed. Permission or recovery failures are reported without a writable fallback. Inspection pages assume append-only event sequences and detect database replacement; in-place edits are not frozen across pages. Numeric axes use finite double precision; the filter editor rejects unsafe integers rather than rounding them.
+
 ## Log data
 
 Install the native client in your training environment from this checkout:

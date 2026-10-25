@@ -1,12 +1,15 @@
-import type { Run } from "./api";
+import type { Api, Run } from "./api";
 import type { Catalog } from "./workspace-types";
 import { runSwatch } from "./run-drawer";
 import { element } from "./utils";
 import { configJSON, configType, renderRunConfig } from "./run-config";
 import { plotIcon } from "./plot-icons";
 import "./run-detail.css";
+import { attachEventConfig } from "./run-event-config";
 
 export interface RunDetailOptions {
+  api?: Api;
+  signal?: AbortSignal;
   onBack: () => void;
   catalog?: Catalog;
   /** Open the charts view showing only this run. */
@@ -47,7 +50,7 @@ export function renderRunDetail(
   back.onclick = options.onBack;
   const name = element("h1", "", run.name || run.id);
   name.title = run.name || run.id;
-  const status = element("span", `run-detail-status ${run.status}`, run.status);
+  const status = element("span", `run-detail-status ${run.status}`, run.rx?.state ?? run.status);
   header.append(back);
   if (options.catalog) header.append(runSwatch(options.catalog, run.id));
   header.append(name, status);
@@ -104,7 +107,7 @@ export function renderRunDetail(
   const renderTags = (error = "") => {
     tags.replaceChildren(element("h2", "", "Tags"));
     const entries = Object.entries(current.tags);
-    if (!entries.length && !options.onTags)
+    if (!entries.length && (!options.onTags || current.rx))
       tags.append(element("span", "muted", "No tags"));
     for (const [key, value] of entries) {
       const tag = element("span", "run-detail-tag");
@@ -113,7 +116,7 @@ export function renderRunDetail(
         element("code", "", configJSON(value)),
       );
       tag.title = `${key} (${configType(value)})`;
-      if (options.onTags) {
+      if (options.onTags && !current.rx) {
         const edit = iconButton("tag", `Edit tag ${key}`);
         edit.classList.add("run-detail-tag-action");
         edit.onclick = () => openEditor(key, value);
@@ -126,7 +129,7 @@ export function renderRunDetail(
       }
       tags.append(tag);
     }
-    if (options.onTags) {
+    if (options.onTags && !current.rx) {
       const addTag = element("button", "run-detail-tag-add", "+ Add tag");
       addTag.type = "button";
       addTag.onclick = () => openEditor("", "");
@@ -191,6 +194,8 @@ export function renderRunDetail(
     (key ? valueInput : keyInput).focus();
   };
   renderTags();
-  page.append(header, metadata, tags, renderRunConfig(run.params, run.id));
+  const config = renderRunConfig(run.params, run.id);
+  if (run.rx && options.api) attachEventConfig(config, options.api, run.rx, options.signal);
+  page.append(header, metadata, tags, config);
   return page;
 }

@@ -1,3 +1,5 @@
+import { uuid } from "./uuid";
+import { appendRxCatalog } from "./records";
 import "./style.css";
 import { Api, type Run } from "./api";
 import { element, message, isAbort } from "./utils";
@@ -28,6 +30,7 @@ import { openChartEditor } from "./chart-editor";
 import { experimentTable, runTable, tableState } from "./browser-tables";
 import { renderRunDetail } from "./run-detail";
 import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
+import { RunFilterSession } from "./run-filter-session";
 import { createDashboardControls } from "./workspace-controls";
 import { dashboardSettings, withDashboardSettings } from "./workspace-settings";
 import type { DashboardControls } from "./dashboard-controls";
@@ -49,13 +52,50 @@ let library: WorkspaceLibrary = {
 let catalogGeneration = 0;
 let request: AbortController | undefined;
 let connected = false;
+let catalogRefreshing = false;
 let currentWorkspaceId = "";
 let chartSearch = "";
 let activeEditor: { close: () => void } | undefined;
 const experimentState = tableState();
 const drawerStates = new Map<string, ReturnType<typeof runDrawerState>>();
+const runFilterSessions = new Map<string, RunFilterSession>();
+let cleanupRunTable: (() => void) | undefined;
 let runDrawer: RunDrawer | undefined;
+function filterSessionFor(experimentId: string) {
+  let session = runFilterSessions.get(experimentId);
+  if (!session) {
+    session = new RunFilterSession(undefined, api, () => void connect(true));
+    runFilterSessions.set(experimentId, session);
+  }
+  session.setRuns(
+    catalog.runs.filter((run) => run.experiment_id === experimentId),
+    catalog,
+    catalog.rx?.id === experimentId ? catalog.rx : undefined,
+  );
+  if (catalogRefreshing && !session.refreshing) session.invalidate();
+  return session;
+}
+function refreshRunFilterSessions() {
+  for (const experimentId of runFilterSessions.keys())
+    filterSessionFor(experimentId);
+}
+function disposeRunTable() {
+  cleanupRunTable?.();
+  cleanupRunTable = undefined;
+}
+function disposeRunFilterSessions() {
+  for (const session of runFilterSessions.values()) session.destroy();
+  runFilterSessions.clear();
+}
 const runStates = new Map<string, ReturnType<typeof tableState>>();
+function runStateFor(experimentId: string) {
+  let state = runStates.get(experimentId);
+  if (!state) {
+    state = tableState();
+    runStates.set(experimentId, state);
+  }
+  return state;
+}
 const undo = new Map<string, Workspace[]>();
 const cards = new Map<
   string,
@@ -304,12 +344,20 @@ function viewSwitch(experimentId: string, view: "runs" | "charts" | null) {
   }
   return group;
 }
+let detailRequest: AbortController | undefined;
 function renderPage() {
+  detailRequest?.abort();
+  detailRequest = undefined;
   if (!connected) return;
+  disposeRunTable();
   activeEditor?.close();
   activeEditor = undefined;
   if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
   const route = currentRoute();
+  for (const [id, session] of runFilterSessions) {
+    session.setActive(false);
+    if (id === route.experimentId && route.view !== "detail") session.setActive(true);
+  }
   const key = location.hash;
   const routeChanged = key !== previousRoute;
   previousRoute = key;
@@ -341,18 +389,26 @@ function renderPage() {
         (r) => r.id === route.runId && r.experiment_id === experiment.id,
       );
       pageHeader(experiment.id, "runs");
+      detailRequest = new AbortController();
       const detail = run
         ? renderRunDetail(run, {
             catalog,
+            api,
+            signal: detailRequest.signal,
             onBack: () => navigate(experiment.id),
             onCharts: () => {
               if (updateSelection(workspace, [run.id]))
                 navigate(experiment.id, "charts");
             },
             onTags: async (patch) => {
+              const generation = catalogGeneration;
               const updated = await api.patchRun(run.id, { tags: patch });
-              const index = catalog.runs.findIndex((r) => r.id === run.id);
-              if (index >= 0) catalog.runs[index] = updated;
+              if (generation !== catalogGeneration || !connected) return updated;
+              catalog = {
+                ...catalog,
+                runs: catalog.runs.map((r) => (r.id === run.id ? updated : r)),
+              };
+              refreshRunFilterSessions();
               return updated;
             },
           })
@@ -365,11 +421,6 @@ function renderPage() {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
       else suspendDashboard();
-      let state = runStates.get(experiment.id);
-      if (!state) {
-        state = tableState();
-        runStates.set(experiment.id, state);
-      }
       pageHeader(experiment.id, "runs");
       const table = runTable(
         catalog,
@@ -378,11 +429,32 @@ function renderPage() {
         (ids) => updateSelection(workspace, ids),
         () => navigate(experiment.id, "charts"),
         openRun,
-        state,
+        runStateFor(experiment.id),
+        filterSessionFor(experiment.id),
       );
+      cleanupRunTable = () => table.destroy();
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
+      if (catalog.rx?.id === experiment.id && (catalog.rx.error || catalog.rx.nextAfter != null)) {
+        const note = element("div", "table-toolbar");
+        if (catalog.rx.error) note.append(element("span", "muted", catalog.rx.error));
+        if (catalog.rx.nextAfter != null) {
+          const more = button("Load more rx runs", async () => {
+            more.disabled = true;
+            const generation = catalogGeneration;
+            try {
+              const next = await appendRxCatalog(api, structuredClone(catalog), undefined, catalog.rx!.nextAfter!);
+              if (generation !== catalogGeneration || !connected) return;
+              catalog = next;
+              refreshRunFilterSessions();
+              renderPage();
+            } catch (e) { error(`Could not load rx runs: ${message(e)}`); more.disabled = false; }
+          });
+          note.append(more);
+        }
+        table.prepend(note);
+      }
       $("page").replaceChildren(table);
     } else {
       pageHeader(experiment.id, "charts");
@@ -415,6 +487,8 @@ function renderPage() {
           (ids) => updateSelection(workspace, ids),
           () => navigate(experiment.id),
           openRun,
+          filterSessionFor(experiment.id),
+          runStateFor(experiment.id),
         );
         layout.append(runDrawer.backdrop, runDrawer.pane, grid);
         $("page").append(tools, layout);
@@ -464,7 +538,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
             );
             if (!section) {
               section = {
-                id: crypto.randomUUID(),
+                id: uuid(),
                 title: "Custom charts",
                 collapsed: false,
                 cards: [],
@@ -501,7 +575,7 @@ async function ask(
   const dialog = element("dialog", "small-dialog");
   const form = element("form");
   const heading = element("h2", "", title);
-  heading.id = `dialog-${crypto.randomUUID()}`;
+  heading.id = `dialog-${uuid()}`;
   dialog.setAttribute("aria-labelledby", heading.id);
   const field = element("label", "field");
   const input = element("input");
@@ -680,7 +754,7 @@ function workspaceToolbar(workspace: Workspace) {
         // The new view takes the current (possibly modified) layout; the
         // original goes back to its last saved layout instead of keeping edits.
         const copy = structuredClone(workspace);
-        copy.id = crypto.randomUUID();
+        copy.id = uuid();
         copy.name = name;
         copy.updatedAt = Date.now();
         const saved = baselineFor(workspace);
@@ -727,7 +801,7 @@ function workspaceToolbar(workspace: Workspace) {
         if (title)
           change(workspace, () =>
             workspace.sections.push({
-              id: crypto.randomUUID(),
+              id: uuid(),
               title,
               collapsed: false,
               cards: [],
@@ -761,7 +835,7 @@ function workspaceToolbar(workspace: Workspace) {
         throw new Error(
           "This view belongs to an experiment that is not on this server.",
         );
-      imported.id = crypto.randomUUID();
+      imported.id = uuid();
       if (
         !commitLibrary(() => {
           library.views.push(imported);
@@ -1142,7 +1216,7 @@ function renderCharts(workspace: Workspace) {
               const found = locate(workspace, id);
               if (found) {
                 const copy = structuredClone(found.card);
-                copy.id = crypto.randomUUID();
+                copy.id = uuid();
                 copy.title += " copy";
                 found.section.cards.splice(found.index + 1, 0, copy);
               }
@@ -1316,6 +1390,8 @@ function applyChartFilter(workspace: Workspace) {
 }
 
 async function connect(refresh = false) {
+  catalogRefreshing = true;
+  for (const session of runFilterSessions.values()) session.invalidate();
   const generation = ++catalogGeneration;
   request?.abort();
   request = new AbortController();
@@ -1332,6 +1408,8 @@ async function connect(refresh = false) {
     if (generation !== catalogGeneration || signal.aborted) return;
     store.clear();
     catalog = next;
+    catalogRefreshing = false;
+    refreshRunFilterSessions();
     connected = true;
     sessionStorage.setItem("nset.token", token);
     $("connection").textContent = "Connected";
@@ -1342,8 +1420,11 @@ async function connect(refresh = false) {
       const workspace = workspaceFor(currentRoute().experimentId);
       renderCharts(workspace);
     } else renderPage();
+    if (catalog.rx?.error) error(catalog.rx.error);
   } catch (e) {
     if (isAbort(e) || generation !== catalogGeneration) return;
+    catalogRefreshing = false;
+    for (const session of runFilterSessions.values()) session.invalidate(message(e));
     if (connected)
       error(`Could not refresh. Previous data is still shown. ${message(e)}`);
     else {
@@ -1368,14 +1449,21 @@ $("login-form").onsubmit = (e) => {
 };
 $("refresh").onclick = () => void connect(true);
 $("logout").onclick = () => {
+  detailRequest?.abort();
+  detailRequest = undefined;
   catalogGeneration++;
   request?.abort();
   activeEditor?.close();
   activeEditor = undefined;
+  disposeRunTable();
   disposeCards();
+  disposeRunFilterSessions();
+  drawerStates.clear();
+  runStates.clear();
   store.clear();
   token = "";
   connected = false;
+  catalogRefreshing = false;
   sessionStorage.removeItem("nset.token");
   catalog = { experiments: [], runs: [], series: [] };
   $("connection").textContent = "Disconnected";
@@ -1423,8 +1511,12 @@ document.addEventListener(
   true,
 );
 window.addEventListener("beforeunload", () => {
+  detailRequest?.abort();
+  detailRequest = undefined;
   request?.abort();
+  disposeRunTable();
   disposeCards();
+  disposeRunFilterSessions();
   store.clear();
 });
 try {

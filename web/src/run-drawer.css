@@ -163,6 +163,47 @@
 .run-filter-slot {
   display: contents;
 }
+.run-filter-control {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.run-filter-progress {
+  position: absolute;
+  inset: auto 0 0 auto;
+  width: 12px;
+  height: 12px;
+  line-height: 12px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 11px;
+  text-align: center;
+}
+.run-filter-progress:empty {
+  display: none;
+}
+.run-filter-failure {
+  padding: 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 5px;
+}
+.run-filter-failure[hidden] {
+  display: none;
+}
+.run-filter-error {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.run-filter-scope {
+  flex: 0 0 auto;
+  width: auto !important;
+  max-width: 80px;
+}
 .run-filter-menu {
   flex: none;
 }
@@ -219,6 +260,14 @@
   flex-direction: column;
   gap: 8px;
   font-size: 12px;
+}
+/* Opt-in top layer for hosts with a scrolling/clipping settings column. */
+.run-filter-popover.run-filter-floating {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
 }
 .run-filter-menu:not([open]) > .run-filter-popover {
   display: none;
