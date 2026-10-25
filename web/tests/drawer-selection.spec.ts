@@ -259,12 +259,12 @@ test("selected-only deselection focuses next, previous, then toggle when empty",
   await toggle(page).click();
   await choice(page, 10).focus();
   await choice(page, 10).press("Space");
-  await expect(choice(page, 20)).toBeFocused();
+  await expect(choice(page, 0)).toBeFocused();
   await expect(toggle(page)).toHaveText("Selected (11)");
   await expect(visibleRows(page)).toHaveCount(11);
-  await choice(page, 110).focus();
-  await choice(page, 110).press("Space");
-  await expect(choice(page, 100)).toBeFocused();
+  await choice(page, 0).focus();
+  await choice(page, 0).press("Space");
+  await expect(choice(page, 20)).toBeFocused();
   await expect(toggle(page)).toHaveText("Selected (10)");
   while (await visibleRows(page).count()) {
     const first = visibleRows(page).first().getByRole("checkbox");
@@ -426,7 +426,7 @@ for (const width of [1440, 390]) {
     await choice(page, 100).focus();
     await choice(page, 100).press("Space");
     steps++;
-    await expect(choice(page, 110)).toBeFocused();
+    await expect(choice(page, 90)).toBeFocused();
     await expect(visibleRows(page)).toHaveCount(11);
     await expect(toggle(page)).toHaveText("Selected (11)");
     expect((await savedSelection(page)).sort()).toEqual(

@@ -422,6 +422,17 @@ for (const teardown of ["logout", "beforeunload"] as const) {
         .catch(() => {});
       return true;
     });
+    const idle = await geometry();
+    if (surface === "drawer") {
+      expect(idle.status).not.toBeNull();
+      expect(idle.control.x + idle.control.width + 6).toBeLessThanOrEqual(
+        idle.status!.x,
+      );
+      expect(idle.status!.x + idle.status!.width).toBeLessThanOrEqual(
+        idle.toolbar.x + idle.toolbar.width,
+      );
+    }
+    await capture("idle");
     try {
       await addEvent(page, "metrics.loss", "lt", "0.5");
       await expect.poll(() => !!release).toBe(true);
@@ -717,13 +728,28 @@ for (const surface of ["table", "drawer"] as const) {
           control: rect(control),
           toolbar: rect(toolbar),
           search: rect(toolbar.querySelector('input[type="search"]')!),
+          status: toolbar.querySelector(":scope > select")
+            ? rect(toolbar.querySelector(":scope > select")!)
+            : null,
         };
       });
+    const idle = await geometry();
+    if (surface === "drawer") {
+      expect(idle.status).not.toBeNull();
+      expect(idle.control.x + idle.control.width + 6).toBeLessThanOrEqual(
+        idle.status!.x,
+      );
+      expect(idle.status!.x + idle.status!.width).toBeLessThanOrEqual(
+        idle.toolbar.x + idle.toolbar.width,
+      );
+    }
+    await capture("idle");
     try {
       await addEvent(page, "metrics.loss", "lt", "0.5");
       await menu(page).locator("summary").click();
       await expect(menu(page).locator(".run-filter-progress")).toHaveText("…");
       const loading = await geometry();
+      expect(loading).toEqual(idle);
       await capture("loading");
       release();
       await expect(menu(page).locator(".run-filter-progress")).toHaveText("!");
@@ -816,7 +842,11 @@ for (const surface of ["table", "drawer"] as const) {
       await capture("success");
       await writeFile(
         join(evidence, `${surface}-geometry.json`),
-        JSON.stringify({ loading, failed, success, popupGeometry }, null, 2),
+        JSON.stringify(
+          { idle, loading, failed, success, popupGeometry },
+          null,
+          2,
+        ),
       );
       expect(await selected(page)).toEqual([id(3)]);
     } finally {

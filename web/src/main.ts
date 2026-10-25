@@ -87,6 +87,14 @@ function disposeRunFilterSessions() {
   runFilterSessions.clear();
 }
 const runStates = new Map<string, ReturnType<typeof tableState>>();
+function runStateFor(experimentId: string) {
+  let state = runStates.get(experimentId);
+  if (!state) {
+    state = tableState();
+    runStates.set(experimentId, state);
+  }
+  return state;
+}
 const undo = new Map<string, Workspace[]>();
 const cards = new Map<
   string,
@@ -412,11 +420,6 @@ function renderPage() {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
       else suspendDashboard();
-      let state = runStates.get(experiment.id);
-      if (!state) {
-        state = tableState();
-        runStates.set(experiment.id, state);
-      }
       pageHeader(experiment.id, "runs");
       const table = runTable(
         catalog,
@@ -425,7 +428,7 @@ function renderPage() {
         (ids) => updateSelection(workspace, ids),
         () => navigate(experiment.id, "charts"),
         openRun,
-        state,
+        runStateFor(experiment.id),
         filterSessionFor(experiment.id),
       );
       cleanupRunTable = () => table.destroy();
@@ -484,6 +487,7 @@ function renderPage() {
           () => navigate(experiment.id),
           openRun,
           filterSessionFor(experiment.id),
+          runStateFor(experiment.id),
         );
         layout.append(runDrawer.backdrop, runDrawer.pane, grid);
         $("page").append(tools, layout);

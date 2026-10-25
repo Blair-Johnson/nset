@@ -1,6 +1,7 @@
 import "./run-drawer.css";
 import type { Catalog } from "./workspace-types";
 import type { Run } from "./api";
+import { createRunOrder, runSortState, type RunSortState } from "./run-order";
 import { element } from "./utils";
 import { runColorButton } from "./run-color-picker";
 import { RunFilterControl, RunFilterSession } from "./run-filter-session";
@@ -90,6 +91,8 @@ export class RunDrawer {
   >();
   private readonly narrow = matchMedia("(max-width: 760px)");
   private catalog?: Catalog;
+  private order?: ReturnType<typeof createRunOrder>;
+  private runs: Run[] = [];
   private selected = new Set<string>();
   private previousFocus?: HTMLElement;
   private drag?: { pointerId: number; startX: number; width: number };
@@ -114,6 +117,7 @@ export class RunDrawer {
     onTable: () => void,
     private readonly onDetails: (run: Run) => void,
     session?: RunFilterSession,
+    private readonly sortState: RunSortState = runSortState(),
   ) {
     this.ownsSession = !session;
     this.session = session ?? new RunFilterSession(state.filter);
@@ -457,6 +461,8 @@ export class RunDrawer {
       const runs = catalog.runs.filter(
         (run) => run.experiment_id === this.experimentId,
       );
+      this.runs = runs;
+      this.order = createRunOrder(runs, catalog.series);
       const keep = new Set(runs.map((run) => run.id));
       for (const [id, row] of this.rows)
         if (!keep.has(id)) {
@@ -505,8 +511,25 @@ export class RunDrawer {
       );
       this.list.scrollTop = this.state.scrollTop;
     }
-    for (const [id, row] of this.rows)
+    // Always start from catalog order so ties never inherit a previous sort.
+    // Reuse keyed rows, including when a suspended dashboard resumes with the
+    // same catalog but a different table sort.
+    const ordered = (this.order?.sort(this.runs, this.sortState) ?? []).map(
+      (run) => [run.id, this.rows.get(run.id)!] as const,
+    );
+    const focused = this.list.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement)
+      : undefined;
+    this.rows.clear();
+    let next = this.list.firstElementChild;
+    for (const [id, row] of ordered) {
+      this.rows.set(id, row);
+      if (row.root !== next) this.list.insertBefore(row.root, next);
+      next = row.root.nextElementSibling;
       row.check.checked = this.selected.has(id);
+    }
+    if (focused && document.activeElement !== focused)
+      focused.focus({ preventScroll: true });
     this.filter();
   }
   restoreScroll() {

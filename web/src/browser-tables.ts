@@ -1,19 +1,14 @@
-import type { Catalog, CatalogSeries } from "./workspace-types";
+import type { Catalog } from "./workspace-types";
 import type { Experiment, Run } from "./api";
 import { element } from "./utils";
 import { runSwatch } from "./run-drawer";
 import { RunFilterControl, RunFilterSession } from "./run-filter-session";
-import {
-  scalarParameters,
-  parameterLabel,
-  compareParameters,
-} from "./run-table-fields";
+import { parameterLabel } from "./run-table-fields";
+import { createRunOrder, runSortState, type RunSortState } from "./run-order";
 
-export interface TableState {
+export interface TableState extends RunSortState {
   query: string;
   status: string;
-  sort: string;
-  descending: boolean;
   page: number;
   metrics: string[] | null;
   parameters?: string[];
@@ -22,8 +17,7 @@ export interface TableState {
 export const tableState = (): TableState => ({
   query: "",
   status: "all",
-  sort: "created_at",
-  descending: true,
+  ...runSortState(),
   page: 0,
   metrics: null,
 });
@@ -141,7 +135,7 @@ export function experimentTable(
       );
       body.append(tr);
     }
-    if (!rows.length && !filterSession.error) {
+    if (!rows.length) {
       const tr = element("tr");
       const td = cell(
         catalog.experiments.length
@@ -228,30 +222,12 @@ export function runTable(
     catalog,
     catalog.rx?.id === experiment.id ? catalog.rx : undefined,
   );
-  const runIds = new Set(runs.map((r) => r.id));
-  const summaries = new Map<string, Map<string, CatalogSeries>>();
-  for (const series of catalog.series) {
-    if (series.kind !== "metric" || !runIds.has(series.run_id)) continue;
-    let map = summaries.get(series.run_id);
-    if (!map) {
-      map = new Map();
-      summaries.set(series.run_id, map);
-    }
-    map.set(series.key, series);
-  }
+  const { summaries, parameters, sort } = createRunOrder(runs, catalog.series);
   const keys = [
     ...new Set([...summaries.values()].flatMap((m) => [...m.keys()])),
   ].sort();
   if (state.metrics === null) state.metrics = keys.slice(0, 3);
   state.parameters ??= [];
-  const parameters = new Map(
-    runs.map((run) => [
-      run.id,
-      new Map(
-        scalarParameters(run.params).map((field) => [field.sourcePath, field]),
-      ),
-    ]),
-  );
   const parameterFields = new Map(
     [...parameters.values()].flatMap((fields) => [...fields]),
   );
@@ -427,8 +403,8 @@ export function runTable(
   }
   function visible() {
     const q = state.query.trim().toLowerCase();
-    return runs
-      .filter(
+    return sort(
+      runs.filter(
         (r) =>
           filterSession.matches(r) &&
           (state.status === "all" || r.status === state.status) &&
@@ -436,29 +412,9 @@ export function runTable(
             `${r.name} ${JSON.stringify(r.params)} ${JSON.stringify(r.tags)}`
               .toLowerCase()
               .includes(q)),
-      )
-      .sort((a, b) => {
-        let result = 0;
-        if (state.sort === "name") result = a.name.localeCompare(b.name);
-        else if (state.sort === "status")
-          result = a.status.localeCompare(b.status);
-        else if (state.sort.startsWith("metric:")) {
-          const key = state.sort.slice(7),
-            av = summaries.get(a.id)?.get(key)?.last_value,
-            bv = summaries.get(b.id)?.get(key)?.last_value;
-          if (av == null) return bv == null ? 0 : 1;
-          if (bv == null) return -1;
-          result = av - bv;
-        } else if (state.sort.startsWith("parameter:")) {
-          const key = state.sort.slice(10);
-          return compareParameters(
-            parameters.get(a.id)?.get(key)?.value,
-            parameters.get(b.id)?.get(key)?.value,
-            state.descending,
-          );
-        } else result = a.created_at - b.created_at;
-        return (state.descending ? -1 : 1) * result;
-      });
+      ),
+      state,
+    );
   }
   function render() {
     if (destroyed) return;
