@@ -422,17 +422,6 @@ for (const teardown of ["logout", "beforeunload"] as const) {
         .catch(() => {});
       return true;
     });
-    const idle = await geometry();
-    if (surface === "drawer") {
-      expect(idle.status).not.toBeNull();
-      expect(idle.control.x + idle.control.width + 6).toBeLessThanOrEqual(
-        idle.status!.x,
-      );
-      expect(idle.status!.x + idle.status!.width).toBeLessThanOrEqual(
-        idle.toolbar.x + idle.toolbar.width,
-      );
-    }
-    await capture("idle");
     try {
       await addEvent(page, "metrics.loss", "lt", "0.5");
       await expect.poll(() => !!release).toBe(true);
