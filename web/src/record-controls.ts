@@ -2,16 +2,21 @@ import type { Api } from "./api";
 import type { Catalog } from "./workspace-types";
 import { attachSuggestions, type Suggestion } from "./suggest";
 import { element } from "./utils";
+import { RunFilterMenu, type FilterHintContext } from "./run-filter-menu";
+import {
+  menuToRecordFilters,
+  recordFilterToMenu,
+  RECORD_FILTER_OPERATORS,
+} from "./record-filter";
+import type { FieldPage } from "./run-filter-session";
+import { formatFilterValue } from "./run-filter";
 import {
   recordPath,
   recordRequest,
   recordRuns,
   recordNotes,
   recordValue,
-  parseRecordScalar,
   type RecordBinding,
-  type RecordCondition,
-  type RecordFilters,
   type RecordResult,
   type FieldHint,
 } from "./records";
@@ -95,12 +100,7 @@ export function mountRecordControls(
     options.changed();
   };
 
-  function suggest(
-    input: HTMLInputElement,
-    commit: (value: string) => void,
-    omit?: number,
-    filterDraft?: () => RecordFilters,
-  ) {
+  function suggest(input: HTMLInputElement, commit: (value: string) => void) {
     let hints: FieldHint[] = [],
       suggestions: Suggestion[] = [];
     let readyVersion = -1,
@@ -153,8 +153,7 @@ export function mountRecordControls(
       pending?.abort();
       const controller = (pending = new AbortController());
       const prefix = input.value;
-      const filters = structuredClone(filterDraft?.() ?? b.filters);
-      if (omit !== undefined) filters.conditions.splice(omit, 1);
+      const filters = structuredClone(b.filters);
       // Do not send incomplete other conditions as an accidental global query.
       try {
         const result = await api.post<RecordResult>(
@@ -173,9 +172,9 @@ export function mountRecordControls(
 
         suggestions = hints.map((h) => ({
           value: h.path,
-          detail: `${h.types.join("/")} · ${h.present}/${result.diagnostics.matched} sampled${h.values.length ? ` · ${h.values.map((v) => JSON.stringify(v)).join(", ")}` : ""}`,
+          detail: `${h.types.join("/")}${h.values.length ? ` · ${h.values.map(formatFilterValue).join(", ")}` : ""}`,
         }));
-        status.textContent = `${result.coverage} · ${recordNotes(result)}`;
+        status.textContent = "";
         adapter.refresh();
       } catch (error) {
         if (
@@ -184,7 +183,7 @@ export function mountRecordControls(
           controller.signal.aborted
         )
           return;
-        status.textContent = `Field hints unavailable: ${error instanceof Error ? error.message : String(error)}. Exact paths remain usable.`;
+        status.textContent = `Field hints unavailable: ${error instanceof Error ? error.message : String(error)}.`;
       } finally {
         if (version === generation) readyVersion = version;
       }
@@ -217,67 +216,6 @@ export function mountRecordControls(
       pending?.abort();
       clearTimeout(timer);
       adapter.dispose();
-    });
-  }
-  function valueSuggestions(
-    input: HTMLInputElement,
-    condition: RecordCondition,
-    index: number,
-    filterDraft: () => RecordFilters,
-  ) {
-    let suggestions: Suggestion[] = [],
-      complete = false,
-      generation = 0;
-    let pending: AbortController | undefined;
-    const adapter = attachSuggestions(
-      input,
-      () => suggestions,
-      (value) => {
-        input.value = value;
-      },
-      () => complete,
-    );
-    const refresh = async () => {
-      const version = ++generation;
-      pending?.abort();
-      suggestions = [];
-      complete = false;
-      adapter.close();
-      if (!api || document.activeElement !== input) return;
-      const controller = (pending = new AbortController());
-      const filters = structuredClone(filterDraft());
-      filters.conditions.splice(index, 1);
-      try {
-        const result = await api.post<RecordResult>(
-          "/rx/fields",
-          { ...request(), filters, prefix: condition.path },
-          controller.signal,
-        );
-        if (
-          version !== generation ||
-          controller.signal.aborted ||
-          lifetime.signal.aborted
-        )
-          return;
-        const hint = result.fields.find((h) => h.path === condition.path);
-        suggestions = (hint?.values ?? []).map((value) => ({
-          value: JSON.stringify(value),
-          detail: value === null ? "null" : typeof value,
-        }));
-        // Values are always a bounded sample, never proof of a unique value.
-        complete = false;
-        adapter.refresh();
-      } catch {
-        /* Field hints are optional; typed JSON remains usable. */
-      }
-    };
-    input.addEventListener("focus", () => void refresh(), {
-      signal: lifetime.signal,
-    });
-    invalidate.push(() => void refresh());
-    cleanups.push(() => {
-      pending?.abort();
-      adapter.close();
     });
   }
   function pathInput(
@@ -319,7 +257,7 @@ export function mountRecordControls(
     element(
       "p",
       "ce-selection-summary",
-      `Read-only rx records · ${recordRuns(b, options.catalog, options.selected).length} selected runs (maximum 32). Run selection is separate from record filters.`,
+      `Read-only rx records · ${recordRuns(b, options.catalog, options.selected).length} selected runs.`,
     ),
   );
   if (options.catalog.rx?.error)
@@ -383,133 +321,85 @@ export function mountRecordControls(
     },
     true,
   );
-  data.append(
-    element(
-      "p",
-      "ce-help",
-      'Only finite numeric X/Y from the same record are paired. Use metrics.loss for nested keys and $["metrics.loss"] for a literal dotted key. Grouping uses only the chosen scalar in each record, never earlier records.',
-    ),
-  );
-
-  const filters = element("details", "ce-more");
-  const summary = element(
-    "summary",
-    "",
-    `Filter records (${b.filters.conditions.length})`,
-  );
-  filters.append(summary);
-  const rows = element("div");
-  const match = element("select");
-  match.setAttribute("aria-label", "Record filter match");
-  for (const [value, label] of [
-    ["all", "Match all conditions"],
-    ["any", "Match any condition"],
-  ]) {
-    const o = element("option", "", label);
-    o.value = value;
-    match.append(o);
-  }
-  let draft = structuredClone(b.filters);
-  match.value = draft.any ? "any" : "all";
-  match.onchange = () => {
-    draft.any = match.value === "any";
+  let validationError = "",
+    hintError = "";
+  let conditionCount = b.filters.conditions.length;
+  const showFilterError = () => menu.setError(validationError || hintError);
+  const discover = async (
+    prefix: string,
+    signal: AbortSignal,
+    context?: FilterHintContext,
+  ): Promise<FieldPage> => {
+    if (!api) return { fields: [], more: false, note: "" };
+    const filters = context
+      ? menuToRecordFilters(context.filter, context.index)
+      : b.filters;
+    const result = await api.post<RecordResult>(
+      "/rx/fields",
+      { ...request(), filters, prefix },
+      signal,
+    );
+    return {
+      fields: result.fields.map((h) => ({
+        scope: "event",
+        path: h.path,
+        label: h.path,
+        count: h.present,
+        types: h.types,
+        examples: h.values.map((value) => JSON.stringify(value)),
+      })),
+      more: false,
+      note: "",
+    };
   };
-  const filterError = element("p", "ce-error");
-  filterError.setAttribute("role", "alert");
-  const rowValues = new Map<RecordCondition, HTMLInputElement>();
-  function renderFilters() {
-    rows.replaceChildren();
-    rowValues.clear();
-    draft.conditions.forEach((c, index) => {
-      const row = element("div", "record-filter-row");
-      const path = field(row, `Record filter ${index + 1} path`, c.path);
-      path.oninput = () => {
-        c.path = path.value;
-      };
-      suggest(
-        path,
-        (value) => {
-          path.value = value;
-          c.path = value;
-        },
-        index,
-        () => draft,
-      );
-      const op = element("select");
-      op.setAttribute("aria-label", `Record filter ${index + 1} operator`);
-      for (const value of [
-        "eq",
-        "ne",
-        "lt",
-        "lte",
-        "gt",
-        "gte",
-        "exists",
-        "missing",
-      ] as const) {
-        const option = element("option", "", value);
-        option.value = value;
-        op.append(option);
-      }
-      op.value = c.op;
-      op.onchange = () => {
-        c.op = op.value as RecordCondition["op"];
-      };
-      const value = field(
-        row,
-        `Record filter ${index + 1} JSON value`,
-        JSON.stringify(c.value),
-      );
-      rowValues.set(c, value);
-      value.placeholder = '"epoch", 1, true, or null';
-      valueSuggestions(value, c, index, () => draft);
-      row.append(
-        op,
-        button("Remove condition", () => {
-          draft.conditions.splice(index, 1);
-          renderFilters();
-        }),
-      );
-      rows.append(row);
-    });
-  }
-  filters.append(
-    match,
-    rows,
-    button("Add record condition", () => {
-      if (draft.conditions.length < 16) {
-        draft.conditions.push({ path: "", op: "eq", value: "" });
-        renderFilters();
-      }
-    }),
-    button("Apply record filters", () => {
+  const menu = new RunFilterMenu(
+    recordFilterToMenu(b.filters),
+    (filter) => {
+      // A removed row must not leave an un-retryable hint error behind.
+      if (filter.conditions.length !== conditionCount) hintError = "";
+      conditionCount = filter.conditions.length;
       try {
-        for (const c of draft.conditions) {
-          recordPath(c.path);
-          c.value = ["exists", "missing"].includes(c.op)
-            ? null
-            : parseRecordScalar(rowValues.get(c)!.value);
+        const filters = menuToRecordFilters(filter);
+        validationError = "";
+        setError("filters", "");
+        if (JSON.stringify(filters) !== JSON.stringify(b.filters)) {
+          b.filters = filters;
+          changed();
         }
-        b.filters = structuredClone(draft);
-        filterError.textContent = "";
-        summary.textContent = `Filter records (${b.filters.conditions.length})`;
-        changed();
       } catch (error) {
-        filterError.textContent = `Filters not applied: ${(error as Error).message}`;
+        validationError =
+          error instanceof Error ? error.message : String(error);
+        setError("filters", validationError);
       }
-    }),
-    button("Clear record filters", () => {
-      draft = { any: false, conditions: [] };
-      b.filters = structuredClone(draft);
-      match.value = "all";
-      renderFilters();
-      summary.textContent = "Filter records (0)";
-      changed();
-    }),
-    filterError,
+      showFilterError();
+    },
+    () => 0, // No run proof/count semantics in a record predicate editor.
+    {
+      retry: () => menu.refreshHints(),
+      discover: (prefix, signal, _more, context) =>
+        discover(prefix, signal, context),
+      values: discover,
+      hintError: (message) => {
+        hintError = message;
+        showFilterError();
+      },
+    },
+    {
+      label: "Filter records",
+      scope: "event",
+      operators: RECORD_FILTER_OPERATORS,
+      maxConditions: 16,
+      livePaths: true,
+      topLayer: true,
+    },
   );
-  renderFilters();
-  data.append(filters, status);
+  const filterControl = element("div", "ce-record-filters");
+  filterControl.append(
+    element("span", "ce-label", "Filter records"),
+    menu.root,
+  );
+  data.append(filterControl, status);
+  cleanups.push(() => menu.destroy());
 
   const inspection = element("details", "ce-more");
   inspection.append(element("summary", "", "Inspect records"));

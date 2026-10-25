@@ -9,9 +9,11 @@ import {
   activeConditions,
   describeCondition,
   filterFields,
+  formatFilterValue,
   OPS,
   type FilterCondition,
   type FilterField,
+  type FilterOp,
   type MissingPolicy,
   type RunFilter,
 } from "./run-filter";
@@ -44,6 +46,21 @@ function displayValue(text: string): string {
   }
 }
 
+export interface FilterHintContext {
+  filter: RunFilter;
+  index: number;
+}
+
+/** Restrict the shared editor without attaching run-level matching/session state. */
+export interface FilterMenuOptions {
+  label?: string;
+  scope?: FilterCondition["scope"];
+  operators?: readonly FilterOp[];
+  maxConditions?: number;
+  livePaths?: boolean;
+  topLayer?: boolean;
+}
+
 /**
  * Filter icon + popover for building AND/OR conditions on nested run config
  * and tags. Calls onChange with a fresh filter whenever a condition changes.
@@ -56,11 +73,13 @@ export class RunFilterMenu {
   private readonly list = element("div", "run-filter-conditions");
   private readonly failure = element("div", "run-filter-failure");
   private readonly error = element("p", "run-filter-error");
-  private readonly combine = element("select");
+  private readonly combine = element("select", "run-filter-combine");
   private fields: FilterField[] = [];
   private runs: Run[] = [];
   private cleanups: (() => void)[] = [];
   private destroyed = false;
+  private retryHints?: () => void;
+  private readonly lifetime = new AbortController();
 
   constructor(
     private filter: RunFilter,
@@ -72,18 +91,27 @@ export class RunFilterMenu {
         prefix: string,
         signal: AbortSignal,
         more?: boolean,
+        context?: FilterHintContext,
       ): Promise<FieldPage>;
+      values?(
+        path: string,
+        signal: AbortSignal,
+        context: FilterHintContext,
+      ): Promise<FieldPage>;
+      hintError?(message: string): void;
     },
+    private readonly options: FilterMenuOptions = {},
   ) {
     this.root.dataset.menu = "run-filter";
     this.summary.setAttribute(
       "aria-label",
-      "Filter runs by config, tags or events",
+      this.options.label ?? "Filter runs by config, tags or events",
     );
-    this.summary.title = "Filter runs by config values, tags or events";
+    this.summary.title =
+      this.options.label ?? "Filter runs by config values, tags or events";
     this.summary.append(plotIcon("filter"), this.badge);
     const head = element("div", "run-filter-head");
-    head.append(element("strong", "", "Filter runs"));
+    head.append(element("strong", "", this.options.label ?? "Filter runs"));
     this.combine.setAttribute("aria-label", "Combine conditions");
     for (const [value, label] of [
       ["all", "Match all (AND)"],
@@ -105,12 +133,19 @@ export class RunFilterMenu {
     const add = element("button", "run-filter-add", "+ Add condition");
     add.type = "button";
     add.onclick = () => {
+      if (
+        this.filter.conditions.length >=
+        (this.options.maxConditions ?? Infinity)
+      )
+        return;
       this.filter = {
         ...this.filter,
         conditions: [
           ...this.filter.conditions,
           {
-            scope: this.runs.some((run) => run.rx) ? "event" : "params",
+            scope:
+              this.options.scope ??
+              (this.runs.some((run) => run.rx) ? "event" : "params"),
             path: "",
             op: "eq",
             value: "",
@@ -144,7 +179,56 @@ export class RunFilterMenu {
     this.failure.append(this.error, retry);
     this.popover.append(head, this.failure, this.list, foot);
     this.root.append(this.summary, this.popover);
+    if (this.options.topLayer) {
+      this.popover.setAttribute("popover", "manual");
+      this.popover.classList.add("run-filter-floating");
+      const position = () => {
+        if (!this.root.open) return;
+        const anchor = this.summary.getBoundingClientRect();
+        const box = this.popover.getBoundingClientRect();
+        this.popover.style.left = `${Math.max(12, Math.min(anchor.left, innerWidth - box.width - 12))}px`;
+        this.popover.style.top = `${Math.max(12, Math.min(anchor.bottom + 4, innerHeight - box.height - 12))}px`;
+      };
+      this.root.addEventListener(
+        "toggle",
+        () => {
+          if (this.root.open && this.root.isConnected) {
+            this.popover.showPopover();
+            position();
+          } else if (this.popover.matches(":popover-open"))
+            this.popover.hidePopover();
+        },
+        { signal: this.lifetime.signal },
+      );
+      const resize = new ResizeObserver(position);
+      resize.observe(this.popover);
+      this.lifetime.signal.addEventListener(
+        "abort",
+        () => resize.disconnect(),
+        { once: true },
+      );
+      window.addEventListener("resize", position, {
+        signal: this.lifetime.signal,
+      });
+      document.addEventListener("scroll", position, {
+        capture: true,
+        signal: this.lifetime.signal,
+      });
+      document.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (e.target instanceof Node && !this.root.contains(e.target))
+            this.root.open = false;
+        },
+        { signal: this.lifetime.signal },
+      );
+    }
     this.root.addEventListener("keydown", (e) => {
+      // A condition editor embedded in a form must never submit its host.
+      if (e.key === "Enter" && e.target instanceof HTMLInputElement) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       if (e.key === "Escape" && this.root.open) {
         e.preventDefault();
         e.stopPropagation();
@@ -159,9 +243,10 @@ export class RunFilterMenu {
     this.runs = runs;
     this.summary.setAttribute(
       "aria-label",
-      runs.some((run) => run.rx)
-        ? "Filter runs by config, tags or events"
-        : "Filter runs by config or tags",
+      this.options.label ??
+        (runs.some((run) => run.rx)
+          ? "Filter runs by config, tags or events"
+          : "Filter runs by config or tags"),
     );
     this.fields = filterFields(runs);
     this.render();
@@ -181,11 +266,17 @@ export class RunFilterMenu {
     this.failure.hidden = !error;
   }
 
+  refreshHints() {
+    this.retryHints?.();
+  }
+
   refreshCounts() {
     if (!this.destroyed) this.updateCounts();
   }
   destroy() {
     this.destroyed = true;
+    this.lifetime.abort();
+    if (this.popover.matches(":popover-open")) this.popover.hidePopover();
     this.cleanups.splice(0).forEach((cleanup) => cleanup());
   }
 
@@ -217,7 +308,7 @@ export class RunFilterMenu {
         )
           .map((c) => describeCondition(c, this.label(c)))
           .join(this.filter.combine === "any" ? " OR " : " AND ")}`
-      : "Filter runs by config values, tags or events";
+      : (this.options.label ?? "Filter runs by config values, tags or events");
   }
   private updateCounts() {
     const rows = this.list.querySelectorAll<HTMLElement>(".run-filter-row");
@@ -236,6 +327,12 @@ export class RunFilterMenu {
 
   private render() {
     this.cleanups.splice(0).forEach((cleanup) => cleanup());
+    this.retryHints = undefined;
+    const add = this.root.querySelector<HTMLButtonElement>(".run-filter-add");
+    if (add)
+      add.disabled =
+        this.filter.conditions.length >=
+        (this.options.maxConditions ?? Infinity);
     this.combine.value = this.filter.combine;
     this.combine.disabled = this.filter.conditions.length < 2;
     this.list.replaceChildren();
@@ -244,7 +341,9 @@ export class RunFilterMenu {
         element(
           "p",
           "muted run-filter-empty",
-          "Add a condition on run config, tags, or logged Event fields.",
+          this.options.scope
+            ? "Add a condition."
+            : "Add a condition on run config, tags, or logged Event fields.",
         ),
       );
     this.filter.conditions.forEach((condition, index) => {
@@ -270,6 +369,7 @@ export class RunFilterMenu {
         ["tags", "Tag"],
         ["event", "Event"],
       ]) {
+        if (this.options.scope && key !== this.options.scope) continue;
         if (
           key === "event" &&
           !this.runs.some((run) => run.rx) &&
@@ -281,6 +381,7 @@ export class RunFilterMenu {
         scope.append(option);
       }
       scope.value = condition.scope;
+      scope.disabled = !!this.options.scope;
       scope.onchange = () => {
         update(
           {
@@ -303,6 +404,7 @@ export class RunFilterMenu {
       path.setAttribute("aria-label", `Condition ${index + 1} path`);
       path.value = condition.path ? this.label(condition) : "";
       const commitPath = () => {
+        path.setCustomValidity("");
         const text = path.value.trim();
         const field = this.fieldByLabel(text, eventScope);
         if (field) {
@@ -328,7 +430,10 @@ export class RunFilterMenu {
         }
       };
       path.onchange = commitPath;
-      path.oninput = () => path.setCustomValidity("");
+      path.oninput = () => {
+        path.setCustomValidity("");
+        if (this.options.livePaths) update({ path: path.value.trim() });
+      };
       let pending: AbortController | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let version = 0,
@@ -359,8 +464,15 @@ export class RunFilterMenu {
         path,
         suggestions,
         () => {
+          const completedVersion = version;
           commitPath();
           requestAnimationFrame(() => {
+            if (
+              this.destroyed ||
+              document.activeElement !== path ||
+              version !== completedVersion
+            )
+              return;
             const row =
               this.list.querySelectorAll<HTMLElement>(".run-filter-row")[index];
             const value =
@@ -386,20 +498,36 @@ export class RunFilterMenu {
         const requested = version,
           text = path.value.trim();
         try {
-          const page = await this.events.discover(text, abort.signal);
+          const context = { filter: structuredClone(this.filter), index };
+          const page = await this.events.discover(
+            text,
+            abort.signal,
+            false,
+            context,
+          );
           if (abort.signal.aborted || requested !== version || this.destroyed)
             return;
+          this.events.hintError?.("");
           eventFields = page.fields;
-          this.fields = [
-            ...this.fields.filter((f) => f.scope !== "event"),
-            ...eventFields,
-          ];
+          if (!this.events.values)
+            this.fields = [
+              ...this.fields.filter((f) => f.scope !== "event"),
+              ...eventFields,
+            ];
           path.title = page.note;
           ready = version;
           adapter.refresh();
         } catch (error) {
-          if (!abort.signal.aborted && requested === version)
+          if (
+            !abort.signal.aborted &&
+            requested === version &&
+            !this.destroyed
+          ) {
             path.title = "Hints unavailable; enter an exact path";
+            this.events?.hintError?.(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
         } finally {
           if (requested === version) {
             inFlight = undefined;
@@ -409,6 +537,10 @@ export class RunFilterMenu {
       const schedule = () => {
         if (!eventScope) return;
         version++;
+        this.retryHints = () => {
+          version++;
+          inFlight = discover();
+        };
         pending?.abort();
         clearTimeout(timer);
         inFlight = undefined;
@@ -420,6 +552,12 @@ export class RunFilterMenu {
       };
       path.addEventListener("input", schedule);
       path.addEventListener("focus", schedule);
+      path.addEventListener("blur", () => {
+        pending?.abort();
+        clearTimeout(timer);
+        version++;
+        inFlight = undefined;
+      });
       path.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.defaultPrevented) {
           e.preventDefault();
@@ -434,6 +572,8 @@ export class RunFilterMenu {
       const op = element("select", "run-filter-op");
       op.setAttribute("aria-label", `Condition ${index + 1} operator`);
       for (const o of OPS) {
+        if (this.options.operators && !this.options.operators.includes(o.op))
+          continue;
         const option = element("option", "", o.label);
         option.value = o.op;
         op.append(option);
@@ -449,7 +589,7 @@ export class RunFilterMenu {
       value.hidden = condition.op === "exists" || condition.op === "missing";
       if (eventScope)
         value.title = 'Typed JSON scalar; quote numeric strings ("0.001")';
-      value.oninput = () => {
+      const commitValue = () => {
         value.setCustomValidity("");
         if (eventScope) {
           try {
@@ -462,19 +602,90 @@ export class RunFilterMenu {
         }
         update({ value: value.value });
       };
+      value.oninput = commitValue;
       const line = element("div", "run-filter-line");
       line.append(scope, path, op, value);
       const values = attachSuggestions(
         value,
         () =>
-          (this.fieldFor(this.filter.conditions[index])?.examples ?? []).map(
-            (text) => ({
-              value: eventScope ? text : displayValue(text),
-            }),
-          ),
-        () => update({ value: value.value }),
+          (
+            (this.events?.values
+              ? valueFields.find(
+                  (f) => f.path === this.filter.conditions[index].path,
+                )
+              : this.fieldFor(this.filter.conditions[index])
+            )?.examples ?? []
+          ).map((text) => ({
+            value: eventScope
+              ? formatFilterValue(JSON.parse(text))
+              : displayValue(text),
+            detail: eventScope
+              ? JSON.parse(text) === null
+                ? "null"
+                : typeof JSON.parse(text)
+              : undefined,
+          })),
+        commitValue,
+        // Samples are not exhaustive. Never rewrite a complete typed scalar
+        // (e.g. 1 to the sampled 10); explicit highlighted picks still work.
+        () =>
+          !this.events?.values ||
+          (!!value.value.trim() &&
+            typeof parseFilterValue(value.value) === "string" &&
+            !value.value.trim().startsWith('"')),
+        () => (valueReady ? undefined : (valueFlight ??= discoverValues())),
       );
-      this.cleanups.push(() => values.dispose());
+      let valueFields: FilterField[] = [];
+      let valuePending: AbortController | undefined;
+      let valueFlight: Promise<void> | undefined;
+      let valueReady = !this.events?.values;
+      const discoverValues = async () => {
+        if (!this.events?.values) return;
+        valuePending?.abort();
+        const abort = (valuePending = new AbortController());
+        const current = this.filter.conditions[index];
+        try {
+          const page = await this.events.values(current.path, abort.signal, {
+            filter: structuredClone(this.filter),
+            index,
+          });
+          if (abort.signal.aborted || this.destroyed) return;
+          this.events.hintError?.("");
+          valueFields = page.fields;
+          valueReady = true;
+          values.refresh();
+        } catch (error) {
+          if (!abort.signal.aborted && !this.destroyed) {
+            valueReady = true;
+            this.events.hintError?.(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        } finally {
+          if (!abort.signal.aborted) valueFlight = undefined;
+        }
+      };
+      value.addEventListener("focus", () => {
+        if (!this.events?.values) return;
+        valueReady = false;
+        // Never complete from another row's or a previous query's examples.
+        valueFields = [];
+        values.close();
+        this.retryHints = () => {
+          valueReady = false;
+          valueFlight = discoverValues();
+        };
+        valueFlight = discoverValues();
+      });
+      value.addEventListener("blur", () => {
+        valuePending?.abort();
+        valueFlight = undefined;
+        valueReady = !this.events?.values;
+      });
+      this.cleanups.push(() => {
+        valuePending?.abort();
+        values.dispose();
+      });
       const remove = element("button", "run-filter-remove", "×");
       remove.type = "button";
       remove.setAttribute("aria-label", `Remove condition ${index + 1}`);

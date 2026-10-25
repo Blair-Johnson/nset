@@ -61,6 +61,13 @@ export function parseFilterValue(text: string): unknown {
   }
 }
 
+/** Editable scalar text, without quotes unless they disambiguate a string. */
+export function formatFilterValue(value: unknown): string {
+  if (typeof value === "string" && parseFilterValue(value) === value)
+    return value;
+  return JSON.stringify(value);
+}
+
 export interface FilterField {
   scope: "params" | "tags" | "event";
   path: string;

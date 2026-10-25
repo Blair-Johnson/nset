@@ -321,8 +321,8 @@ test("record filter own hints omit itself and typed filter changes persist", asy
   page,
 }) => {
   const { requests } = await fixture(page);
-  await page.getByText("Filter records (1)", { exact: true }).click();
-  const path = page.getByLabel("Record filter 1 path", { exact: true });
+  await page.getByLabel("Filter records", { exact: true }).click();
+  const path = page.getByLabel("Condition 1 path", { exact: true });
   await path.fill("ki");
   await expect(page.getByRole("option", { name: /^kind / })).toBeVisible();
   await path.press("Tab");
@@ -330,12 +330,7 @@ test("record filter own hints omit itself and typed filter changes persist", asy
     (r) => r.path.endsWith("fields") && r.body.prefix === "ki",
   );
   expect(fields.at(-1)?.body.filters.conditions).toEqual([]);
-  await page
-    .getByLabel("Record filter 1 JSON value", { exact: true })
-    .fill("true");
-  await page
-    .getByRole("button", { name: "Apply record filters", exact: true })
-    .click();
+  await page.getByLabel("Condition 1 value", { exact: true }).fill("true");
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   expect(
     await page.evaluate(
@@ -581,9 +576,9 @@ test("editor rejects neighboring unsafe integers without sending rounded filters
   page,
 }) => {
   const { requests } = await fixture(page);
-  await page.getByText("Filter records (1)", { exact: true }).click();
-  await page.getByLabel("Record filter 1 path", { exact: true }).fill("id");
-  const input = page.getByLabel("Record filter 1 JSON value", { exact: true });
+  await page.getByLabel("Filter records", { exact: true }).click();
+  await page.getByLabel("Condition 1 path", { exact: true }).fill("id");
+  const input = page.getByLabel("Condition 1 value", { exact: true });
   for (const text of [
     "9007199254740992",
     "9007199254740993",
@@ -591,24 +586,22 @@ test("editor rejects neighboring unsafe integers without sending rounded filters
     "1e309",
   ]) {
     await input.fill(text);
-    await page
-      .getByRole("button", { name: "Apply record filters", exact: true })
-      .click();
-    await expect(
-      page.getByText(/Filters not applied:.*safe integers/),
-    ).toBeVisible();
+    await expect(page.getByText(/Filter failed:.*safe integers/)).toBeVisible();
   }
   expect(
     requests
       .filter((r) => r.path.endsWith("/plot"))
       .every(
-        (r) => !r.body.filters.conditions.some((c: any) => c.path === "id"),
+        (r) =>
+          !r.body.filters.conditions.some(
+            (c: any) =>
+              typeof c.value === "number" &&
+              (!Number.isFinite(c.value) ||
+                (Number.isInteger(c.value) && !Number.isSafeInteger(c.value))),
+          ),
       ),
   ).toBe(true);
   await input.fill("9007199254740991");
-  await page
-    .getByRole("button", { name: "Apply record filters", exact: true })
-    .click();
   await expect
     .poll(
       () =>

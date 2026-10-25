@@ -261,6 +261,14 @@
   gap: 8px;
   font-size: 12px;
 }
+/* Opt-in top layer for hosts with a scrolling/clipping settings column. */
+.run-filter-popover.run-filter-floating {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+}
 .run-filter-menu:not([open]) > .run-filter-popover {
   display: none;
 }
