@@ -86,6 +86,32 @@ export function navigateRange(
     ? next
     : null;
 }
+/** Move the old contact anchor to the new one while scaling in display space.
+ * Fractions run from low to high on normal axes (x left→right, y bottom→top).
+ * Translation is divided by the pinch factor: translating the old span would
+ * drift the anchor whenever a pinch and a pan happen in the same frame. */
+export function gestureRange(
+  range: Bounds,
+  scale: NavigationScale,
+  factor: number,
+  from: number,
+  to: number,
+): Bounds | null {
+  return navigateRange(
+    range,
+    scale,
+    factor,
+    (from - to) / factor,
+    scale.dir === -1 ? 1 - from : from,
+  );
+}
+type Contact = { x: number; y: number };
+type ContactPair = [Contact, Contact];
+const midpoint = ([a, b]: ContactPair): Contact => ({
+  x: (a.x + b.x) / 2,
+  y: (a.y + b.y) / 2,
+});
+const separation = ([a, b]: ContactPair) => Math.hypot(a.x - b.x, a.y - b.y);
 export const copyView = (v: Viewport): Viewport => ({
   x: [...v.x],
   y: [...v.y],
@@ -148,6 +174,9 @@ export class PlotNavigation {
   private history = new ViewHistory();
   private fit: Viewport;
   private gesture?: Gesture;
+  private contacts = new Map<number, Contact>();
+  private contactView?: Viewport;
+  private pinch?: { view: Viewport; points: ContactPair };
   private space = false;
   private pointerButtons = 0;
   private abort = new AbortController();
@@ -184,9 +213,36 @@ export class PlotNavigation {
     u.over.addEventListener("lostpointercapture", this.cancel, { signal });
     u.over.addEventListener(
       "pointerleave",
-      () => this.options.onHover?.(null),
+      (e) => {
+        // Touch release generates pointerleave even though the inspected point
+        // is still useful. Keep it until the next gesture/tool change.
+        if (this.options.mode === "navigate") {
+          if (e.pointerType !== "touch" && !this.contacts.size)
+            this.suppressHover();
+        } else this.options.onHover?.(null);
+      },
       { signal },
     );
+    // uPlot also installs legacy mouse/touch listeners. Do not let those start
+    // native selection or clear the explicit touch cursor after every move.
+    for (const type of [
+      "touchstart",
+      "touchmove",
+      "touchend",
+      "touchcancel",
+      "mousedown",
+      "mousemove",
+      "mouseup",
+      "click",
+      "dblclick",
+      "mouseout",
+      "mouseleave",
+    ])
+      u.over.addEventListener(type, this.nativeEvent, {
+        signal,
+        capture: true,
+        passive: false,
+      });
     u.over.addEventListener("wheel", this.wheel, { signal, passive: false });
     u.over.addEventListener("dblclick", this.doubleClick, { signal });
     u.root.addEventListener("keydown", this.keydown, { signal });
@@ -213,7 +269,12 @@ export class PlotNavigation {
   }
   configure(options: PlotInteraction) {
     this.cancel();
-    this.options.onHover?.(null);
+    if (
+      this.options.mode !== options.mode &&
+      (this.options.mode === "navigate" || options.mode === "navigate")
+    )
+      this.suppressHover();
+    else this.options.onHover?.(null);
     this.options = options;
     this.cursor();
   }
@@ -301,6 +362,10 @@ export class PlotNavigation {
   }
   private cursor() {
     this.u.root.dataset.cursorPlacement = cursorPlacement(this.options);
+    this.u.root.dataset.navigationTool = this.options.mode;
+    // Both ordinary box/cursor dragging and the opt-in tool own plot contacts.
+    // Never apply this policy to the card, toolbar, or surrounding page.
+    this.u.over.style.touchAction = "none";
     this.u.over.style.cursor =
       this.gesture?.mode === "pan" ||
       this.space ||
@@ -310,11 +375,15 @@ export class PlotNavigation {
           : "grab"
         : "crosshair";
   }
-  private xy(e: PointerEvent | WheelEvent) {
+  private xy(e: PointerEvent | WheelEvent, clamp = true) {
     const r = this.u.over.getBoundingClientRect();
     return {
-      x: Math.max(0, Math.min(r.width, e.clientX - r.left)),
-      y: Math.max(0, Math.min(r.height, e.clientY - r.top)),
+      x: clamp
+        ? Math.max(0, Math.min(r.width, e.clientX - r.left))
+        : e.clientX - r.left,
+      y: clamp
+        ? Math.max(0, Math.min(r.height, e.clientY - r.top))
+        : e.clientY - r.top,
       w: r.width,
       h: r.height,
       inside:
@@ -370,10 +439,126 @@ export class PlotNavigation {
     }
     return false;
   }
+  private nativeEvent = (e: Event) => {
+    if (this.options.mode !== "navigate") return;
+    if (e.cancelable) e.preventDefault();
+    e.stopImmediatePropagation();
+  };
+  private inspectAt({ x, y }: Contact) {
+    const rect = this.u.over.getBoundingClientRect();
+    x = Math.max(0, Math.min(rect.width, x));
+    y = Math.max(0, Math.min(rect.height, y));
+    this.u.root.classList.remove("plot-pan-hover-hidden");
+    this.u.setCursor({ left: x, top: y }, false);
+    const value = this.u.posToVal(x, "x");
+    this.options.onHover?.(Number.isFinite(value) ? value : null, [x, y]);
+  }
+  private rebaseContacts() {
+    const points = [...this.contacts.values()];
+    this.pinch =
+      points.length === 2
+        ? { view: this.viewport()!, points: points as ContactPair }
+        : undefined;
+    if (points.length === 1) this.inspectAt(points[0]);
+    else if (points.length > 1) this.suppressHover();
+  }
+  private contactDown(e: PointerEvent) {
+    if (e.button !== 0 || (e.pointerType !== "touch" && !e.isPrimary)) return;
+    const view = this.viewport();
+    if (!view) return;
+    e.preventDefault();
+    this.u.root.focus({ preventScroll: true });
+    if (!this.contacts.size) this.contactView = view;
+    this.contacts.set(e.pointerId, this.xy(e, false));
+    try {
+      this.u.over.setPointerCapture(e.pointerId);
+    } catch {
+      this.cancelContacts();
+      return;
+    }
+    this.rebaseContacts();
+  }
+  private contactMove(e: PointerEvent) {
+    const point = this.xy(e, false);
+    if (!this.contacts.has(e.pointerId)) {
+      if (!this.contacts.size && e.pointerType !== "touch" && point.inside)
+        this.inspectAt(point);
+      return;
+    }
+    e.preventDefault();
+    this.contacts.set(e.pointerId, point);
+    if (this.contacts.size === 1) {
+      this.inspectAt(point);
+      return;
+    }
+    this.suppressHover();
+    const g = this.pinch;
+    if (!g || this.contacts.size !== 2 || !point.w || !point.h) return;
+    const points = [...this.contacts.values()] as ContactPair;
+    // Coincident contacts have no stable scale; wait for a usable baseline.
+    if (separation(g.points) < MIN_DRAG) {
+      this.rebaseContacts();
+      return;
+    }
+    const factor = separation(points) / separation(g.points);
+    const start = midpoint(g.points),
+      end = midpoint(points);
+    const x = gestureRange(
+      g.view.x,
+      this.u.scales.x,
+      factor,
+      start.x / point.w,
+      end.x / point.w,
+    );
+    const y = gestureRange(
+      g.view.y,
+      this.u.scales.y,
+      factor,
+      1 - start.y / point.h,
+      1 - end.y / point.h,
+    );
+    if (x && y) this.apply({ x, y }, false);
+  }
+  private contactUp(e: PointerEvent) {
+    if (!this.contacts.has(e.pointerId)) return;
+    this.contactMove(e);
+    this.contacts.delete(e.pointerId);
+    // Delete before releasing: our expected lost-capture event is not a cancel.
+    if (this.u.over.hasPointerCapture(e.pointerId))
+      this.u.over.releasePointerCapture(e.pointerId);
+    this.rebaseContacts();
+    if (!this.contacts.size) {
+      const before = this.contactView,
+        after = this.viewport();
+      this.contactView = undefined;
+      if (before && after && !sameView(before, after)) {
+        this.history.push(before);
+        this.options.onViewChange?.();
+      }
+    }
+  }
+  private cancelContacts() {
+    const ids = [...this.contacts.keys()],
+      before = this.contactView;
+    this.contacts.clear();
+    this.contactView = undefined;
+    this.pinch = undefined;
+    for (const id of ids)
+      if (this.u.over.hasPointerCapture(id))
+        this.u.over.releasePointerCapture(id);
+    if (before) {
+      this.suppressHover();
+      this.apply(before, false);
+    }
+  }
   private contextmenu = (e: MouseEvent) => {
     if (this.options.directGestures) e.preventDefault();
   };
   private down = (e: PointerEvent) => {
+    if (this.options.mode === "navigate") {
+      this.contactDown(e);
+      return;
+    }
     const direct = this.options.directGestures;
     if (
       (e.button !== 0 && !(direct && e.button === 2)) ||
@@ -438,6 +623,10 @@ export class PlotNavigation {
     this.cursor();
   };
   private move = (e: PointerEvent) => {
+    if (this.options.mode === "navigate") {
+      this.contactMove(e);
+      return;
+    }
     const { x, y, w, h, inside } = this.xy(e);
     const g = this.gesture;
     if (g?.mode === "pan") this.suppressHover();
@@ -446,7 +635,10 @@ export class PlotNavigation {
       if (e.type === "pointermove")
         this.u.root.classList.remove("plot-pan-hover-hidden");
       const value = this.u.posToVal(x, "x");
-      this.options.onHover?.(inside && Number.isFinite(value) ? value : null, [x, y]);
+      this.options.onHover?.(inside && Number.isFinite(value) ? value : null, [
+        x,
+        y,
+      ]);
     }
     if (!g || e.pointerId !== g.id || !w || !h) return;
     g.moved ||= Math.hypot(x - g.x, y - g.y) >= MIN_DRAG;
@@ -490,6 +682,10 @@ export class PlotNavigation {
     return g;
   }
   private up = (e: PointerEvent) => {
+    if (this.options.mode === "navigate") {
+      this.contactUp(e);
+      return;
+    }
     const g = this.gesture;
     if (!g || g.id !== e.pointerId) return;
     this.move(e);
@@ -540,6 +736,11 @@ export class PlotNavigation {
     this.cancel();
   }
   private cancel = (event?: PointerEvent) => {
+    if (event && this.options.mode === "navigate") {
+      if (this.contacts.has(event.pointerId)) this.cancelContacts();
+      return;
+    }
+    this.cancelContacts();
     if (event && this.gesture && event.pointerId !== this.gesture.id) return;
     const g = this.release();
     if (g?.mode === "pan") this.apply(g.view, false);
@@ -593,7 +794,10 @@ export class PlotNavigation {
       pending.anchors = anchors;
       return;
     }
-    const wait = Math.max(0, this.wheelLast + WHEEL_INTERVAL - performance.now());
+    const wait = Math.max(
+      0,
+      this.wheelLast + WHEEL_INTERVAL - performance.now(),
+    );
     this.wheelPending = {
       factor,
       axis,
@@ -622,6 +826,7 @@ export class PlotNavigation {
       editable(e.target, false) ||
       editable(document.activeElement, false) ||
       this.gesture ||
+      this.contacts.size > 0 ||
       this.pointerButtons ||
       this.space ||
       !this.u.over.matches(":hover") ||
@@ -663,7 +868,10 @@ export class PlotNavigation {
       "-": () => this.zoom(0.8),
       "0": () => this.reset(),
       Backspace: () => this.back(),
-      Escape: () => this.cancel(),
+      Escape: () => {
+        this.cancel();
+        if (this.options.mode === "navigate") this.suppressHover();
+      },
       ArrowLeft: () => this.pan(this.options.axis === "y" ? 0 : -0.1, 0),
       ArrowRight: () => this.pan(this.options.axis === "y" ? 0 : 0.1, 0),
       ArrowUp: () => this.pan(0, this.options.axis === "x" ? 0 : 0.1),
@@ -694,6 +902,7 @@ export class PlotNavigation {
     this.u.over.style.touchAction = this.previousTouchAction;
     this.u.over.style.cursor = "";
     delete this.u.root.dataset.cursorPlacement;
+    delete this.u.root.dataset.navigationTool;
     this.u.root.classList.remove("plot-navigation", "plot-pan-hover-hidden");
   }
 }

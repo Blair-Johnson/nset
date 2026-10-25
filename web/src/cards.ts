@@ -14,7 +14,7 @@ import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { loadPlotRuns, withMetricLabel } from "./card-label";
 import { nextCursorPlacement } from "./cursor-placement";
-import { plotIcon, type PlotIconName } from "./plot-icons";
+import { NAVIGATE_LABEL, plotIcon, type PlotIconName } from "./plot-icons";
 import {
   formatDuration,
   formatXValue,
@@ -117,6 +117,7 @@ export class ChartCard {
   private inspectOpen = false;
   private sources: ResolvedSeries[] = [];
   private legendDetails = element("details", "card-legend-details");
+  private navigateButton?: HTMLButtonElement;
   private cursorButtons = new Map<"x" | "y", HTMLButtonElement>();
   private resizeHandle?: HTMLButtonElement;
   private resizeGesture?: {
@@ -472,6 +473,11 @@ export class ChartCard {
       iconButton("fit", "Fit configured range", () => this.plot?.reset()),
       this.backButton,
     );
+    this.navigateButton = iconButton("navigate", NAVIGATE_LABEL, () => {
+      this.mode = this.mode === "navigate" ? "zoom" : "navigate";
+      this.configure();
+    });
+    toolbar.append(this.navigateButton);
     for (const [axis, icon, label] of [
       ["x", "vertical-cursor", "Add vertical cursor"],
       ["y", "horizontal-cursor", "Add horizontal cursor"],
@@ -570,6 +576,7 @@ export class ChartCard {
           const row = element("div", "card-hover-row");
           const name = element("span", "", this.sources[index]?.run.name ?? this.data[index].run.name);
           name.title = name.textContent ?? "";
+          name.style.color = this.plot!.seriesColor(index) ?? "";
           const values = positions.map(crossings.value).sort((a, b) => a - b)
             .map((value) => this.cursorAxis === "x" ? this.number(value) : this.xText(value));
           row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
@@ -580,6 +587,7 @@ export class ChartCard {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
       },
     });
+    this.navigateButton?.setAttribute("aria-pressed", String(this.mode === "navigate"));
     for (const [axis, control] of this.cursorButtons)
       control.setAttribute(
         "aria-pressed",

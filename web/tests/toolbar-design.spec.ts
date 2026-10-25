@@ -234,7 +234,7 @@ for (const width of [1440, 390]) {
     await fixture(page, width, false);
     const card = page.locator("[data-design=outlined] .chart-card");
     const icons = card.locator(".card-header svg");
-    await expect(icons).toHaveCount(7);
+    await expect(icons).toHaveCount(8);
     const data = await icons.evaluateAll((nodes) =>
       nodes.map((node) => ({
         icon: (node as SVGElement).dataset.icon,
@@ -244,12 +244,20 @@ for (const width of [1440, 390]) {
         height: node.getBoundingClientRect().height,
       })),
     );
-    expect(new Set(data.map((item) => item.path)).size).toBe(7);
+    expect(new Set(data.map((item) => item.path)).size).toBe(8);
     for (const icon of data) {
       expect(icon.hidden).toBe("true");
       expect(icon.width).toBe(16);
       expect(icon.height).toBe(16);
     }
+    const navigate = card.getByRole("button", { name: "Touch navigation: drag to inspect, two fingers to pan and pinch to zoom", exact: true });
+    await expect(navigate.locator("svg")).toHaveAttribute("data-icon", "navigate");
+    await expect(navigate).toHaveAttribute("aria-pressed", "false");
+    await navigate.click();
+    await expect(navigate).toHaveAttribute("aria-pressed", "true");
+    expect(await navigate.evaluate(node => getComputedStyle(node).borderColor)).not.toBe("rgba(0, 0, 0, 0)");
+    await navigate.click();
+    await expect(navigate).toHaveAttribute("aria-pressed", "false");
     const zoom = card.getByRole("button", { name: "Zoom in", exact: true });
     await page.mouse.move(0, 0);
     expect(

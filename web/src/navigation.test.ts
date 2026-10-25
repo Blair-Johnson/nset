@@ -124,3 +124,27 @@ test("reversed nonlinear navigation stays affine at arbitrary anchors and round 
     returned.forEach((value, i) => close(value, initial[i]));
   }
 });
+
+
+test("two-contact pan plus pinch maps the original anchor to the new centroid", async () => {
+  const { gestureRange, transform } = await import("./navigation");
+  for (const scale of [{}, { distr: 3 }, { distr: 4, asinh: 3 }, { distr: 3, dir: -1 }]) {
+    const range: [number, number] = scale.distr === 3 ? [1, 1000] : [-20, 100];
+    for (const factor of [0.5, 1, 2, 3]) {
+      for (const [from, to] of [[0.4, 0.65], [0.9, 0.2], [0.5, 0.5], [0.2, -0.1]]) {
+        const next = gestureRange(range, scale, factor, from, to)!;
+        const fraction = (p: number) => scale.dir === -1 ? 1 - p : p;
+        const at = (r: [number, number], p: number) => transform(r[0], scale) +
+          (transform(r[1], scale) - transform(r[0], scale)) * fraction(p);
+        assert.ok(Math.abs(at(range, from) - at(next, to)) < 1e-10);
+        const span = (r: [number, number]) => transform(r[1], scale) - transform(r[0], scale);
+        assert.ok(Math.abs(span(next) - span(range) / factor) < 1e-10);
+      }
+    }
+    assert.deepEqual(gestureRange(range, scale, 1, 0.4, 0.4), range);
+  }
+  for (const factor of [0, -1, NaN, Infinity])
+    assert.equal(gestureRange([1, 10], {}, factor, 0.5, 0.6), null);
+  assert.equal(gestureRange([0, 10], { distr: 3 }, 2, 0.5, 0.6), null);
+  assert.equal(gestureRange([1, 10], {}, 2, NaN, 0.6), null);
+});

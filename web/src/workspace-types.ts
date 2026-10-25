@@ -111,7 +111,7 @@ export interface CardActions {
   onResize(id: string, size: "normal" | "wide"): void;
   onDimensions?: (id: string, layout: CardLayout) => boolean | void;
 }
-export type InteractionMode = "pan" | "zoom" | "inspect" | "threshold";
+export type InteractionMode = "pan" | "zoom" | "inspect" | "threshold" | "navigate";
 export type NavigationAxis = "x" | "y" | "both";
 export interface PlotInteraction {
   mode: InteractionMode;

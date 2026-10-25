@@ -670,3 +670,24 @@
 .record-inspection { max-height: 320px; overflow: auto; font-size: 12px; }
 .record-inspection summary { overflow-wrap: anywhere; }
 .record-inspection pre { max-height: 220px; overflow: auto; white-space: pre-wrap; }
+
+.ce-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ce-preview-toolbar h3 { margin: 0; }
+.ce-preview-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  min-width: 28px;
+}
+.ce-preview-toolbar button[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ce-preview-toolbar .card-icon { width: 18px; height: 18px; }

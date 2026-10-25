@@ -108,11 +108,20 @@ export function nearestCrossingRuns(
   identity: (index: number) => string,
   mouse: number,
 ): HoverCrossing[] {
-  const runs = new Map<string, HoverCrossing>();
+  const runs = new Map<string, HoverCrossing & { distance: number }>();
   for (const row of crossings) {
     const id = identity(row.index), previous = runs.get(id);
-    if (previous) previous.positions.push(...row.positions);
-    else runs.set(id, { index: row.index, positions: row.positions.slice() });
+    const distance = Math.min(...row.positions.map((p) => Math.abs(p - mouse)));
+    if (previous) {
+      previous.positions.push(...row.positions);
+      // Values are grouped by run, but color belongs to the closest plotted
+      // series. Keep ties stable when the caller's series order changes.
+      if (distance < previous.distance - EPS ||
+        (Math.abs(distance - previous.distance) <= EPS && row.index < previous.index)) {
+        previous.index = row.index;
+        previous.distance = distance;
+      }
+    } else runs.set(id, { index: row.index, positions: row.positions.slice(), distance });
   }
   return [...runs].map(([id, row]) => ({
     id, index: row.index, positions: crossingNeighbors(row.positions, mouse),

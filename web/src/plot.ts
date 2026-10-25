@@ -181,8 +181,13 @@ export class PlotPanel {
     this.chart?.redraw(false);
   }
   configureInteraction(options: PlotInteraction): void {
+    // Ordinary cursor orientation changes intentionally keep the current hover.
+    // Entering/leaving touch navigation instead dismisses its retained readout.
+    const changedTool = this.interaction?.mode !== options.mode &&
+      (this.interaction?.mode === "navigate" || options.mode === "navigate");
     this.interaction = { ...options };
-    const pointer = this.hoverPointer, client = this.hoverClient;
+    const pointer = changedTool ? undefined : this.hoverPointer;
+    const client = changedTool ? undefined : this.hoverClient;
     if (this.navigation) this.navigation.configure(this.navigationOptions());
     else this.attachNavigation();
     this.hoverPointer = pointer;
@@ -204,7 +209,7 @@ export class PlotPanel {
       ...this.interaction!,
       onHover: (x, pointer) => {
         this.hoverPointer = x === null ? undefined : pointer;
-        if (x === null) this.hoverClient = undefined;
+        if (x === null || this.interaction?.mode === "navigate") this.hoverClient = undefined;
         this.mouseAxisTicks?.update(this.hoverPointer ?? null);
         this.interaction?.onHover?.(x, pointer);
       },
@@ -225,6 +230,14 @@ export class PlotPanel {
       return;
     }
     this.interaction?.onHover?.(u.posToVal(p[0], "x"), p);
+  }
+  /** Resolved uPlot stroke, including run/series and low-level display overrides.
+   * Use the representative crossing's series index, not a run palette lookup. */
+  seriesColor(index: number): string | undefined {
+    const u = this.chart, seriesIndex = index * 2 + 1;
+    const stroke = u?.series[seriesIndex]?.stroke;
+    const color = typeof stroke === "function" ? stroke(u!, seriesIndex) : stroke;
+    return typeof color === "string" ? color : undefined;
   }
   /** Crossing coordinates are device pixels for exact agreement with Canvas
    * geometry and spline thinning. Formatting converts only the final neighbors. */
@@ -314,6 +327,8 @@ export class PlotPanel {
     pins: Pins,
     options: { preserveView?: boolean; initialView?: Viewport | null } = {},
   ) {
+    // A redraw must not carry an uncommitted pinch preview without its undo entry.
+    if (this.interaction?.mode === "navigate") this.navigation?.cancelGesture();
     const hoverPointer = this.hoverPointer, hoverClient = this.hoverClient;
     // Same axes, different settings: keep the user's camera (and back-history).
     const sameAxes =
@@ -566,6 +581,7 @@ export class PlotPanel {
             });
           let down: { x: number; y: number; distance: number } | undefined;
           const moved = (e: PointerEvent) => {
+            if (this.interaction?.mode === "navigate") return;
             const rect = u.over.getBoundingClientRect();
             const pointer: XY = [e.clientX - rect.left, e.clientY - rect.top];
             if (this.chart === u) {
@@ -587,7 +603,8 @@ export class PlotPanel {
           u.over.addEventListener("pointercancel", () => {
             down = undefined;
           });
-          u.over.addEventListener("pointerleave", () => {
+          u.over.addEventListener("pointerleave", (e) => {
+            if (this.interaction?.mode === "navigate" && e.pointerType === "touch") return;
             mouseAxisTicks.update(null);
             if (this.chart === u) {
               this.hoverPointer = undefined;

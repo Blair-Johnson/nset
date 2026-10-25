@@ -1,3 +1,4 @@
+import { NAVIGATE_LABEL, plotIcon } from "./plot-icons";
 import { mountRecordControls } from "./record-controls";
 import { newRecordBinding, loadRecordPlot } from "./records";
 import type { Api, ImageFrame } from "./api";
@@ -392,6 +393,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   let loadAbort: AbortController | undefined;
   let plot: PlotPanel | undefined;
   let previewInteractive = false;
+  let previewNavigate = false;
   let renderedScalarKind: ChartSpec["kind"] | undefined;
   let renderedUnavailable = 0;
   let images: ImagePanel | undefined;
@@ -497,6 +499,27 @@ export function openChartEditor(options: ChartEditorOptions): {
   const preview = el("aside", "ce-preview");
   preview.setAttribute("aria-label", "Chart preview");
   const previewTitle = el("h3", "", draft.title || "Untitled chart");
+  const previewToolbar = el("div", "ce-preview-toolbar");
+  const previewNavigation = button("", () => {
+    previewNavigate = !previewNavigate;
+    configurePreviewNavigation();
+  }, "card-button");
+  previewNavigation.title = NAVIGATE_LABEL;
+  previewNavigation.setAttribute("aria-label", NAVIGATE_LABEL);
+  previewNavigation.setAttribute("aria-pressed", "false");
+  previewNavigation.append(plotIcon("navigate"));
+  previewNavigation.hidden = draft.kind === "image";
+  previewToolbar.append(previewTitle, previewNavigation);
+  function configurePreviewNavigation() {
+    previewNavigation.setAttribute("aria-pressed", String(previewNavigate));
+    plot?.configureInteraction({
+      mode: previewNavigate ? "navigate" : "zoom",
+      axis: "both",
+      inferZoomAxes: true,
+      directGestures: true,
+      activePin: "a",
+    });
+  }
   const previewStatus = el("p", "ce-muted");
   previewStatus.setAttribute("role", "status");
   const previewHost = el("div", "ce-preview-plot");
@@ -515,7 +538,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   });
   retry.hidden = true;
   preview.append(
-    previewTitle,
+    previewToolbar,
     previewStatus,
     previewHost,
     retry,
@@ -713,6 +736,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   let pickerSearch = "";
   let renderChoices = () => {};
   function renderAll() {
+    previewNavigation.hidden = draft.kind === "image";
     recordControls?.destroy(); recordControls = undefined;
     renderChart();
     renderData();
@@ -2132,13 +2156,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       // The preview navigates like a dashboard card (drag-zoom, right/Space
       // pan, Ctrl+wheel), so it can show and keep the card's camera.
       if (!previewInteractive) {
-        plot.configureInteraction({
-          mode: "zoom",
-          axis: "both",
-          inferZoomAxes: true,
-          directGestures: true,
-          activePin: "a",
-        });
+        configurePreviewNavigation();
         previewInteractive = true;
       }
       const initial =

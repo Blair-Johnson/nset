@@ -67,7 +67,7 @@ test("natural splines reuse the drawn controls; invalid geometry never produces 
 test("nearest four RUNS aggregate metrics/groups, keep equal-name IDs and stable ties", () => {
   const rows = [90, 10, 20, 30, 40, 50, 11].map((p, index) => ({ index, positions: [p] }));
   const identity = (index: number) => index === 6 ? "run1" : `run${index}`;
-  assert.deepEqual(nearestCrossingRuns(rows, identity, 12).map((p) => p.index), [1, 2, 3, 4]);
+  assert.deepEqual(nearestCrossingRuns(rows, identity, 12).map((p) => p.index), [6, 2, 3, 4]);
   assert.deepEqual(nearestCrossingRuns(rows, identity, 89).map((p) => p.index), [0, 5, 4, 3]);
   const ties = [{ index: 1, positions: [4] }, { index: 0, positions: [6] }];
   assert.deepEqual(nearestCrossingRuns(ties, identity, 5).map((p) => p.index), [0, 1]);
@@ -107,4 +107,16 @@ test("legend eligibility excludes empty, invalid, log-excluded and invisible geo
   config.style.pointSize = 4;
   config.style.alpha = 0;
   assert.equal(plottedSeries(d([[1, 2], [2, 3]]), config, 0), false);
+});
+
+
+test("distinct-run popup keeps nearest-series identity while combining crossings", () => {
+  const rows = [{ index: 0, positions: [10, 90] }, { index: 1, positions: [45, 55] }];
+  const identity = () => "same-run";
+  assert.equal(nearestCrossingRuns(rows, identity, 50)[0].index, 1);
+  assert.deepEqual(nearestCrossingRuns(rows, identity, 50)[0].positions, [45, 55]);
+  assert.equal(nearestCrossingRuns(rows, identity, 11)[0].index, 0);
+  const ties = [{ index: 1, positions: [40] }, { index: 0, positions: [60] }];
+  assert.equal(nearestCrossingRuns(ties, identity, 50)[0].index, 0);
+  assert.deepEqual(rows[0].positions, [10, 90]);
 });

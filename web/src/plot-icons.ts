@@ -1,4 +1,6 @@
+export const NAVIGATE_LABEL = "Touch navigation: drag to inspect, two fingers to pan and pinch to zoom";
 const paths = {
+  navigate: "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0M14.5 14.5 21 21",
   "zoom-in": "M5 12h14M12 5v14",
   "zoom-out": "M5 12h14",
   fit: "M3 10.5 12 3l9 7.5M5 9v12h14V9M9 21v-7h6v7",
