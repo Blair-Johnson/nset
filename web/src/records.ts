@@ -50,6 +50,7 @@ export interface RecordRow {
   data: unknown;
 }
 export interface RecordResult {
+  source_generation?: string;
   diagnostics: RecordDiagnostics;
   coverage: string;
   fields: FieldHint[];
@@ -166,11 +167,10 @@ export function validateRecordBinding(value: unknown): RecordBinding {
     throw new Error("Invalid rx source identity.");
   if (
     !Array.isArray(b.runUids) ||
-    b.runUids.length > 32 ||
     b.runUids.some((v) => typeof v !== "string" || !v || v.length > 128) ||
     new Set(b.runUids).size !== b.runUids.length
   )
-    throw new Error("Choose at most 32 distinct rx runs.");
+    throw new Error("Choose distinct rx run identities.");
   recordPath(b.x);
   if (
     !Array.isArray(b.ys) ||
@@ -213,11 +213,12 @@ export function recordRuns(
   catalog: Catalog,
   selected: string[],
 ): string[] {
+  const selection = new Set(selected);
   return binding.runUids.length
     ? binding.runUids
     : catalog.runs
         .filter(
-          (r) => selected.includes(r.id) && r.rx?.sourceId === binding.sourceId,
+          (r) => selection.has(r.id) && r.rx?.sourceId === binding.sourceId,
         )
         .map((r) => r.rx!.uid);
 }
@@ -228,6 +229,7 @@ export function recordRequest(
 ) {
   return {
     source_id: binding.sourceId,
+    source_generation: catalog.rx?.sourceGeneration,
     runs: recordRuns(binding, catalog, selected),
     x: binding.x,
     ys: binding.ys,
@@ -273,54 +275,254 @@ export async function loadRecordPlot(
   warning: string;
 }> {
   validateRecordBinding(b);
-  const response = await api.post<RecordResult>(
-    "/rx/plot",
-    recordRequest(b, catalog, selected),
-    signal,
+  const request = recordRequest(b, catalog, selected);
+  if (!request.runs.length) throw new Error("Select rx runs to plot.");
+  const sourceRuns = new Map(
+    catalog.runs
+      .filter((r) => r.rx?.sourceId === b.sourceId)
+      .map((r) => [r.rx!.uid, r]),
   );
-  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const sources: ResolvedSeries[] = [];
-  const data = response.traces.map((t) => {
-    const source = catalog.runs.find(
-      (r) => r.rx?.sourceId === b.sourceId && r.rx.uid === t.run_uid,
-    );
-    if (!source)
-      throw new Error(
-        "The saved rx run is unavailable; refresh the source catalog.",
+  const data: PlotRun[] = [];
+  const traces = new Map<string, PlotRun>();
+  const diagnostics = emptyDiagnostics();
+  let generation = request.source_generation;
+  let restarted = false;
+  // The run count is a transport budget, never a selection/trace limit.
+  // Sequential bounded requests also release each SQLite snapshot promptly.
+  for (
+    let offset = 0;
+    offset < request.runs.length;
+    offset += RECORD_BATCH_SIZE
+  ) {
+    const runs = request.runs.slice(offset, offset + RECORD_BATCH_SIZE);
+    let cursor: unknown = null;
+    const seen = new Set<string>();
+    do {
+      checkAbort(signal);
+      const response = await api.post<RecordResult>(
+        "/rx/plot",
+        {
+          ...request,
+          runs,
+          cursor,
+          source_generation: generation,
+        },
+        signal,
       );
-    const run = {
-      ...source,
-      id: t.id ?? JSON.stringify([b.sourceId, t.run_uid, t.y, t.group]),
-      name: `${source.name} · ${t.y}${b.group ? ` · ${b.group}=${t.group_label ?? JSON.stringify(t.group)}` : ""}`,
-    };
-    sources.push({
-      id: run.id,
-      runId: source.id,
-      key: t.y,
-      kind: "metric",
-      run: source,
-      label: run.name,
-    });
-    return {
-      run,
-      raw: [],
-      paired: {
-        key: b.x,
-        points: t.points.map(([x, y]) => [x, y] as [number, number]),
-      },
-    };
-  });
-  const restarted = response.traces.some((t) =>
-    t.points.some((p, i) => i > 0 && p[0] <= t.points[i - 1][0]),
-  );
+      checkAbort(signal);
+      generation = checkGeneration(generation, response);
+      if (
+        response.diagnostics.invalid_json ||
+        response.diagnostics.oversized ||
+        response.diagnostics.omitted_traces ||
+        (response.diagnostics.partial && response.next_cursor == null)
+      )
+        throw new Error(
+          `Record plot could not complete: ${response.diagnostics.reasons.join(", ")}`,
+        );
+      addDiagnostics(diagnostics, response.diagnostics);
+      for (const t of response.traces) {
+        const id =
+          t.id ?? JSON.stringify([b.sourceId, t.run_uid, t.y, t.group]);
+        let plot = traces.get(id);
+        if (!plot) {
+          const source = sourceRuns.get(t.run_uid);
+          if (!source)
+            throw new Error(
+              "The saved rx run is unavailable; refresh the source catalog.",
+            );
+          const run = {
+            ...source,
+            id,
+            name: `${source.name} · ${t.y}${b.group ? ` · ${b.group}=${t.group_label ?? JSON.stringify(t.group)}` : ""}`,
+          };
+          sources.push({
+            id,
+            runId: source.id,
+            key: t.y,
+            kind: "metric",
+            run: source,
+            label: run.name,
+          });
+          plot = { run, raw: [], paired: { key: b.x, points: [] } };
+          traces.set(id, plot);
+          data.push(plot);
+        }
+        const points = plot.paired!.points;
+        for (const [x, y] of t.points) {
+          if (points.length && x <= points[points.length - 1][0])
+            restarted = true;
+          points.push([x, y]);
+        }
+      }
+      cursor = response.next_cursor ?? null;
+      if (cursor !== null) {
+        const key = JSON.stringify(cursor);
+        if (seen.has(key))
+          throw new Error("Record plot made no progress; retry the query.");
+        seen.add(key);
+      }
+    } while (cursor !== null);
+  }
+  // Page-budget diagnostics describe transport, not an incomplete final plot.
+  diagnostics.partial = false;
+  diagnostics.reasons = [];
   return {
     data,
     sources,
-    warning: response.diagnostics.partial
-      ? `Partial result: ${response.diagnostics.reasons.join(", ")}`
-      : "",
-    notes: `${recordNotes(response)}${restarted ? " · Repeated/restarted X retained in event order; grouping uses only each record’s own scalar field." : ""}`,
+    warning: "",
+    notes: `${recordNotes({ diagnostics } as RecordResult)}${restarted ? " · Repeated/restarted X retained in event order; grouping uses only each record’s own scalar field." : ""}`,
   };
+}
+// Shared by complete plot loads and sampled field/record inspection controls.
+const RECORD_BATCH_SIZE = 32;
+function checkAbort(signal?: AbortSignal) {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+}
+function checkGeneration(expected: string | undefined, response: RecordResult) {
+  if (expected !== undefined && response.source_generation !== expected)
+    throw new Error("rx source changed; refresh the catalog.");
+  return response.source_generation ?? expected;
+}
+function emptyDiagnostics(): RecordDiagnostics {
+  return {
+    scanned: 0,
+    matched: 0,
+    bytes: 0,
+    invalid_json: 0,
+    oversized: 0,
+    skipped_axes: 0,
+    skipped_groups: 0,
+    omitted_traces: 0,
+    points: 0,
+    partial: false,
+    reasons: [],
+  };
+}
+function addDiagnostics(target: RecordDiagnostics, value: RecordDiagnostics) {
+  for (const key of [
+    "scanned",
+    "matched",
+    "bytes",
+    "invalid_json",
+    "oversized",
+    "skipped_axes",
+    "skipped_groups",
+    "omitted_traces",
+    "points",
+  ] as const)
+    target[key] += value[key] ?? 0;
+  target.partial ||= value.partial;
+  target.reasons = [...new Set([...target.reasons, ...value.reasons])];
+}
+type RecordQuery = ReturnType<typeof recordRequest> & {
+  cursor?: unknown;
+  limit?: number;
+  prefix?: string;
+  search?: string;
+};
+interface RecordPageCursor {
+  scope: string;
+  source_generation?: string;
+  batch: number;
+  cursors: (string | null)[];
+}
+/** A sampled field page visits every run batch. Inspection keeps normal record
+ * pages but moves across empty batches automatically. Composite cursors are
+ * local transport state; the server signs each underlying continuation. */
+export async function loadRecordPage(
+  api: Api,
+  route: "/rx/fields" | "/rx/records",
+  request: RecordQuery,
+  signal?: AbortSignal,
+): Promise<RecordResult> {
+  const { cursor: supplied, ...query } = request;
+  if (!query.runs.length) throw new Error("Select rx runs to inspect.");
+  const scope = JSON.stringify([route, query]);
+  const cursor = supplied as RecordPageCursor | null | undefined;
+  if (cursor && (cursor.scope !== scope || !Array.isArray(cursor.cursors)))
+    throw new Error("Record selection changed; restart inspection.");
+  const state: RecordPageCursor = cursor
+    ? structuredClone(cursor)
+    : {
+        scope,
+        source_generation: query.source_generation,
+        batch: 0,
+        cursors: [],
+      };
+  const result: RecordResult = {
+    diagnostics: emptyDiagnostics(),
+    fields: [],
+    records: [],
+    traces: [],
+    next_cursor: null,
+    coverage: "",
+  };
+  const hints = new Map<string, FieldHint>();
+  const batches = Math.ceil(query.runs.length / RECORD_BATCH_SIZE);
+  for (
+    let batch = route === "/rx/fields" ? 0 : state.batch;
+    batch < batches;
+    batch++
+  ) {
+    if (cursor && state.cursors[batch] === null) continue;
+    checkAbort(signal);
+    const page = await api.post<RecordResult>(
+      route,
+      {
+        ...query,
+        runs: query.runs.slice(
+          batch * RECORD_BATCH_SIZE,
+          (batch + 1) * RECORD_BATCH_SIZE,
+        ),
+        cursor: state.cursors[batch] ?? null,
+        source_generation: state.source_generation,
+      },
+      signal,
+    );
+    checkAbort(signal);
+    state.source_generation = checkGeneration(state.source_generation, page);
+    if (page.next_cursor != null && page.next_cursor === state.cursors[batch])
+      throw new Error("Record query made no progress; restart inspection.");
+    state.cursors[batch] = (page.next_cursor as string | null) ?? null;
+    addDiagnostics(result.diagnostics, page.diagnostics);
+    result.coverage = page.coverage;
+    result.records.push(...(page.records ?? []));
+    for (const hint of page.fields ?? []) {
+      const old = hints.get(hint.path);
+      if (!old) hints.set(hint.path, structuredClone(hint));
+      else {
+        old.present += hint.present;
+        old.types = [...new Set([...old.types, ...hint.types])];
+        old.values = [
+          ...new Map(
+            [...old.values, ...hint.values].map((value) => [
+              JSON.stringify(value),
+              value,
+            ]),
+          ).values(),
+        ].slice(0, 8);
+      }
+    }
+    state.batch = state.cursors[batch] === null ? batch + 1 : batch;
+    if (
+      route === "/rx/records" &&
+      (result.records.length || page.next_cursor != null)
+    )
+      break;
+  }
+  result.fields = [...hints.values()].slice(0, query.limit ?? 64);
+  result.source_generation = state.source_generation;
+  result.next_cursor =
+    route === "/rx/fields"
+      ? state.cursors.some((value) => value !== null)
+        ? state
+        : null
+      : state.batch < batches
+        ? state
+        : null;
+  return result;
 }
 interface RxCatalog {
   source: { id: string; name: string; readonly: true } | null;
