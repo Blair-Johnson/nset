@@ -814,6 +814,94 @@ test("cursor pairs return to zoom and existing horizontal/vertical pins drag dir
   expect(after.pins).toEqual(pins);
 });
 
+for (const touch of [false, true]) {
+  test.describe(`cursor toolbar ${touch ? "touch" : "mouse"}`, () => {
+    test.use({
+      hasTouch: touch,
+      viewport: touch ? { width: 390, height: 844 } : { width: 1500, height: 1100 },
+    });
+
+    test("active axis toggles off, other axis switches, and pins/camera survive", async ({ page }) => {
+      await fixture(page);
+      const button = (axis: "x" | "y") => page.getByRole("button", {
+        name: axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
+        exact: true,
+      });
+      const activate = async (axis: "x" | "y") => {
+        if (touch) await button(axis).tap();
+        else await button(axis).click();
+      };
+      const point = async (x: number, y: number) => page.evaluate(async ({ x, y }) => {
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        const u = (window as any).geometry.card.plot.chart;
+        const rect = u.over.getBoundingClientRect();
+        return { x: rect.left + u.valToPos(x, "x"), y: rect.top + u.valToPos(y, "y") };
+      }, { x, y });
+      const place = async (x: number, y: number) => {
+        const p = await point(x, y);
+        if (touch) await page.touchscreen.tap(p.x, p.y);
+        else await page.mouse.click(p.x, p.y);
+      };
+      const mode = async (axis: "x" | "y" | null) => {
+        await expect(button("x")).toHaveAttribute("aria-pressed", String(axis === "x"));
+        await expect(button("y")).toHaveAttribute("aria-pressed", String(axis === "y"));
+        expect(await page.evaluate(() => (window as any).geometry.card.mode))
+          .toBe(axis ? "inspect" : "zoom");
+      };
+
+      // Place both real pairs, then zoom so toggling cannot silently reset the camera.
+      await activate("x");
+      await place(1, 0.4);
+      await place(5, 0.4);
+      await mode(null);
+      await activate("y");
+      await place(3, 0.3);
+      await place(3, 1.7);
+      await mode(null);
+      const zoom = page.getByRole("button", { name: "Zoom in", exact: true });
+      if (touch) await zoom.tap();
+      else await zoom.click();
+      const before = await snapshot(page);
+      expect(before.pins.a).toBeCloseTo(1, 1);
+      expect(before.pins.b).toBeCloseTo(5, 1);
+      expect(before.pins.yA).toBeCloseTo(0.3, 1);
+      expect(before.pins.yB).toBeCloseTo(1.7, 1);
+      expect(before.history).toBe(true);
+
+      for (const axis of ["x", "y"] as const) {
+        await activate(axis);
+        await mode(axis);
+        await activate(axis);
+        await mode(null);
+        await place(3, 0.9); // An ordinary click/tap must not place another pin.
+        expect(await snapshot(page)).toEqual(before);
+      }
+      await activate("x");
+      await mode("x");
+      await activate("y");
+      await mode("y");
+      await activate("x");
+      await mode("x");
+      await activate("x");
+      await mode(null);
+      expect(await snapshot(page)).toEqual(before);
+
+      if (!touch) {
+        const start = await point(2, 0.7), end = await point(4, 1.3);
+        await page.mouse.move(start.x, start.y);
+        await page.mouse.down();
+        await page.mouse.move(end.x, end.y, { steps: 8 });
+        await page.mouse.up();
+        const after = await snapshot(page);
+        expect(after.viewport.x[1] - after.viewport.x[0])
+          .toBeLessThan(before.viewport.x[1] - before.viewport.x[0]);
+        expect(after.pins).toEqual(before.pins);
+        await mode(null);
+      }
+    });
+  });
+}
 test("an armed cursor drag zooms without placing or advancing", async ({
   page,
 }) => {

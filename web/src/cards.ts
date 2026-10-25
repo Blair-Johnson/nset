@@ -477,10 +477,14 @@ export class ChartCard {
       ["y", "horizontal-cursor", "Add horizontal cursor"],
     ] as const) {
       const control = iconButton(icon, label, () => {
-        this.cursorAxis = axis;
-        this.activePin = "a";
-        this.mode = "inspect";
-        this.inspectOpen = true;
+        if (this.mode === "inspect" && this.cursorAxis === axis) {
+          this.mode = "zoom";
+        } else {
+          this.cursorAxis = axis;
+          this.activePin = "a";
+          this.mode = "inspect";
+          this.inspectOpen = true;
+        }
         this.configure();
       });
       this.cursorButtons.set(axis, control);
