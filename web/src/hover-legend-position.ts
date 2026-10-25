@@ -45,7 +45,7 @@ export class HoverLegendPosition {
   private corners?: LegendCorners;
   private overlay?: HTMLElement;
   private frame = 0;
-  private resize = new ResizeObserver(() => this.measure());
+  private resize = new ResizeObserver(() => this.schedule());
   private mutation = new MutationObserver(() => this.schedule());
 
   constructor(
@@ -101,23 +101,23 @@ export class HoverLegendPosition {
     const plot = overlay.getBoundingClientRect();
     const popup = this.popup.getBoundingClientRect();
     const container = parent.getBoundingClientRect();
-    // Mirror the actual border box across the containing block's usable width,
-    // including its border/scrollbar. Both CSS corners use the same inset.
-    const offset = popup.left - container.left - parent.clientLeft;
-    const current = {
-      x: popup.left - plot.left,
-      y: popup.top - plot.top,
-      width: popup.width,
-      height: popup.height,
+    // Mirror the actual border box across the inner plot, excluding axes and dynamic tick labels.
+    const inset = 8;
+    const availableWidth = Math.max(0, plot.width - 2 * inset);
+    const availableHeight = Math.max(0, plot.height - 2 * inset);
+    const width = Math.min(popup.width, availableWidth);
+    const height = Math.min(popup.height, availableHeight);
+    const originX = container.left + parent.clientLeft - parent.scrollLeft;
+    const originY = container.top + parent.clientTop - parent.scrollTop;
+    this.popup.style.setProperty("--legend-left", `${plot.left - originX + inset}px`);
+    this.popup.style.setProperty("--legend-right", `${parent.clientWidth - (plot.right - originX) + inset}px`);
+    this.popup.style.setProperty("--legend-top", `${plot.top - originY + inset}px`);
+    this.popup.style.setProperty("--legend-width", `${availableWidth}px`);
+    this.popup.style.setProperty("--legend-height", `${availableHeight}px`);
+    this.corners = {
+      left: { x: inset, y: inset, width, height },
+      right: { x: plot.width - inset - width, y: inset, width, height },
     };
-    const opposite = {
-      ...current,
-      x: current.x + parent.clientWidth - popup.width - 2 * offset,
-    };
-    this.corners =
-      this.side === "right"
-        ? { right: current, left: opposite }
-        : { left: current, right: opposite };
     this.update(this.pointer);
   }
 

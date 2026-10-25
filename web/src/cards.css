@@ -476,11 +476,12 @@
 .card-hover {
   position: absolute;
   z-index: 5;
-  top: 43px;
-  right: 15px;
-  width: min(290px, calc(100% - 45px));
+  top: var(--legend-top, 43px);
+  right: var(--legend-right, 15px);
+  box-sizing: border-box;
+  width: min(290px, var(--legend-width, calc(100% - 45px)));
   height: auto;
-  max-height: 112px;
+  max-height: min(112px, var(--legend-height, 112px));
   overflow: auto;
   white-space: normal;
   padding: 4px 7px;
@@ -490,7 +491,7 @@
   pointer-events: none;
 }
 .card-hover[data-side="left"] {
-  left: 15px;
+  left: var(--legend-left, 15px);
   right: auto;
 }
 .card-hover:empty {
@@ -682,9 +683,6 @@
 }
 .card-results {
   margin-top: 0;
-}
-.card-hover {
-  top: 12px;
 }
 .card-maximized .card-content {
   overflow: auto;

@@ -28,7 +28,7 @@ async function fixture(page: Page, mobile = false) {
       document.body.style.cssText =
         "margin:12px;background:#191c20;color:#ddd;font:13px system-ui;--surface:#202429;--surface-raised:#252a30;--border:#42474e;--text:#ddd;--muted:#aaa;--control-border:#555;--accent:#7dd3fc;--selected:#304557";
       const host = document.createElement("div");
-      host.style.cssText = `width:${mobile ? 390 : 720}px;max-width:100%`;
+      host.style.cssText = `width:${mobile ? 390 : 1000}px;max-width:100%`;
       document.body.append(host);
       const runs = names.map((name, i) => ({
         id: String(i),
@@ -60,7 +60,7 @@ async function fixture(page: Page, mobile = false) {
       };
       const spec = newChart("timeseries", ["loss"], "Legend position");
       spec.source = { mode: "explicit", series: refs };
-      spec.layout = { width: mobile ? 390 : 720, height: 480 };
+      spec.layout = { width: mobile ? 390 : 1000, height: 480 };
       Object.assign(spec.config, {
         xMin: 0,
         xMax: 100,
@@ -113,6 +113,10 @@ const popup = (page: Page) => page.locator(".card-hover");
 const side = (page: Page) =>
   popup(page).evaluate((el) => (el as HTMLElement).dataset.side ?? "right");
 async function prime(page: Page) {
+  await page.evaluate(async () => {
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+  });
   const over = (await page.locator(".u-over").boundingBox())!;
   await page.mouse.move(over.x + over.width / 2, over.y + over.height * 0.7);
   await expect(popup(page).locator(".card-hover-row")).toHaveCount(4);
@@ -221,8 +225,12 @@ test("resized/maximized cards and clipping offsets use the current measured boun
   await prime(page);
   const actual = (await popup(page).boundingBox())!;
   const plot = (await page.locator(".u-over").boundingBox())!;
-  await page.mouse.move(actual.x + 20, plot.y + 3);
-  await expect.poll(() => side(page)).toBe("right"); // popup now above the crosshair
+  await expectInsidePlot(page);
+  await page.mouse.move(actual.x + actual.width - 20, actual.y + actual.height / 2);
+  await expect.poll(() => side(page)).toBe("left");
+  await expectInsidePlot(page);
+  await page.mouse.move(plot.x + plot.width / 2, plot.y + plot.height * 0.7);
+  await expect.poll(() => side(page)).toBe("right");
 });
 
 test("narrow touch: dodge, retain contents, and do not oscillate in overlapping corners", async ({
@@ -243,7 +251,7 @@ test("narrow touch: dodge, retain contents, and do not oscillate in overlapping 
     type: "touchStart",
     touchPoints: [point],
   });
-  await expect.poll(() => side(page)).toBe("left");
+  await expect.poll(() => side(page)).toBe("right");
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchEnd",
     touchPoints: [],
@@ -264,7 +272,7 @@ test("narrow touch: dodge, retain contents, and do not oscillate in overlapping 
       type: "touchMove",
       touchPoints: [{ ...point, x: point.x + (i % 2) }],
     });
-    await expect.poll(() => side(page)).toBe("left");
+    await expect.poll(() => side(page)).toBe("right");
   }
   point.y = over.y + over.height * 0.7;
   await cdp.send("Input.dispatchTouchEvent", {
@@ -332,6 +340,7 @@ test("stationary and fresh touch crosshairs use the resized corners", async ({
   context,
 }) => {
   await fixture(page, true);
+  await popup(page).evaluate((el: HTMLElement) => { el.style.width = "150px"; });
   await page.setViewportSize({ width: 1200, height: 950 });
   await page
     .getByRole("button", {
@@ -377,3 +386,51 @@ test("stationary and fresh touch crosshairs use the resized corners", async ({
     touchPoints: [],
   });
 });
+
+async function expectInsidePlot(page: Page) {
+  await expect.poll(async () => {
+    const box = await popup(page).boundingBox();
+    const plot = await page.locator(".u-over").boundingBox();
+    return !!box && !!plot && box.x >= plot.x && box.y >= plot.y &&
+      box.x + box.width <= plot.x + plot.width + 0.5 &&
+      box.y + box.height <= plot.y + plot.height + 0.5;
+  }).toBe(true);
+  const box = (await popup(page).boundingBox())!;
+  for (const tick of await page.locator('[data-role^="mouse-axis-tick-"]:visible').all()) {
+    const bounds = await tick.boundingBox();
+    if (bounds) expect(bounds.x + bounds.width <= box.x ||
+      bounds.x >= box.x + box.width || bounds.y + bounds.height <= box.y ||
+      bounds.y >= box.y + box.height).toBe(true);
+  }
+}
+
+for (const mobile of [false, true]) {
+  test(`popup stays inside the axes in both corners and after resize (${mobile ? "mobile" : "desktop"})`, async ({ page }) => {
+    await fixture(page, mobile);
+    await page.evaluate((mobile) => {
+      const f = (window as any).legendFixture;
+      f.host.style.width = `${mobile ? 390 : 1000}px`;
+      f.spec.layout.width = mobile ? 390 : 1000;
+      f.card.applyDimensions();
+    }, mobile);
+    await prime(page);
+    await expectInsidePlot(page);
+    const plot = (await page.locator(".u-over").boundingBox())!;
+    await page.mouse.move(plot.x + plot.width - 10, plot.y + 20);
+    await expectInsidePlot(page);
+    if (!mobile) await expect.poll(() => side(page)).toBe("left");
+    await page.locator(".chart-card").screenshot({ path: test.info().outputPath("popup-inside-plot.png") });
+    await page.mouse.move(plot.x + 10, plot.y + 20);
+    await expectInsidePlot(page);
+    await expect.poll(() => side(page)).toBe("right");
+    await page.evaluate(() => {
+      document.querySelector<HTMLElement>(".card-clipping")!.style.height = "80px";
+      const f = (window as any).legendFixture;
+      f.spec.layout.height = 360;
+      f.card.applyDimensions();
+    });
+    await prime(page);
+    await expectInsidePlot(page);
+    await checkContents(page);
+  });
+}
