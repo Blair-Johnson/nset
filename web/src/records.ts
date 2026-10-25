@@ -512,7 +512,16 @@ export async function loadRecordPage(
     )
       break;
   }
-  result.fields = [...hints.values()].slice(0, query.limit ?? 64);
+  // Preserve returned exact paths before capping cross-batch suggestions. The
+  // completion menu cannot recover a late-batch exact hint discarded here.
+  const prefix = (query.search || query.prefix || "").toLowerCase();
+  const rank = (path: string) => {
+    const value = path.toLowerCase();
+    return value === prefix ? 0 : value.startsWith(prefix) ? 1 : 2;
+  };
+  result.fields = [...hints.values()]
+    .sort((a, b) => rank(a.path) - rank(b.path))
+    .slice(0, query.limit ?? 64);
   result.source_generation = state.source_generation;
   result.next_cursor =
     route === "/rx/fields"

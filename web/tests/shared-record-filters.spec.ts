@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import { recordValue } from "../src/records";
 
-async function fixture(page: Page, selectedCount = 1) {
+async function fixture(page: Page, selectedCount = 1, lateExact = "") {
   const requests: { path: string; body: any }[] = [];
   let failHints = false;
   let delayPrefix = "";
@@ -9,6 +9,7 @@ async function fixture(page: Page, selectedCount = 1) {
     step: i + 1,
     phase: i < 51 ? "train" : "probe",
     phase_detail: "detail",
+    "phase.name": "train",
     kind: i < 51 ? "metric" : "probe",
     loss: 1 / (i + 1),
     metrics: { loss: i + 0.5 },
@@ -104,26 +105,42 @@ async function fixture(page: Page, selectedCount = 1) {
             values,
           };
         });
+      if (lateExact && body.prefix === lateExact) {
+        base.fields = (
+          body.runs.includes("uid32")
+            ? [lateExact]
+            : Array.from({ length: 64 }, (_, i) => `${lateExact}_detail_${i}`)
+        ).map((path) => ({
+          path,
+          types: ["string"],
+          present: 1,
+          values: ["train"],
+        }));
+      }
     } else if (path.endsWith("plot")) {
       const groups = body.group
         ? [...new Set(selected.map((r) => recordValue(r, body.group)))]
         : [null];
-      base.traces = body.ys.flatMap((y: string) =>
-        groups.map((group) => ({
-          run_uid: "uid0",
-          y,
-          group,
-          points: selected
-            .filter((r) => !body.group || recordValue(r, body.group) === group)
-            .map((r) => [
-              recordValue(r, body.x),
-              recordValue(r, y),
-              String(r.step),
-            ])
-            .filter(
-              (p) => typeof p[0] === "number" && typeof p[1] === "number",
-            ),
-        })),
+      base.traces = body.runs.flatMap((run_uid: string) =>
+        body.ys.flatMap((y: string) =>
+          groups.map((group) => ({
+            run_uid,
+            y,
+            group,
+            points: selected
+              .filter(
+                (r) => !body.group || recordValue(r, body.group) === group,
+              )
+              .map((r) => [
+                recordValue(r, body.x),
+                recordValue(r, y),
+                String(r.step),
+              ])
+              .filter(
+                (p) => typeof p[0] === "number" && typeof p[1] === "number",
+              ),
+          })),
+        ),
       );
     }
     await route.fulfill({ json: base });
@@ -577,10 +594,20 @@ test("many selected runs do not constrain the editor or its discovery provider",
   await expect
     .poll(
       () =>
-        f.requests.filter((r) => r.path.endsWith("fields")).at(-1)?.body.runs
-          .length,
+        new Set(
+          f.requests
+            .filter(
+              (r) => r.path.endsWith("fields") && r.body.prefix === "phase",
+            )
+            .flatMap((r) => r.body.runs),
+        ).size,
     )
     .toBe(70);
+  expect(
+    f.requests
+      .filter((r) => r.path.endsWith("fields"))
+      .every((r) => r.body.runs.length <= 32),
+  ).toBe(true);
   await expect(editor(page).getByText(/maximum 32|at most 32/)).toHaveCount(0);
 });
 
@@ -609,4 +636,64 @@ test("typed numeric values are not replaced by sampled prefixes; corrected paths
     .getByRole("button", { name: "Add chart", exact: true })
     .click();
   await expect(editor(page)).toHaveCount(0);
+});
+
+for (const exactPath of ["phase", '$["phase.name"]']) {
+  test(`late-batch exact ${exactPath} stays exact on shared-menu Tab`, async ({
+    page,
+  }) => {
+    const f = await fixture(page, 33, exactPath);
+    await openMenu(page);
+    await menu(page)
+      .getByRole("button", { name: "+ Add condition", exact: true })
+      .click();
+    const path = menu(page).getByLabel("Condition 1 path", { exact: true });
+    await path.fill(exactPath);
+    await expect(
+      page.getByRole("option", {
+        name: `${exactPath} Event \u00b7 string \u00b7 train`,
+        exact: true,
+      }),
+    ).toBeVisible();
+    await path.press("Tab");
+    await expect(path).toHaveValue(exactPath);
+    const value = menu(page).getByLabel("Condition 1 value", { exact: true });
+    await value.fill("train");
+    await value.press("Tab");
+    await expect(value).toHaveValue("train");
+    await expect
+      .poll(() => lastPlot(f.requests)?.filters.conditions)
+      .toEqual([{ path: exactPath, op: "eq", value: "train" }]);
+  });
+}
+
+test("late shared hints cannot replace a newer query across 70 selected runs", async ({
+  page,
+}) => {
+  const f = await fixture(page, 70);
+  f.delay("phase");
+  await openMenu(page);
+  await menu(page)
+    .getByRole("button", { name: "+ Add condition", exact: true })
+    .click();
+  const path = menu(page).getByLabel("Condition 1 path", { exact: true });
+  await path.fill("phase");
+  await path.press("Tab");
+  await path.fill("kind");
+  await path.press("Tab");
+  const value = menu(page).getByLabel("Condition 1 value", { exact: true });
+  await value.fill("metric");
+  await value.press("Tab");
+  await count(page, 51 * 70);
+  await page.waitForTimeout(800);
+  await expect(path).toHaveValue("kind");
+  await expect(value).toHaveValue("metric");
+  expect(lastPlot(f.requests).filters.conditions).toEqual([
+    { path: "kind", op: "eq", value: "metric" },
+  ]);
+  await editor(page)
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Open records", exact: true }).click();
+  await count(page, 62 * 70);
 });

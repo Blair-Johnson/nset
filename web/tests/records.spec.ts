@@ -761,21 +761,24 @@ async function freshCompletionEditor(page: Page) {
       json: {
         diagnostics: {
           ...diagnostics,
-          partial: mode === "partial",
-          reasons: mode === "partial" ? ["point budget reached"] : [],
+          partial: mode === "partial" && !body.cursor,
+          reasons:
+            mode === "partial" && !body.cursor ? ["point budget reached"] : [],
         },
         fields: [],
         records: [],
-        next_cursor: null,
+        next_cursor: mode === "partial" && !body.cursor ? "page2" : null,
         coverage: "bounded snapshot",
         traces: body.ys.map((y: string) => ({
           run_uid: "uid",
           y,
           group: null,
-          points: [
-            [1, 0.2, "5"],
-            [1, 0.3, "7"],
-          ],
+          points: body.cursor
+            ? [[2, 0.4, "9"]]
+            : [
+                [1, 0.2, "5"],
+                [1, 0.3, "7"],
+              ],
         })),
       },
     });
@@ -894,10 +897,10 @@ test("offered sampled field completes by direct Tab without arrow selection", as
   await expect(y).toBeFocused();
 });
 
-test("saved record cards omit routine diagnostics but expose truncation and failures", async ({
+test("saved record cards complete pagination without routine diagnostics and expose failures", async ({
   page,
 }) => {
-  const { editor, setMode } = await freshCompletionEditor(page);
+  const { editor, setMode, requests } = await freshCompletionEditor(page);
   const x = editor.getByLabel("Record X field", { exact: true });
   await x.fill("epoch");
   await x.press("Enter");
@@ -915,12 +918,16 @@ test("saved record cards omit routine diagnostics but expose truncation and fail
   await expect(card.locator(".card-notice")).toBeHidden();
   setMode("partial");
   await page.reload();
-  await expect(card.locator(".card-notice")).toContainText(
-    "Partial result: point budget reached",
-  );
-  await expect(card.locator(".card-notice")).not.toContainText(
-    /matching|skipped|Repeated/,
-  );
+  await expect(card.locator(".uplot")).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        requests.filter(
+          (r) => r.path.endsWith("plot") && r.body.cursor === "page2",
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  await expect(card.locator(".card-notice")).toBeHidden();
   setMode("error");
   await page.reload();
   await expect(card).toContainText("Could not load chart:");

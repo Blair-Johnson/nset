@@ -11,13 +11,13 @@ import {
 import type { FieldPage } from "./run-filter-session";
 import { formatFilterValue } from "./run-filter";
 import {
+  loadRecordPage,
   recordPath,
   recordRequest,
   recordRuns,
   recordNotes,
   recordValue,
   type RecordBinding,
-  type RecordResult,
   type FieldHint,
 } from "./records";
 
@@ -156,7 +156,8 @@ export function mountRecordControls(
       const filters = structuredClone(b.filters);
       // Do not send incomplete other conditions as an accidental global query.
       try {
-        const result = await api.post<RecordResult>(
+        const result = await loadRecordPage(
+          api,
           "/rx/fields",
           { ...request(), filters, prefix },
           controller.signal,
@@ -334,7 +335,8 @@ export function mountRecordControls(
     const filters = context
       ? menuToRecordFilters(context.filter, context.index)
       : b.filters;
-    const result = await api.post<RecordResult>(
+    const result = await loadRecordPage(
+      api,
       "/rx/fields",
       { ...request(), filters, prefix },
       signal,
@@ -414,7 +416,8 @@ export function mountRecordControls(
     pageStatus.textContent = "Loading up to 25 records…";
     next.disabled = true;
     try {
-      const result = await api.post<RecordResult>(
+      const result = await loadRecordPage(
+        api,
         "/rx/records",
         { ...request(), limit: 25, cursor },
         controller.signal,

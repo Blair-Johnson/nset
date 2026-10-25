@@ -353,3 +353,94 @@ test("composite inspection cursors bind the entire selection and propagate backe
   );
   assert.equal(calls, 3);
 });
+
+test("late-batch exact nested and literal hints survive the merged cap", async () => {
+  for (const lookup of ["prefix", "search"])
+    for (const path of ["phase", '$["phase.name"]']) {
+      const c = catalog(33);
+      const query = {
+        ...recordRequest(
+          binding,
+          c,
+          c.runs.map((r) => r.id),
+        ),
+        [lookup]: path,
+      };
+      const api = new Api(
+        () => "test",
+        async (_url, init) => {
+          const q = JSON.parse(init!.body as string);
+          return reply(
+            page({
+              fields: (q.runs.includes("u32")
+                ? [path]
+                : Array.from({ length: 64 }, (_, i) => `${path}_detail_${i}`)
+              ).map((path) => ({
+                path,
+                present: 1,
+                types: ["string"],
+                values: ["train"],
+              })),
+            }),
+          );
+        },
+      );
+      const result = await loadRecordPage(api, "/rx/fields", query);
+      assert.equal(result.fields.length, 64);
+      assert.equal(result.fields[0].path, path);
+    }
+});
+
+test("incomplete plot pages without a cursor fail instead of publishing partial success", async () => {
+  const c = catalog(64);
+  const result = page();
+  result.diagnostics.partial = true;
+  result.diagnostics.reasons = ["point budget reached"];
+  const api = new Api(
+    () => "test",
+    async () => reply(result),
+  );
+  await assert.rejects(
+    loadRecordPlot(
+      api,
+      binding,
+      c,
+      c.runs.map((r) => r.id),
+    ),
+    /could not complete/i,
+  );
+});
+
+test("field batches reject cancellation and source generation changes", async () => {
+  const c = catalog(64);
+  const query = recordRequest(
+    binding,
+    c,
+    c.runs.map((r) => r.id),
+  );
+  const controller = new AbortController();
+  let calls = 0;
+  const canceled = new Api(
+    () => "test",
+    async () => {
+      calls++;
+      controller.abort();
+      return reply(page());
+    },
+  );
+  await assert.rejects(
+    loadRecordPage(canceled, "/rx/fields", query, controller.signal),
+    { name: "AbortError" },
+  );
+  assert.equal(calls, 1);
+  calls = 0;
+  const stale = new Api(
+    () => "test",
+    async () => reply(page({ source_generation: ++calls === 1 ? "g1" : "g2" })),
+  );
+  await assert.rejects(
+    loadRecordPage(stale, "/rx/fields", query),
+    /source changed/,
+  );
+  assert.equal(calls, 2);
+});
