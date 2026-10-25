@@ -220,9 +220,14 @@ export function runTable(
   let destroyed = false;
   let renderedRows: Run[] = [];
   let renderedPending = false;
+  let renderedError = "";
   let selection = new Set(selectedIds);
   const runs = catalog.runs.filter((r) => r.experiment_id === experiment.id);
-  filterSession.setRuns(runs, catalog);
+  filterSession.setRuns(
+    runs,
+    catalog,
+    catalog.rx?.id === experiment.id ? catalog.rx : undefined,
+  );
   const runIds = new Set(runs.map((r) => r.id));
   const summaries = new Map<string, Map<string, CatalogSeries>>();
   for (const series of catalog.series) {
@@ -474,6 +479,7 @@ export function runTable(
     const rows = visible();
     renderedRows = rows;
     renderedPending = filterSession.pending > 0;
+    renderedError = filterSession.error;
     state.page = Math.min(
       state.page,
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
@@ -591,9 +597,11 @@ export function runTable(
       const tr = element("tr");
       const td = cell(
         runs.length
-          ? filterSession.pending
-            ? "No verified matches yet."
-            : "No runs match your filters."
+          ? filterSession.error
+            ? "Filter failed. Retry the search."
+            : filterSession.pending
+              ? "No verified matches yet."
+              : "No runs match your filters."
           : "No runs in this experiment yet.",
         "empty-table",
       );
@@ -631,6 +639,7 @@ export function runTable(
     // table (and keyboard focus) intact until its actual row set changes.
     const rows = visible();
     if (
+      filterSession.error !== renderedError ||
       filterSession.pending > 0 !== renderedPending ||
       rows.length !== renderedRows.length ||
       rows.some((run, index) => run !== renderedRows[index])

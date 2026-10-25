@@ -314,10 +314,6 @@ export class RunFilterMenu {
       };
       path.onchange = commitPath;
       path.oninput = () => path.setCustomValidity("");
-      const discovery = element("span", "run-filter-discovery muted");
-      const more = element("button", "text-link", "More Event fields");
-      more.type = "button";
-      more.hidden = true;
       let pending: AbortController | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let version = 0,
@@ -364,19 +360,18 @@ export class RunFilterMenu {
         () => {
           if (eventScope && ready !== version) {
             clearTimeout(timer);
-            return inFlight ?? (inFlight = discover(false));
+            return inFlight ?? (inFlight = discover());
           }
         },
       );
-      const discover = async (next: boolean) => {
+      const discover = async () => {
         if (!this.events || !eventScope) return;
         pending?.abort();
         const abort = (pending = new AbortController());
         const requested = version,
           text = path.value.trim();
-        more.disabled = true;
         try {
-          const page = await this.events.discover(text, abort.signal, next);
+          const page = await this.events.discover(text, abort.signal);
           if (abort.signal.aborted || requested !== version || this.destroyed)
             return;
           eventFields = page.fields;
@@ -384,17 +379,15 @@ export class RunFilterMenu {
             ...this.fields.filter((f) => f.scope !== "event"),
             ...eventFields,
           ];
-          more.hidden = !page.more;
-          discovery.textContent = page.note;
+          path.title = page.note;
           ready = version;
           adapter.refresh();
         } catch (error) {
           if (!abort.signal.aborted && requested === version)
-            discovery.textContent = `Hints unavailable · exact paths accepted`;
+            path.title = "Hints unavailable; enter an exact path";
         } finally {
           if (requested === version) {
             inFlight = undefined;
-            more.disabled = false;
           }
         }
       };
@@ -405,10 +398,9 @@ export class RunFilterMenu {
         clearTimeout(timer);
         inFlight = undefined;
         eventFields = [];
-        more.hidden = true;
         adapter.close();
         timer = setTimeout(() => {
-          inFlight = discover(false);
+          inFlight = discover();
         }, 180);
       };
       path.addEventListener("input", schedule);
@@ -419,9 +411,6 @@ export class RunFilterMenu {
           commitPath();
         }
       });
-      more.onclick = () => {
-        inFlight = discover(true);
-      };
       this.cleanups.push(() => {
         pending?.abort();
         clearTimeout(timer);
@@ -513,7 +502,7 @@ export class RunFilterMenu {
               ? "Any present, unequal Event value"
               : "Any logged Event",
         );
-        missingLine.append(hint, discovery, more);
+        missingLine.append(hint);
       }
       if (!eventScope && condition.missing === "default") {
         const fallback = element("input", "run-filter-fallback");

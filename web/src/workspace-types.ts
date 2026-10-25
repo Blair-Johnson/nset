@@ -13,7 +13,14 @@ export interface CatalogSeries {
   last_value: number | null;
 }
 export interface Catalog {
-  rx?: { id: string; name: string; error?: string; nextAfter?: string | null };
+  rx?: {
+    id: string;
+    name: string;
+    error?: string;
+    nextAfter?: string | null;
+    highWater?: string;
+    sourceGeneration?: string;
+  };
   experiments: Experiment[];
   runs: Run[];
   series: CatalogSeries[];
@@ -35,8 +42,7 @@ export type ChartSource =
  *   experiment (one-off comparisons).
  * Either binding combines with either Y source mode. */
 export type XBinding =
-  | { mode: "key"; key: string }
-  | { mode: "series"; series: SeriesRef };
+  { mode: "key"; key: string } | { mode: "series"; series: SeriesRef };
 export interface CardLayout {
   width: number;
   height: number;

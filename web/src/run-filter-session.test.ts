@@ -112,7 +112,8 @@ test("mixed native/Event AND and OR retain unknown until evidence proves a resul
   assert.equal(session.count(either), 1);
   await session.continueScan();
   assert.deepEqual([session.result(a), session.result(b)], [null, false]);
-  // A completed response with null is unreadable/unknown, not proof of absence.
+  // An unresolved terminal response is an error, never a finished partial search.
+  assert.match(session.error, /could not read/);
   assert.equal(session.canContinue, false);
   assert.equal(session.pending, 1);
 });
@@ -122,8 +123,8 @@ test("multiple Event clauses combine proof independently from config and tags", 
   const { api } = mockApi(() => ({
     source_generation: "generation-a",
     runs: [
-      { uid: "a", conditions: [true, null] },
-      { uid: "b", conditions: [false, null] },
+      { uid: "a", conditions: [true, false] },
+      { uid: "b", conditions: [false, false] },
       { uid: "c", conditions: [true, true] },
     ],
     cursor: null,
@@ -146,7 +147,7 @@ test("multiple Event clauses combine proof independently from config and tags", 
   await session.continueScan();
   assert.deepEqual(
     runs.map((r) => session.result(r)),
-    [null, false, true],
+    [false, false, true],
   );
   assert.equal(session.count(), 1);
   assert.equal(session.scanned, 7);
@@ -157,7 +158,7 @@ test("multiple Event clauses combine proof independently from config and tags", 
         conditions: [conditions[0], conditions[2]],
       }),
     ),
-    [true, null, true],
+    [true, false, true],
   );
 });
 
@@ -173,59 +174,52 @@ test("native runs cannot match Event comparisons, while missing means no event h
   session.destroy();
 });
 
-test("129 candidates scan in exact UID batches of 32, stop after four requests, then continue", async (t) => {
-  const runs = Array.from({ length: 129 }, (_, i) => run(`uid-${i}`));
+test("193 candidates automatically finish all exact UID batches of at most 32", async (t) => {
+  const runs = Array.from({ length: 193 }, (_, i) => run(`uid-${i}`));
   const { api, calls } = mockApi(({ body }) => page(body.runs));
   const session = new RunFilterSession(filter(event()), api);
   t.after(() => session.destroy());
-  session.setRuns([...runs, runs[0]]); // Duplicate catalog identity must not duplicate the wire selector.
+  session.setRuns([...runs, runs[0]]);
   await session.continueScan();
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 7);
   assert.ok(
     calls.every(
-      (c) => c.path === "/api/rx/run-filter" && c.body.runs.length === 32,
+      (c) => c.path === "/api/rx/run-filter" && c.body.runs.length <= 32,
     ),
   );
   assert.deepEqual(
     calls.flatMap((c) => c.body.runs),
-    runs.slice(0, 128).map((r) => r.rx!.uid),
+    runs.map((r) => r.rx!.uid),
   );
-  assert.ok(
-    calls.every((c) => c.body.source_id === "rx:one" && !c.body.cursor),
-  );
-  assert.equal(session.result(runs[128]), null);
-  assert.equal(session.pending, 1);
-  assert.equal(session.canContinue, true);
-  await session.continueScan();
-  assert.deepEqual(calls[4].body.runs, ["uid-128"]);
-  assert.equal(session.result(runs[128]), true);
+  assert.equal(session.result(runs[192]), true);
   assert.equal(session.pending, 0);
-  assert.equal(session.scanned, 129);
+  assert.equal(session.scanned, 193);
   assert.equal(session.canContinue, false);
-  await session.continueScan();
-  assert.equal(calls.length, 5);
+  assert.equal(session.error, "");
 });
 
-test("cursor pages retain exact candidates and missing stays unknown until full absence is proven", async (t) => {
-  const { api, calls } = mockApi(({ body }, i) =>
-    page(body.runs, [i < 4 ? null : true], i < 4 ? `cursor-${i + 1}` : null),
-  );
+test("automatic cursor pages retain candidates and missing stays pending until final absence proof", async (t) => {
+  const candidate = run("a");
+  const { api, calls } = mockApi(({ body }, i) => {
+    assert.equal(session.result(candidate), null);
+    return page(
+      body.runs,
+      [i < 7 ? null : true],
+      i < 7 ? `cursor-${i + 1}` : null,
+    );
+  });
   const session = new RunFilterSession(filter(event({ op: "missing" })), api);
   t.after(() => session.destroy());
-  const candidate = run("a");
   session.setRuns([candidate]);
   await session.continueScan();
-  assert.equal(calls.length, 4);
-  assert.equal(session.result(candidate), null);
-  assert.equal(session.canContinue, true);
+  assert.equal(calls.length, 8);
   assert.deepEqual(
     calls.map((c) => c.body.cursor),
-    [undefined, "cursor-1", "cursor-2", "cursor-3"],
+    [undefined, ...Array.from({ length: 7 }, (_, i) => `cursor-${i + 1}`)],
   );
-  await session.continueScan();
-  assert.equal(calls[4].body.cursor, "cursor-4");
   assert.ok(calls.every((c) => JSON.stringify(c.body.runs) === '["a"]'));
   assert.equal(session.result(candidate), true);
+  assert.equal(session.pending, 0);
 });
 
 test("sources with identical UIDs never share proof or selectors", async (t) => {
@@ -473,10 +467,14 @@ for (const [op, value] of [
     const session = new RunFilterSession(filter(event({ op })), api);
     t.after(() => session.destroy());
     session.setRuns([candidate]);
+    let sawProof = false;
+    const unsubscribe = session.subscribe(() => {
+      if (session.result(candidate) === value && session.scanned === 4)
+        sawProof = true;
+    });
     await session.continueScan();
-    assert.equal(session.result(candidate), value);
-    assert.equal(session.scanned, 4);
-    await session.continueScan();
+    unsubscribe();
+    assert.equal(sawProof, true);
     assert.match(session.error, /invalid\/stale/);
     assert.equal(session.result(candidate), null);
     assert.equal(session.matches(candidate), false);
@@ -512,11 +510,17 @@ test("cursorless batches cannot mix physical source generations or retain old ab
   const session = new RunFilterSession(filter(...conditions), api);
   t.after(() => session.destroy());
   session.setRuns(runs);
+  let sawOldProof = false;
+  const unsubscribe = session.subscribe(() => {
+    if (session.scanned === 128) {
+      assert.equal(session.result(runs[0], filter(conditions[0])), true);
+      assert.equal(session.result(runs[0], filter(conditions[1])), false);
+      sawOldProof = true;
+    }
+  });
   await session.continueScan();
-  assert.equal(session.result(runs[0], filter(conditions[0])), true);
-  assert.equal(session.result(runs[0], filter(conditions[1])), false);
-  assert.equal(session.scanned, 128);
-  await session.continueScan();
+  unsubscribe();
+  assert.equal(sawOldProof, true);
   assert.ok(calls.every((c) => !c.body.cursor));
   assert.match(session.error, /source changed/);
   assert.ok(
@@ -552,4 +556,120 @@ test("catalog refresh clears the source generation as well as proof and scan cou
   assert.equal(session.error, "");
   assert.equal(session.scanned, 2);
   assert.equal(session.count(), 2);
+});
+
+test("a repeated cursor fails visibly instead of spinning forever", async (t) => {
+  const { api, calls } = mockApi(({ body }) =>
+    page(body.runs, [null], "stuck"),
+  );
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  session.setRuns([run("a")]);
+  await session.continueScan();
+  assert.equal(calls.length, 2);
+  assert.match(session.error, /no progress/);
+  assert.equal(session.count(), 0);
+  assert.equal(session.canContinue, false);
+});
+
+test("Refresh invalidation aborts immediately and revokes proofs before catalog returns", async (t) => {
+  const late = deferred<ReturnType<typeof page>>();
+  const { api, calls } = mockApi(({ body }, i) =>
+    i === 0 ? page(body.runs, [true], "next") : late.promise,
+  );
+  const candidate = run("a");
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  session.setRuns([candidate]);
+  const work = session.continueScan();
+  await setImmediate();
+  assert.equal(session.result(candidate), true);
+  session.invalidate();
+  assert.equal(calls[1].signal.aborted, true);
+  assert.equal(session.result(candidate), null);
+  late.resolve(page(["a"]));
+  await work;
+  assert.equal(session.result(candidate), null);
+});
+
+test("the first Event page must belong to the catalog source generation", async (t) => {
+  const { api } = mockApi(({ body }) => page(body.runs));
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  const candidate = run("a");
+  session.setRuns([candidate], 1, {
+    id: "rx:one",
+    sourceGeneration: "catalog-generation",
+  });
+  await session.continueScan();
+  assert.match(session.error, /source changed/);
+  assert.equal(session.result(candidate), null);
+});
+
+test("suspended drawer subscriptions cannot keep an old scan running", async (t) => {
+  const late = deferred<ReturnType<typeof page>>();
+  const { api, calls } = mockApi(({ body }, i) =>
+    i === 0 ? late.promise : page(body.runs),
+  );
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  const candidate = run("a");
+  session.setRuns([candidate]);
+  const unsubscribe = session.subscribe(() => {});
+  const work = session.continueScan();
+  session.setActive(false);
+  assert.equal(calls[0].signal.aborted, true);
+  late.resolve(page(["a"], [true], "old-next"));
+  await work;
+  await session.continueScan();
+  assert.equal(calls.length, 1);
+  assert.equal(session.result(candidate), null);
+  session.setActive(true);
+  await session.continueScan();
+  assert.equal(session.result(candidate), true);
+  unsubscribe();
+});
+
+test("native clauses decide without Event requests; changing them starts the necessary search", async (t) => {
+  const { api, calls } = mockApi(({ body }) => page(body.runs));
+  const native = event({
+    scope: "params",
+    path: '$["seed"]',
+    op: "eq",
+    value: "2",
+  });
+  const session = new RunFilterSession(filter(native, event()), api);
+  const candidate = run("a");
+  t.after(() => session.destroy());
+  session.setRuns([candidate]);
+  await session.continueScan();
+  assert.equal(calls.length, 0);
+  assert.equal(session.result(candidate), false);
+  session.setFilter({ combine: "any", conditions: [native, event()] });
+  await session.continueScan();
+  assert.equal(calls.length, 1);
+  assert.equal(session.result(candidate), true);
+});
+
+test("condition edits during Refresh wait for the new catalog scope", async (t) => {
+  const { api, calls } = mockApi(({ body }) => page(body.runs));
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  session.setRuns([run("old")], 1);
+  session.invalidate();
+  session.setFilter(filter(event({ op: "exists" })));
+  await session.continueScan();
+  assert.equal(calls.length, 0);
+  session.setRuns([run("new")], 2);
+  await session.continueScan();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body.runs, ["new"]);
+});
+
+test("unavailable source metadata is an explicit retryable error even with no loaded runs", (t) => {
+  const session = new RunFilterSession(filter(event()));
+  t.after(() => session.destroy());
+  session.setRuns([], 1, { id: "rx:one", error: "source unavailable" });
+  assert.equal(session.error, "source unavailable");
+  assert.equal(session.canContinue, false);
 });

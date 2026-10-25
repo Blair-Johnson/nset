@@ -31,14 +31,20 @@ export interface FieldPage {
 const identity = (source: string, uid: string) => JSON.stringify([source, uid]);
 const conditionKey = (c: FilterCondition) => JSON.stringify(c);
 
-/** One experiment's clauses and bounded proof state, independent of chart selection. */
+/** One experiment's complete search, using bounded requests independent of chart selection. */
 export class RunFilterSession {
   api?: Api;
   private current: RunFilter;
   runs: Run[] = [];
   private revision: unknown;
+  private sourceSnapshot?: {
+    id: string;
+    sourceGeneration?: string;
+    error?: string;
+  };
   private listeners = new Set<() => void>();
   private generation = 0;
+  private active = true;
   private abort?: AbortController;
   private timer?: ReturnType<typeof setTimeout>;
   private proofs = new Map<string, (boolean | null)[]>();
@@ -47,6 +53,7 @@ export class RunFilterSession {
   private batch = 0;
   private clauses: FilterCondition[] = [];
   busy = false;
+  refreshing = false;
   error = "";
   scanned = 0;
   private discovery?: {
@@ -58,7 +65,11 @@ export class RunFilterSession {
   };
   private discoveryAbort?: AbortController;
 
-  constructor(filter: RunFilter = emptyFilter(), api?: Api) {
+  constructor(
+    filter: RunFilter = emptyFilter(),
+    api?: Api,
+    private readonly refreshScope?: () => void,
+  ) {
     this.current = structuredClone(filter);
     this.api = api;
   }
@@ -84,22 +95,33 @@ export class RunFilterSession {
       JSON.stringify(eventClauses(filter)) ===
       JSON.stringify(eventClauses(this.current));
     this.current = structuredClone(filter);
-    if (unchangedEvents) this.emit();
+    if (
+      unchangedEvents &&
+      !this.busy &&
+      (this.error || !this.runs.some((run) => this.result(run) === null))
+    )
+      this.emit();
     else this.reset();
   }
-  setRuns(runs: Run[], revision?: unknown) {
+  setRuns(
+    runs: Run[],
+    revision?: unknown,
+    sourceSnapshot?: { id: string; sourceGeneration?: string; error?: string },
+  ) {
     if (revision !== undefined && revision === this.revision) return;
     if (revision === undefined && runs === this.runs) return;
     this.runs = runs;
+    this.refreshing = false;
     this.revision = revision;
+    this.sourceSnapshot = sourceSnapshot;
     this.discovery = undefined;
     this.discoveryAbort?.abort();
     this.reset();
   }
-  private candidates(): Batch[] {
+  private candidates(unresolvedOnly = false): Batch[] {
     const sources = new Map<string, Set<string>>();
     for (const run of this.runs)
-      if (run.rx) {
+      if (run.rx && (!unresolvedOnly || this.result(run) === null)) {
         const uids = sources.get(run.rx.sourceId) ?? new Set<string>();
         uids.add(run.rx.uid);
         sources.set(run.rx.sourceId, uids);
@@ -122,19 +144,30 @@ export class RunFilterSession {
     this.stop();
     this.proofs.clear();
     this.sourceGenerations.clear();
+    if (this.sourceSnapshot?.sourceGeneration)
+      this.sourceGenerations.set(
+        this.sourceSnapshot.id,
+        this.sourceSnapshot.sourceGeneration,
+      );
     this.clauses = activeConditions(this.current).filter(
       (c) => c.scope === "event",
     );
-    this.batches = this.clauses.length ? this.candidates() : [];
+    this.batches = this.clauses.length ? this.candidates(true) : [];
     this.batch = 0;
     this.scanned = 0;
-    this.error = "";
+    this.error = this.sourceSnapshot?.error ?? "";
     this.emit();
     this.schedule();
   }
   private schedule() {
     clearTimeout(this.timer);
-    if (this.listeners.size && this.canContinue && !this.error)
+    if (
+      this.active &&
+      !this.refreshing &&
+      this.listeners.size &&
+      this.canContinue &&
+      !this.error
+    )
       this.timer = setTimeout(() => void this.continueScan(), 180);
   }
   subscribe(listener: () => void) {
@@ -170,7 +203,14 @@ export class RunFilterSession {
   }
 
   async continueScan() {
-    if (this.busy || this.error || !this.canContinue) return;
+    if (
+      !this.active ||
+      this.refreshing ||
+      this.busy ||
+      this.error ||
+      !this.canContinue
+    )
+      return;
     const version = this.generation;
     const abort = (this.abort = new AbortController());
     this.busy = true;
@@ -192,8 +232,9 @@ export class RunFilterSession {
       });
       if (conditions.length > 16)
         throw new Error("Use at most 16 Event conditions.");
-      // A user action has a fixed request budget; continuation never caps the catalog.
-      for (let pages = 0; pages < 4 && this.canContinue; pages++) {
+      // Backpressure: one bounded request at a time until the pinned search finishes.
+      while (this.canContinue) {
+        if (version !== this.generation || abort.signal.aborted) return;
         const batch = this.batches[this.batch];
         const page = await this.api.post<FilterPage>(
           "/rx/run-filter",
@@ -216,8 +257,26 @@ export class RunFilterSession {
         for (const run of page.runs)
           this.proofs.set(identity(batch.source, run.uid), run.conditions);
         this.scanned += page.diagnostics.scanned;
-        if (page.cursor) batch.cursor = page.cursor;
-        else this.batch++;
+        if (page.cursor) {
+          if (page.cursor === batch.cursor)
+            throw new Error("Event search made no progress; retry filtering.");
+          batch.cursor = page.cursor;
+        } else {
+          if (
+            batch.uids.some((uid) => {
+              const evidence = this.proofs.get(identity(batch.source, uid));
+              return (
+                !evidence ||
+                evidence.length !== this.clauses.length ||
+                evidence.some((v) => typeof v !== "boolean")
+              );
+            })
+          )
+            throw new Error(
+              "Event search could not read all required records.",
+            );
+          this.batch++;
+        }
         this.emit();
       }
     } catch (error) {
@@ -241,6 +300,33 @@ export class RunFilterSession {
   }
   restart() {
     this.reset();
+  }
+  retry() {
+    if (this.refreshScope) this.refreshScope();
+    else this.restart();
+  }
+  setActive(active: boolean) {
+    if (active === this.active) return;
+    this.active = active;
+    if (active) this.schedule();
+    else {
+      this.stop();
+      this.discoveryAbort?.abort();
+    }
+  }
+  invalidate(error = "") {
+    this.stop();
+    this.refreshing = !error;
+    this.discovery = undefined;
+    this.discoveryAbort?.abort();
+    this.proofs.clear();
+    this.sourceGenerations.clear();
+    this.batches = [];
+    this.batch = 0;
+    this.scanned = 0;
+    this.error = error;
+    this.busy = !error;
+    this.emit();
   }
 
   /** One bounded discovery page per keystroke/action, scoped to all candidate runs. */
@@ -339,13 +425,14 @@ export class RunFilterControl {
           session.discover(prefix, signal, more),
       },
     );
-    const status = element("span", "run-filter-progress muted");
+    const status = element("span", "run-filter-progress");
     status.setAttribute("role", "status");
-    const next = element("button", "text-link", "Continue scan");
-    next.type = "button";
-    next.onclick = () =>
-      session.error ? session.restart() : void session.continueScan();
-    this.root.append(this.menu.root, status, next);
+    this.menu.root.querySelector("summary")!.append(status);
+    const retry = element("button", "text-link run-filter-retry", "Retry");
+    retry.type = "button";
+    retry.setAttribute("aria-label", "Retry filter search");
+    retry.onclick = () => session.retry();
+    this.root.append(this.menu.root, retry);
     let runs: Run[] | undefined;
     const update = () => {
       if (this.destroyed) return;
@@ -355,19 +442,25 @@ export class RunFilterControl {
       }
       this.menu.setFilter(session.filter);
       this.menu.refreshCounts();
-      const pending = session.pending;
-      status.textContent = session.error
-        ? `Event scan: ${session.error}`
-        : session.busy
-          ? `${pending} unchecked · scanning…`
-          : pending
-            ? `${pending} unchecked${session.canContinue ? "" : " · unreadable events"}`
-            : "";
-      status.title = session.scanned
-        ? `${session.scanned.toLocaleString()} events checked`
-        : "";
-      next.hidden = !session.error && (!session.canContinue || session.busy);
-      next.textContent = session.error ? "Retry scan" : "Continue scan";
+      const searching =
+        session.refreshing || session.busy || session.canContinue;
+      this.root.setAttribute("aria-busy", String(searching));
+      status.textContent = session.error ? "!" : searching ? "…" : "";
+      status.setAttribute(
+        "aria-label",
+        session.error
+          ? `Filter failed: ${session.error}`
+          : searching
+            ? `Searching · ${session.count()} matches`
+            : "Search complete",
+      );
+      status.title =
+        session.error ||
+        (searching
+          ? `Searching · ${session.count()} matches · ${session.scanned.toLocaleString()} events checked`
+          : `${session.count()} matches`);
+      retry.hidden = !session.error;
+      retry.title = session.error;
       onChange();
     };
     this.unsubscribe = session.subscribe(update);

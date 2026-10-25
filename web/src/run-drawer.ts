@@ -334,9 +334,11 @@ export class RunDrawer {
       ? this.selected.size
         ? "No selected runs match these filters. Clear filters or turn off Selected."
         : "No runs selected. Turn off Selected to browse runs."
-      : this.session.pending
-        ? "No verified matches yet."
-        : "No runs match these filters. Clear filters to browse runs.";
+      : this.session.error
+        ? "Filter failed. Retry the search."
+        : this.session.pending
+          ? "No verified matches yet."
+          : "No runs match these filters. Clear filters to browse runs.";
     // Only move focus when its keyed row actually disappears. Rollback leaves
     // the accepted selection unchanged, so failed writes keep the same checkbox.
     if (focusedIndex >= 0 && rows[focusedIndex][1].root.hidden) {
@@ -498,7 +500,11 @@ export class RunDrawer {
         );
         this.list.append(row.root);
       }
-      this.session.setRuns(runs, catalog);
+      this.session.setRuns(
+        runs,
+        catalog,
+        catalog.rx?.id === this.experimentId ? catalog.rx : undefined,
+      );
       this.list.scrollTop = this.state.scrollTop;
     }
     for (const [id, row] of this.rows)

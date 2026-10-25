@@ -177,12 +177,16 @@ test("paired loader never downloads independent histories or invents a step", as
   assert.match(result.notes, /Repeated\/restarted X/);
   assert.match(result.notes, /missing\/non-numeric/);
 });
-test("rx catalog preserves stored state and readonly identity, with bounded pagination", async () => {
+test("rx catalog preserves identity and automatically completes beyond five pinned pages", async () => {
   let calls = 0;
   const api = new Api(
     () => "test",
-    async () => {
+    async (input) => {
       calls++;
+      if (calls > 1) {
+        assert.match(String(input), /high_water=9/);
+        assert.match(String(input), /source_generation=generation-a/);
+      }
       return new Response(
         JSON.stringify({
           source: { id: "rx:test", name: "repo", readonly: true },
@@ -200,7 +204,9 @@ test("rx catalog preserves stored state and readonly identity, with bounded pagi
               exit_code: null,
             },
           ],
-          next_after: String(calls),
+          next_after: calls === 9 ? null : String(calls),
+          high_water: "9",
+          source_generation: "generation-a",
         }),
       );
     },
@@ -210,10 +216,11 @@ test("rx catalog preserves stored state and readonly identity, with bounded pagi
     runs: [],
     series: [],
   });
-  assert.equal(calls, 5);
+  assert.equal(calls, 9);
+  assert.equal(result.runs.length, 9);
   assert.equal(result.runs[0].rx?.state, "queued");
   assert.equal(result.runs[0].id, "rx:test:uid1");
-  assert.equal(result.rx?.nextAfter, "5");
+  assert.equal(result.rx?.nextAfter, null);
 });
 
 test("paired EMA follows event order and ambiguous duplicate-X cursors stay undefined", () => {
@@ -309,4 +316,61 @@ test("large catalog IDs and continuations retain exact decimal strings", async (
   assert.match(requested[1], /after=9007199254740993$/);
   assert.equal(result.runs[0].name, "r9007199254740993");
   assert.equal(result.runs[1].name, "r9007199254740994");
+});
+
+for (const failure of [
+  "generation",
+  "snapshot",
+  "no progress",
+  "unavailable",
+]) {
+  test(`catalog ${failure} cannot silently complete a partial scope`, async () => {
+    let calls = 0;
+    const api = new Api(
+      () => "test",
+      async () => {
+        calls++;
+        return new Response(
+          JSON.stringify({
+            source: { id: "rx:test", name: "repo", readonly: true },
+            runs: [],
+            next_after: "1",
+            high_water: failure === "snapshot" && calls > 1 ? "3" : "2",
+            source_generation:
+              failure === "generation" && calls > 1 ? "b" : "a",
+            ...(failure === "unavailable" && calls > 1
+              ? { error: "source unavailable" }
+              : {}),
+          }),
+        );
+      },
+    );
+    await assert.rejects(
+      appendRxCatalog(api, { experiments: [], runs: [], series: [] }),
+    );
+    assert.equal(calls, 2);
+  });
+}
+
+test("an initially unavailable rx source preserves native catalog and exposes its error", async () => {
+  const api = new Api(
+    () => "test",
+    async () =>
+      new Response(
+        JSON.stringify({
+          source: { id: "rx:test", name: "repo", readonly: true },
+          runs: [],
+          next_after: null,
+          error: "source unavailable",
+        }),
+      ),
+  );
+  const native = { id: "native", name: "Native", created_at: 0 };
+  const result = await appendRxCatalog(api, {
+    experiments: [native],
+    runs: [],
+    series: [],
+  });
+  assert.ok(result.experiments.includes(native));
+  assert.equal(result.rx?.error, "source unavailable");
 });

@@ -326,6 +326,8 @@ interface RxCatalog {
   source: { id: string; name: string; readonly: true } | null;
   error?: string;
   next_after: string | null;
+  high_water?: string;
+  source_generation?: string;
   runs: {
     id: string;
     run_uid: string;
@@ -345,22 +347,49 @@ export async function appendRxCatalog(
   signal?: AbortSignal,
   startAfter?: string,
 ): Promise<Catalog> {
-  // Bounded initial metadata loading. No event data is downloaded here.
+  // Complete metadata discovery, one bounded page at a time. Event payloads
+  // remain server-side; rendering pagination does not scope a filter.
   let after: string | null = startAfter ?? null;
-  for (let page = 0; page < (startAfter === undefined ? 5 : 1); page++) {
+  let high = catalog.rx?.highWater;
+  let generation = catalog.rx?.sourceGeneration;
+  const seen = new Set<string>();
+  for (;;) {
+    const query = new URLSearchParams();
+    if (after !== null) query.set("after", after);
+    if (high !== undefined) query.set("high_water", high);
+    if (generation !== undefined) query.set("source_generation", generation);
     const value: RxCatalog = await api.json(
-      `/rx/catalog${after === null ? "" : `?after=${after}`}`,
+      `/rx/catalog${query.size ? `?${query}` : ""}`,
       signal,
     );
-    if (!value.source) return catalog;
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (!value.source) {
+      if (after !== null || generation !== undefined)
+        throw new Error("rx source unavailable; refresh the catalog");
+      return catalog;
+    }
+    if (value.error && after !== null) throw new Error(value.error);
+    if (generation !== undefined && value.source_generation !== generation)
+      throw new Error("rx source changed; refresh the catalog");
+    if (high !== undefined && value.high_water !== high)
+      throw new Error("rx catalog snapshot changed; refresh the catalog");
+    high = value.high_water;
+    generation = value.source_generation;
     const s = value.source;
-    catalog.rx = { ...s, error: value.error, nextAfter: value.next_after };
+    catalog.rx = {
+      ...s,
+      error: value.error,
+      nextAfter: value.next_after,
+      highWater: high,
+      sourceGeneration: generation,
+    };
     if (!catalog.experiments.some((e) => e.id === s.id))
       catalog.experiments.push({
         id: s.id,
         name: `rx · ${s.name}${value.error ? " (unavailable)" : ""}`,
         created_at: 0,
       });
+    if (value.error) return catalog;
     for (const r of value.runs) {
       const created = Date.parse(r.created_at) || 0;
       catalog.runs.push({
@@ -388,7 +417,10 @@ export async function appendRxCatalog(
       });
     }
     after = value.next_after;
-    if (after === null || value.error) break;
+    if (after === null || startAfter !== undefined) break;
+    if (seen.has(after))
+      throw new Error("rx catalog made no progress; refresh");
+    seen.add(after);
   }
   return catalog;
 }

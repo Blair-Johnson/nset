@@ -297,8 +297,9 @@ test("exact unsuggested Event paths accept quoted scalars and reject unsafe nume
         value.evaluate((input: HTMLInputElement) => input.validity.valid),
       )
       .toBe(false);
-    await expect(page.locator(".run-filter-progress")).toContainText(
-      "Event scan:",
+    await expect(page.locator(".run-filter-progress")).toHaveAttribute(
+      "aria-label",
+      /Filter failed:/,
     );
     expect(calls.filter((c) => c.path.endsWith("/run-filter"))).toHaveLength(
       before,
@@ -362,15 +363,18 @@ test("failed Event scans expose unknown and Retry scan instead of accepting all 
     return true;
   });
   await addEvent(page, "metrics.loss", "lt", "0.5");
-  await expect(page.locator(".run-filter-progress")).toHaveText(
-    "Event scan: source unavailable",
+  await expect(page.locator(".run-filter-progress")).toHaveAttribute(
+    "aria-label",
+    "Filter failed: source unavailable",
   );
   await expect(page.getByRole("checkbox", { name: /^Select r\d/ })).toHaveCount(
     0,
   );
   fail = false;
   await menu(page).locator("summary").click();
-  await page.getByRole("button", { name: "Retry scan", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Retry filter search", exact: true })
+    .click();
   await expect(
     page.getByRole("checkbox", { name: "Select r1", exact: true }),
   ).toBeVisible();
@@ -506,7 +510,7 @@ test("accuracy exists and a separately logged config clause share run-level AND/
   expect(await selected(page)).toEqual([id(2)]);
 });
 
-test("bounded scans expose unchecked runs, continue, and refresh committed event evidence", async ({
+test("bounded requests automatically finish and refresh committed event evidence", async ({
   page,
 }) => {
   let pages = 0;
@@ -534,14 +538,9 @@ test("bounded scans expose unchecked runs, continue, and refresh committed event
   await page.getByRole("checkbox", { name: "Select r3", exact: true }).check();
   const root = await addEvent(page, "metrics.accuracy", "exists");
   await root.locator("summary").click();
-  await expect(page.locator(".run-filter-progress")).toHaveText("3 unchecked");
   await expect(
-    page.getByText("No verified matches yet.", { exact: true }),
-  ).toBeVisible();
-  await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Continue scan", exact: true })
-    .click();
+    page.getByRole("button", { name: "Continue scan", exact: true }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("checkbox", { name: "Select r1", exact: true }),
   ).toBeVisible();
@@ -623,14 +622,7 @@ for (const failure of ["stale cursor", "cursorless replacement"] as const) {
     await addEvent(page, "metrics.accuracy", "exists");
     await menu(page).locator("summary").click();
     await expect(
-      page.getByRole("button", { name: "Continue scan", exact: true }),
-    ).toBeVisible();
-    await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(1);
-    await page
-      .getByRole("button", { name: "Continue scan", exact: true })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Retry scan", exact: true }),
+      page.getByRole("button", { name: "Retry filter search", exact: true }),
     ).toBeVisible();
     await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
     expect(await selected(page)).toEqual([id(3)]);

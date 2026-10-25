@@ -51,6 +51,7 @@ let library: WorkspaceLibrary = {
 let catalogGeneration = 0;
 let request: AbortController | undefined;
 let connected = false;
+let catalogRefreshing = false;
 let currentWorkspaceId = "";
 let chartSearch = "";
 let activeEditor: { close: () => void } | undefined;
@@ -62,13 +63,15 @@ let runDrawer: RunDrawer | undefined;
 function filterSessionFor(experimentId: string) {
   let session = runFilterSessions.get(experimentId);
   if (!session) {
-    session = new RunFilterSession(undefined, api);
+    session = new RunFilterSession(undefined, api, () => void connect(true));
     runFilterSessions.set(experimentId, session);
   }
   session.setRuns(
     catalog.runs.filter((run) => run.experiment_id === experimentId),
     catalog,
+    catalog.rx?.id === experimentId ? catalog.rx : undefined,
   );
+  if (catalogRefreshing && !session.refreshing) session.invalidate();
   return session;
 }
 function refreshRunFilterSessions() {
@@ -342,6 +345,10 @@ function renderPage() {
   activeEditor = undefined;
   if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
   const route = currentRoute();
+  for (const [id, session] of runFilterSessions) {
+    session.setActive(false);
+    if (id === route.experimentId && route.view !== "detail") session.setActive(true);
+  }
   const key = location.hash;
   const routeChanged = key !== previousRoute;
   previousRoute = key;
@@ -1378,6 +1385,8 @@ function applyChartFilter(workspace: Workspace) {
 }
 
 async function connect(refresh = false) {
+  catalogRefreshing = true;
+  for (const session of runFilterSessions.values()) session.invalidate();
   const generation = ++catalogGeneration;
   request?.abort();
   request = new AbortController();
@@ -1394,6 +1403,7 @@ async function connect(refresh = false) {
     if (generation !== catalogGeneration || signal.aborted) return;
     store.clear();
     catalog = next;
+    catalogRefreshing = false;
     refreshRunFilterSessions();
     connected = true;
     sessionStorage.setItem("nset.token", token);
@@ -1408,6 +1418,8 @@ async function connect(refresh = false) {
     if (catalog.rx?.error) error(catalog.rx.error);
   } catch (e) {
     if (isAbort(e) || generation !== catalogGeneration) return;
+    catalogRefreshing = false;
+    for (const session of runFilterSessions.values()) session.invalidate(message(e));
     if (connected)
       error(`Could not refresh. Previous data is still shown. ${message(e)}`);
     else {
@@ -1446,6 +1458,7 @@ $("logout").onclick = () => {
   store.clear();
   token = "";
   connected = false;
+  catalogRefreshing = false;
   sessionStorage.removeItem("nset.token");
   catalog = { experiments: [], runs: [], series: [] };
   $("connection").textContent = "Disconnected";

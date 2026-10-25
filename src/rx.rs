@@ -26,6 +26,9 @@ use tokio::sync::Semaphore;
 const MAX_SCAN: usize = 20_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024;
+// Run predicates need complete events, unlike bounded record/field previews.
+// Keep an individual filter row within the per-request byte allowance.
+const MAX_FILTER_RECORD: usize = MAX_BYTES;
 const MAX_POINTS: usize = 20_000;
 const MAX_TRACES: usize = 128;
 const MAX_FIELDS: usize = 64;
@@ -173,6 +176,8 @@ impl Source {
 pub struct CatalogQuery {
     #[serde(default)]
     after: i64,
+    high_water: Option<i64>,
+    source_generation: Option<String>,
 }
 pub async fn catalog(
     State(state): State<AppState>,
@@ -185,7 +190,7 @@ pub async fn catalog(
         return Err(ApiError::bad("invalid rx run cursor"));
     }
     let metadata = json!({"id":source.id,"name":source.name,"readonly":true});
-    let result = source.execute(move |s| s.runs(q.after)).await;
+    let result = source.execute(move |s| s.runs(q)).await;
     match result {
         Ok(mut value) => {
             value["source"] = metadata;
@@ -198,10 +203,30 @@ pub async fn catalog(
     }
 }
 impl Source {
-    fn runs(&self, after: i64) -> Result<Value> {
+    fn runs(&self, q: CatalogQuery) -> Result<Value> {
+        let generation = self.generation()?;
+        let source_generation = URL_SAFE_NO_PAD.encode(self.run_filter_mac(generation.as_bytes()));
+        let stale = || ApiError::bad("rx catalog snapshot changed; refresh the catalog");
+        if q.source_generation
+            .as_ref()
+            .is_some_and(|pin| pin != &source_generation)
+            || (q.high_water.is_some() && q.source_generation.is_none())
+        {
+            return Err(stale());
+        }
         let conn = self.connection()?;
-        let mut stmt = conn.prepare("SELECT id,substr(run_uid,1,129),substr(state,1,64),substr(alias,1,512),substr(config,1,4096),substr(created_at,1,64),substr(started_at,1,64),substr(finished_at,1,64),exit_code,substr(argv,1,4096) FROM runs WHERE id>? ORDER BY id LIMIT 201").map_err(unavailable)?;
-        let mut rows = stmt.query([after]).map_err(unavailable)?;
+        if self.generation()? != generation {
+            return Err(stale());
+        }
+        let current: i64 = conn
+            .query_row("SELECT coalesce(max(id),0) FROM runs", [], |r| r.get(0))
+            .map_err(unavailable)?;
+        let high = q.high_water.unwrap_or(current);
+        if high < 0 || high > current {
+            return Err(stale());
+        }
+        let mut stmt = conn.prepare("SELECT id,substr(run_uid,1,129),substr(state,1,64),substr(alias,1,512),substr(config,1,4096),substr(created_at,1,64),substr(started_at,1,64),substr(finished_at,1,64),exit_code,substr(argv,1,4096) FROM runs WHERE id>? AND id<=? ORDER BY id LIMIT 201").map_err(unavailable)?;
+        let mut rows = stmt.query([q.after, high]).map_err(unavailable)?;
         let mut runs = Vec::new();
         let mut next = None;
         while let Some(r) = rows.next().map_err(unavailable)? {
@@ -216,7 +241,12 @@ impl Source {
             }
             runs.push(json!({"id":r.get::<_,i64>(0).map_err(unavailable)?.to_string(),"run_uid":r.get::<_,String>(1).map_err(unavailable)?,"state":r.get::<_,String>(2).map_err(unavailable)?,"alias":r.get::<_,Option<String>>(3).map_err(unavailable)?,"config":r.get::<_,Option<String>>(4).map_err(unavailable)?,"created_at":r.get::<_,String>(5).map_err(unavailable)?,"started_at":r.get::<_,Option<String>>(6).map_err(unavailable)?,"finished_at":r.get::<_,Option<String>>(7).map_err(unavailable)?,"exit_code":r.get::<_,Option<i64>>(8).map_err(unavailable)?,"argv":r.get::<_,String>(9).map_err(unavailable)?}));
         }
-        Ok(json!({"runs":runs,"next_after":next,"metadata_truncated":true}))
+        if self.generation()? != generation {
+            return Err(stale());
+        }
+        Ok(
+            json!({"runs":runs,"next_after":next,"metadata_truncated":true,"high_water":high.to_string(),"source_generation":source_generation}),
+        )
     }
 }
 
@@ -1659,7 +1689,6 @@ struct RunProof {
     found: Vec<bool>,
     after: Option<i64>,
     complete: bool,
-    tainted: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1731,12 +1760,20 @@ impl Source {
         let scope = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&json!(["run-filter-v1", q.source_id, q.runs, q.conditions]))
+                serde_json::to_vec(&json!(["run-filter-v2", q.source_id, q.runs, q.conditions]))
                     .unwrap()
             )
         );
         let generation = self.generation()?;
         let conn = self.connection()?;
+        // The shared preview reader caps SQLite values at 1 MiB. Only this
+        // endpoint may materialize larger events; allow bounded row overhead
+        // while the SELECT's CASE still enforces MAX_FILTER_RECORD on data.
+        conn.set_limit(
+            rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+            (MAX_FILTER_RECORD + 4096) as i32,
+        )
+        .map_err(unavailable)?;
         if self.generation()? != generation {
             return Err(ApiError::bad(
                 "rx database replaced during open; retry the query",
@@ -1782,7 +1819,6 @@ impl Source {
                         found: vec![false; paths.len()],
                         after: None,
                         complete: h.is_none(),
-                        tainted: false,
                     })
                     .collect(),
             }
@@ -1823,7 +1859,7 @@ impl Source {
             let mut stmt = conn.prepare(sql).map_err(unavailable)?;
             let mut rows = stmt
                 .query(params![
-                    MAX_RECORD as i64,
+                    MAX_FILTER_RECORD as i64,
                     ids[index],
                     proof.after.unwrap_or(i64::MIN),
                     cursor.high[index],
@@ -1832,9 +1868,13 @@ impl Source {
                 .map_err(unavailable)?;
             let mut stopped = false;
             while let Some(row) = rows.next().map_err(unavailable)? {
-                if d.scanned >= MAX_SCAN
-                    || d.bytes >= MAX_BYTES
-                    || started.elapsed() > Duration::from_millis(500)
+                // Always consume at least one row per request, even if preparing
+                // the snapshot/query used the time allowance. This prevents a
+                // valid large row from producing the same cursor forever.
+                if d.scanned > 0
+                    && (d.scanned >= MAX_SCAN
+                        || d.bytes >= MAX_BYTES
+                        || started.elapsed() > Duration::from_millis(500))
                 {
                     d.limit("scan budget reached");
                     stopped = true;
@@ -1846,32 +1886,30 @@ impl Source {
                     .map_err(unavailable)?
                     .unwrap_or(0)
                     .max(0) as usize;
-                if bytes <= MAX_RECORD && d.bytes + bytes > MAX_BYTES {
+                if bytes > MAX_FILTER_RECORD {
+                    return Err(ApiError(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "rx run filter cannot complete: an event exceeds the 8 MiB row resource limit",
+                    ));
+                }
+                if d.scanned > 0 && d.bytes + bytes > MAX_BYTES {
                     d.limit("byte budget reached");
                     stopped = true;
                     break;
                 }
                 proof.after = Some(seq);
                 d.scanned += 1;
-                if bytes > MAX_RECORD {
-                    proof.tainted = true;
-                    d.oversized += 1;
-                    d.limit("oversized records skipped");
-                    continue;
-                }
                 d.bytes += bytes;
-                // SQLite permits malformed producer rows; a blob/NULL is not
-                // evidence of absence, just like invalid JSON or oversized text.
-                let value = row
-                    .get::<_, String>(2)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-                let Some(value) = value else {
-                    proof.tainted = true;
-                    d.invalid_json += 1;
-                    d.limit("invalid JSON records skipped");
-                    continue;
+                // Blob/NULL, malformed JSON, and JSON beyond parser limits
+                // cannot establish absence. Fail visibly, never finish unknown.
+                let unreadable = || {
+                    ApiError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "rx run filter cannot complete: an event is not valid JSON text or exceeds JSON parser limits",
+                    )
                 };
+                let raw = row.get::<_, String>(2).map_err(|_| unreadable())?;
+                let value: Value = serde_json::from_str(&raw).map_err(|_| unreadable())?;
                 for ((path, c), found) in paths.iter().zip(&q.conditions).zip(&mut proof.found) {
                     if *found {
                         continue;
@@ -1896,6 +1934,11 @@ impl Source {
                         }
                     };
                 }
+                // All existential witnesses (including presence disproving
+                // `missing`) are immutable; no later row can change them.
+                if proof.found.iter().all(|found| *found) {
+                    break;
+                }
             }
             if stopped {
                 break;
@@ -1914,18 +1957,16 @@ impl Source {
                     .zip(&proof.found)
                     .map(|(c, found)| {
                         if c.op == "missing" {
-                            if !proof.complete {
-                                None
-                            } else if *found {
+                            if *found {
                                 Some(false)
-                            } else if !proof.tainted {
+                            } else if proof.complete {
                                 Some(true)
                             } else {
                                 None
                             }
                         } else if *found {
                             Some(true)
-                        } else if proof.complete && !proof.tainted {
+                        } else if proof.complete {
                             Some(false)
                         } else {
                             None
@@ -1938,9 +1979,6 @@ impl Source {
                 json!({"uid":uid,"conditions":conditions})
             })
             .collect::<Vec<_>>();
-        if cursor.proofs.iter().any(|p| p.tainted) {
-            d.limit("scan contains unreadable records");
-        }
         let next = if cursor.run < ids.len() {
             d.limit("scan incomplete");
             let payload = serde_json::to_vec(&cursor).unwrap();

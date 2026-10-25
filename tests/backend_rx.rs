@@ -847,39 +847,73 @@ async fn run_filter_negative_clauses_require_presence_or_complete_absence() {
 }
 
 #[tokio::test]
-async fn run_filter_unreadable_events_leave_unknown_and_continue_to_next_candidate() {
+async fn run_filter_unreadable_events_are_visible_errors_not_completed_unknowns() {
+    for data in [
+        rusqlite::types::Value::Text("{invalid".into()),
+        rusqlite::types::Value::Null,
+        rusqlite::types::Value::Blob(b"{\"ok\":true}".to_vec()),
+        // Valid JSON beyond serde's nesting bound must also fail explicitly.
+        rusqlite::types::Value::Text(format!("{}0{}", "[".repeat(256), "]".repeat(256))),
+    ] {
+        let f = Fixture::new();
+        Connection::open(&f.path)
+            .unwrap()
+            .execute("INSERT INTO events VALUES(859,6,'now',?)", [data])
+            .unwrap();
+        let q = run_filter_query(
+            &f,
+            json!([
+                {"path":"loss","op":"exists"},
+                {"path":"absent","op":"missing"},
+                {"path":"absent","op":"exists"}
+            ]),
+        );
+        let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{result}");
+        assert!(result["error"].as_str().unwrap().contains("JSON"));
+        assert!(result.get("runs").is_none(), "{result}");
+    }
+}
+
+#[tokio::test]
+async fn run_filter_resource_limit_is_a_visible_error_not_a_skipped_event() {
     let f = Fixture::new();
-    let db = Connection::open(&f.path).unwrap();
-    db.execute_batch("INSERT INTO events VALUES(859,6,'now','{invalid'); INSERT INTO events VALUES(859,7,'now',NULL); INSERT INTO runs VALUES(860,'later','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]'); INSERT INTO events VALUES(860,1,'now','{\"loss\":0.5}');").unwrap();
-    db.execute(
-        "INSERT INTO events VALUES(859,8,'now',?)",
-        [format!("{{\"padding\":\"{}\"}}", "x".repeat(300_000))],
-    )
-    .unwrap();
-    let mut q = run_filter_query(
+    let data = json!({"padding":"x".repeat(8 * 1024 * 1024)}).to_string();
+    Connection::open(&f.path)
+        .unwrap()
+        .execute("INSERT INTO events VALUES(859,6,'now',?)", [data])
+        .unwrap();
+    let q = run_filter_query(&f, json!([{"path":"absent","op":"missing"}]));
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{result}");
+    assert!(result["error"].as_str().unwrap().contains("8 MiB"));
+    assert!(result.get("runs").is_none(), "{result}");
+}
+
+#[tokio::test]
+async fn run_filter_all_witnesses_finish_early_including_missing_presence() {
+    let f = Fixture::new();
+    Connection::open(&f.path)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO events VALUES(859,6,'now','{\"later\":true}');
+         INSERT INTO events VALUES(859,7,'now','bad json');",
+        )
+        .unwrap();
+    let q = run_filter_query(
         &f,
         json!([
             {"path":"loss","op":"eq","value":0.5},
-            {"path":"absent","op":"eq","value":1},
-            {"path":"absent","op":"missing"},
-            {"path":"loss","op":"missing"}
+            {"path":"loss","op":"missing"},
+            {"path":"later","op":"exists"}
         ]),
     );
-    q["runs"] = json!(["u859", "later"]);
     let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
     assert_eq!(status, StatusCode::OK, "{result}");
-    assert_eq!(
-        result["runs"][0]["conditions"],
-        json!([true, null, null, false])
-    );
-    assert_eq!(
-        result["runs"][1]["conditions"],
-        json!([true, false, true, false])
-    );
-    assert_eq!(result["cursor"], Value::Null);
-    assert_eq!(result["diagnostics"]["partial"], true);
-    assert_eq!(result["diagnostics"]["invalid_json"], 2);
-    assert_eq!(result["diagnostics"]["oversized"], 1);
+    assert_eq!(result["runs"][0]["conditions"], json!([true, false, true]));
+    assert!(result["cursor"].is_null());
+    assert_eq!(result["diagnostics"]["partial"], false);
+    assert_eq!(result["diagnostics"]["scanned"], 2);
 }
 
 #[tokio::test]
@@ -903,7 +937,7 @@ async fn run_filter_cursor_retains_proofs_pins_high_water_and_rejects_scope_tamp
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(
         first["runs"][0]["conditions"],
-        json!([true, null, null, null])
+        json!([true, null, null, false])
     );
     assert_eq!(
         first["runs"][1]["conditions"],
@@ -1050,13 +1084,11 @@ async fn run_filter_validates_bounds_and_preserves_large_exact_identities() {
 }
 
 #[tokio::test]
-async fn run_filter_byte_pages_retain_unreadable_state_and_reject_replaced_source() {
+async fn run_filter_byte_pages_scan_large_events_and_reject_replaced_source() {
     let f = Fixture::new();
     let mut db = Connection::open(&f.path).unwrap();
     let tx = db.transaction().unwrap();
-    tx.execute_batch("INSERT INTO events VALUES(859,6,'now','bad json');")
-        .unwrap();
-    let data = json!({"padding":"x".repeat(200_000)}).to_string();
+    let data = json!({"padding":"x".repeat(300_000)}).to_string();
     for seq in 7..60 {
         tx.execute(
             "INSERT INTO events VALUES(859,?,'now',?)",
@@ -1094,9 +1126,10 @@ async fn run_filter_byte_pages_retain_unreadable_state_and_reject_replaced_sourc
     }
     assert_eq!(
         final_page["runs"][0]["conditions"],
-        json!([true, null, null])
+        json!([true, true, false])
     );
-    assert_eq!(final_page["diagnostics"]["partial"], true);
+    assert_eq!(final_page["diagnostics"]["partial"], false);
+    assert_eq!(final_page["diagnostics"]["oversized"], 0);
     drop(db);
     // Identical content at a different file identity must not reuse proofs.
     let replacement = f.path.with_extension("replacement");
@@ -1220,6 +1253,222 @@ async fn run_filter_compares_live_high_water_exactly_above_js_integer_range() {
         .unwrap();
     assert_eq!(
         f.request("POST", "/api/rx/run-filter", q, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn run_filter_full_budget_event_advances_after_a_small_row() {
+    let f = Fixture::new();
+    let limit = 8 * 1024 * 1024;
+    let overhead = json!({"late":true,"padding":""}).to_string().len();
+    let data = json!({"late":true,"padding":"x".repeat(limit - overhead)}).to_string();
+    assert_eq!(data.len(), limit);
+    Connection::open(&f.path)
+        .unwrap()
+        .execute("INSERT INTO events VALUES(859,6,'now',?)", [data])
+        .unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"exists"},
+            {"path":"late","op":"exists"},
+            {"path":"absent","op":"missing"}
+        ]),
+    );
+    let before = std::fs::read(&f.path).unwrap();
+    let (status, first) = f
+        .request("POST", "/api/rx/run-filter", q.clone(), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["cursor"].is_string());
+    assert_eq!(first["diagnostics"]["scanned"], 1);
+    assert_eq!(first["runs"][0]["conditions"], json!([true, null, null]));
+    q["cursor"] = first["cursor"].clone();
+    let (status, last) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert!(last["cursor"].is_null(), "{last}");
+    assert_eq!(last["runs"][0]["conditions"], json!([true, true, true]));
+    assert_eq!(last["diagnostics"]["scanned"], 1);
+    assert_eq!(last["diagnostics"]["bytes"], limit);
+    assert_eq!(last["diagnostics"]["oversized"], 0);
+    assert_eq!(last["diagnostics"]["partial"], false);
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+    // The larger predicate allowance must not raise the record preview limit.
+    let (status, records) = f.request("POST", "/api/rx/records", f.query(), true).await;
+    assert_eq!(status, StatusCode::OK, "{records}");
+    assert_eq!(records["diagnostics"]["oversized"], 1);
+}
+
+#[tokio::test]
+async fn run_filter_late_match_after_four_continuations_finishes_snapshot_despite_appends() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(6) UNION ALL SELECT x+1 FROM n WHERE x<100005) INSERT INTO events SELECT 859,x,'now','{}' FROM n; INSERT INTO events VALUES(859,100006,'now','{\"late\":true}');").unwrap();
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"loss","op":"exists"},
+            {"path":"late","op":"exists"},
+            {"path":"appended","op":"missing"}
+        ]),
+    );
+    let mut cursors = std::collections::BTreeSet::new();
+    let mut generation = Value::Null;
+    let mut total_scanned = 0;
+    let mut final_page = Value::Null;
+    for page_index in 0..30 {
+        let (status, page) = f
+            .request("POST", "/api/rx/run-filter", q.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if page_index == 0 {
+            generation = page["source_generation"].clone();
+        }
+        assert_eq!(page["source_generation"], generation);
+        let scanned = page["diagnostics"]["scanned"].as_u64().unwrap();
+        assert!(scanned > 0, "no progress: {page}");
+        total_scanned += scanned;
+        assert_eq!(page["runs"][0]["conditions"][0], true);
+        if page["cursor"].is_null() {
+            final_page = page;
+            break;
+        }
+        assert_eq!(page["runs"][0]["conditions"][2], Value::Null);
+        assert!(cursors.insert(page["cursor"].as_str().unwrap().to_owned()));
+        q["cursor"] = page["cursor"].clone();
+        db.execute(
+            "INSERT INTO events VALUES(859,?,'now','{\"appended\":true}')",
+            [100007 + page_index],
+        )
+        .unwrap();
+    }
+    assert!(cursors.len() > 4, "{cursors:?}");
+    assert_eq!(total_scanned, 100002);
+    assert_eq!(
+        final_page["runs"][0]["conditions"],
+        json!([true, true, true])
+    );
+    assert_eq!(final_page["diagnostics"]["partial"], false);
+}
+
+#[tokio::test]
+async fn run_filter_unreadable_tail_fails_after_successful_continuations() {
+    for (data, expected) in [
+        ("bad json".to_owned(), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            json!({"padding":"x".repeat(8 * 1024 * 1024)}).to_string(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ] {
+        let f = Fixture::new();
+        let db = Connection::open(&f.path).unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(6) UNION ALL SELECT x+1 FROM n WHERE x<20005) INSERT INTO events SELECT 859,x,'now','{}' FROM n;").unwrap();
+        db.execute("INSERT INTO events VALUES(859,20006,'now',?)", [data])
+            .unwrap();
+        let mut q = run_filter_query(&f, json!([{"path":"absent","op":"missing"}]));
+        let mut failed = false;
+        for page_index in 0..10 {
+            let (status, page) = f
+                .request("POST", "/api/rx/run-filter", q.clone(), true)
+                .await;
+            if status != StatusCode::OK {
+                assert!(page_index > 0);
+                assert_eq!(status, expected, "{page}");
+                assert!(page["error"].as_str().unwrap().contains("cannot complete"));
+                assert!(page.get("runs").is_none());
+                failed = true;
+                break;
+            }
+            assert!(
+                page["cursor"].is_string(),
+                "unreadable scan completed: {page}"
+            );
+            assert!(page["diagnostics"]["scanned"].as_u64().unwrap() > 0);
+            assert_ne!(q["cursor"], page["cursor"]);
+            q["cursor"] = page["cursor"].clone();
+        }
+        assert!(failed, "unreadable scan did not reach a visible error");
+    }
+}
+
+#[tokio::test]
+async fn catalog_snapshot_completes_beyond_five_pages_despite_appends_and_rejects_replacement() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("DELETE FROM events; DELETE FROM runs; BEGIN;")
+        .unwrap();
+    for id in 1..=1207 {
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,'succeeded',NULL,NULL,'now',NULL,NULL,0,'[]')",
+            rusqlite::params![id, format!("uid-{id}")],
+        )
+        .unwrap();
+    }
+    db.execute_batch("COMMIT").unwrap();
+    let (status, first) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["high_water"], "1207");
+    let generation = first["source_generation"].as_str().unwrap();
+    let mut seen = first["runs"].as_array().unwrap().clone();
+    let mut next = first["next_after"].as_str().map(str::to_owned);
+    let mut pages = 1;
+    while let Some(after) = next {
+        let appended = 1207 + pages;
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,'queued',NULL,NULL,'now',NULL,NULL,NULL,'[]')",
+            rusqlite::params![appended, format!("uid-{appended}")],
+        )
+        .unwrap();
+        let path =
+            format!("/api/rx/catalog?after={after}&high_water=1207&source_generation={generation}");
+        let (status, page) = f.request("GET", &path, Value::Null, true).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["high_water"], "1207");
+        assert_eq!(page["source_generation"], generation);
+        assert!(page["runs"].as_array().unwrap().len() <= 200);
+        seen.extend(page["runs"].as_array().unwrap().iter().cloned());
+        next = page["next_after"].as_str().map(str::to_owned);
+        pages += 1;
+        assert!(pages < 10);
+    }
+    assert_eq!(pages, 7);
+    assert_eq!(seen.len(), 1207);
+    assert_eq!(seen.last().unwrap()["run_uid"], "uid-1207");
+    let (_, refreshed) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+    assert_eq!(refreshed["high_water"], "1213");
+    // The same generation pin is used by the Event filter, not only catalog pages.
+    let (_, proof) = f.request("POST", "/api/rx/run-filter", json!({"source_id":f.source_id,"runs":["uid-1"],"conditions":[{"path":"absent","op":"missing"}]}), true).await;
+    assert_eq!(proof["source_generation"], generation);
+    drop(db);
+    let replacement = f.path.with_extension("replacement");
+    std::fs::copy(&f.path, &replacement).unwrap();
+    std::fs::rename(&replacement, &f.path).unwrap();
+    let path = format!("/api/rx/catalog?after=200&high_water=1207&source_generation={generation}");
+    assert_eq!(
+        f.request("GET", &path, Value::Null, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn catalog_snapshot_pins_exact_i64_high_water_and_rejects_shrink() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute("INSERT INTO runs VALUES(9007199254740993,'large','succeeded',NULL,NULL,'now',NULL,NULL,0,'[]')", []).unwrap();
+    let (_, first) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+    assert_eq!(first["high_water"], "9007199254740993");
+    let generation = first["source_generation"].as_str().unwrap();
+    let path = format!(
+        "/api/rx/catalog?after=859&high_water=9007199254740993&source_generation={generation}"
+    );
+    let (status, page) = f.request("GET", &path, Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["runs"][0]["id"], "9007199254740993");
+    db.execute("DELETE FROM runs WHERE run_uid='large'", [])
+        .unwrap();
+    assert_eq!(
+        f.request("GET", &path, Value::Null, true).await.0,
         StatusCode::BAD_REQUEST
     );
 }
