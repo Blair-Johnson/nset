@@ -468,11 +468,17 @@ for (const dpr of [1, 2])
                 result.xTicks.filter(Boolean).length,
               );
             }
+            const mouseYVisible = variant === "production" &&
+              await page.locator(".mouse-axis-tick-y").isVisible();
             expect(
-              result.ticks.filter((s: string) => s !== "").length,
+              result.ticks.filter((s: string) => s !== "").length + Number(mouseYVisible),
             ).toBeGreaterThan(0);
+            // A moving mouse tick intentionally replaces overlapping native
+            // labels (on a narrow timestamp axis it may replace the only one).
+            const mouseXVisible = variant === "production" &&
+              await page.locator(".mouse-axis-tick-x").isVisible();
             expect(
-              result.xTicks.filter((s: string) => s !== "").length,
+              result.xTicks.filter((s: string) => s !== "").length + Number(mouseXVisible),
             ).toBeGreaterThan(0);
             if (mode === "card")
               expect(result.card.width).toBe(viewport === 390 ? 358 : 1000);

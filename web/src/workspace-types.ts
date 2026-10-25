@@ -126,6 +126,6 @@ export interface PlotInteraction {
   onPin?: (pin: "a" | "b" | "threshold", value: number) => void;
   /** A direct-gesture placement click completed after pointer capture release. */
   onPlacementComplete?: (pin: "a" | "b" | "threshold" | "yA" | "yB") => void;
-  onHover?: (x: number | null) => void;
+  onHover?: (x: number | null, pointer?: [number, number]) => void;
   onViewChange?: () => void;
 }

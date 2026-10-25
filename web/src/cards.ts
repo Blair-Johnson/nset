@@ -1,3 +1,4 @@
+import { nearestCrossingRuns, plottedSeries } from "./crossings";
 import { loadRecordPlot, recordConfig } from "./records";
 import {
   analyze,
@@ -552,26 +553,24 @@ export class ChartCard {
         this.mode = first ? "inspect" : "zoom";
         this.configure(false);
       },
-      onHover: (x) => {
+      onHover: (x, pointer) => {
         this.hover.replaceChildren();
-        if (x === null) return;
+        if (x === null || !pointer) return;
         this.lastHoverX = x;
         this.updateLegendReadout();
-        for (const [index, series] of this.data.slice(0, 3).entries()) {
+        const crossings = this.plot!.hoverCrossings(pointer, this.cursorAxis);
+        const rows = nearestCrossingRuns(crossings.rows,
+          (index) => this.sources[index]?.runId ?? this.data[index].run.id,
+          crossings.mouse);
+        for (const { index, positions } of rows) {
           const row = element("div", "card-hover-row");
-          const name = element("span", "", this.seriesLabel(index));
+          const name = element("span", "", this.sources[index]?.run.name ?? this.data[index].run.name);
           name.title = name.textContent ?? "";
-          row.append(name, element("span", "", this.number(series.fn.at(x))));
+          const values = positions.map(crossings.value).sort((a, b) => a - b)
+            .map((value) => this.cursorAxis === "x" ? this.number(value) : this.xText(value));
+          row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
           this.hover.append(row);
         }
-        if (this.data.length > 3)
-          this.hover.append(
-            element(
-              "div",
-              "card-hover-more",
-              `${this.data.length - 3} more in legend`,
-            ),
-          );
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
@@ -694,6 +693,7 @@ export class ChartCard {
     const mixed = new Set(this.sources.map((source) => source.key)).size > 1;
     this.legend.classList.toggle("card-legend-mixed", mixed);
     this.data.forEach((series, index) => {
+      if (!plottedSeries(series, config, index)) return;
       const style = styleFor(config, series.run.id, index);
       const item = element("span", "card-legend-item");
       item.setAttribute("role", "listitem");
