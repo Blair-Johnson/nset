@@ -489,6 +489,10 @@
   background: var(--surface-raised, #252a30);
   pointer-events: none;
 }
+.card-hover[data-side="left"] {
+  left: 15px;
+  right: auto;
+}
 .card-hover:empty {
   display: none;
 }

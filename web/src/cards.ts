@@ -14,6 +14,7 @@ import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
 import { loadPlotRuns, withMetricLabel } from "./card-label";
+import { HoverLegendPosition } from "./hover-legend-position";
 import { nextCursorPlacement } from "./cursor-placement";
 import { NAVIGATE_LABEL, plotIcon, type PlotIconName } from "./plot-icons";
 import {
@@ -94,6 +95,7 @@ export class ChartCard {
   private inspection = element("div", "card-inspection");
   private results = element("div", "card-results");
   private hover = element("div", "card-hover");
+  private hoverPosition?: HoverLegendPosition;
   private legend = element("div", "card-legend");
   private lastHoverX: number | null = null;
   private legendCoordinate = element("div", "card-legend-coordinate");
@@ -424,6 +426,8 @@ export class ChartCard {
   }
 
   private build() {
+    this.hoverPosition?.destroy();
+    this.hoverPosition = undefined;
     this.root.dataset.role = "chart-card";
     this.host.dataset.cardId = this.spec.id;
     this.host.dataset.cardKind = this.spec.kind;
@@ -522,6 +526,7 @@ export class ChartCard {
       this.hover,
       this.inspection,
     );
+    this.hoverPosition = new HoverLegendPosition(this.hover, plotHost);
     this.plot = new PlotPanel(
       plotHost,
       () => {},
@@ -568,7 +573,10 @@ export class ChartCard {
       },
       onHover: (x, pointer) => {
         this.hover.replaceChildren();
-        if (x === null || !pointer) return;
+        if (x === null || !pointer) {
+          this.hoverPosition?.update(null);
+          return;
+        }
         this.lastHoverX = x;
         this.updateLegendReadout();
         const popupAxis = this.mode === "inspect" ? this.cursorAxis : "x";
@@ -586,6 +594,7 @@ export class ChartCard {
           row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
           this.hover.append(row);
         }
+        this.hoverPosition?.update(pointer);
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
@@ -1184,6 +1193,7 @@ export class ChartCard {
     this.cancel();
     this.observer?.disconnect();
     this.foldObserver?.disconnect();
+    this.hoverPosition?.destroy();
     this.lifetime.abort();
     this.plot?.destroy();
     this.images?.destroy();
