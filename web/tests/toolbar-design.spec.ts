@@ -147,7 +147,7 @@ for (const width of [1440, 390]) {
               ...section.querySelectorAll<HTMLButtonElement>(
                 ".card-chart-toolbar button, .card-header > .card-button",
               ),
-            ].map((button) => {
+            ].filter((button) => !button.hidden).map((button) => {
               const s = getComputedStyle(button),
                 r = button.getBoundingClientRect();
               return {
