@@ -451,3 +451,33 @@ for (const width of [1440, 390]) {
     );
   });
 }
+
+// Real touch capability, rather than merely a narrow desktop viewport.
+test.describe("mobile drawer focus", () => {
+  test.use({ hasTouch: true });
+  for (const width of [390, 1024]) {
+    test(`opening and reopening never autofocuses search at ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await fixture(page);
+      const search = page.getByLabel("Find runs", { exact: true });
+      const close = page.getByLabel("Collapse run list", { exact: true });
+      await expect(search).not.toBeFocused();
+      await close.tap();
+      await page.getByLabel("Expand run list", { exact: true }).tap();
+      await expect(close).toBeFocused();
+      await expect(search).not.toBeFocused();
+      await search.tap();
+      await expect(search).toBeFocused();
+      await search.fill("Baseline");
+      await search.press("Escape");
+      await page.getByLabel("Expand run list", { exact: true }).tap();
+      await expect(close).toBeFocused();
+      await expect(search).not.toBeFocused();
+      await expect(search).toHaveValue("Baseline");
+      await page.getByRole("button", { name: "Clear filters", exact: true }).tap();
+      await expect(search).not.toBeFocused();
+      await search.tap();
+      await expect(search).toBeFocused();
+    });
+  }
+});

@@ -168,7 +168,7 @@ async function popupColors(page: Page) {
 }
 
 for (const mobile of [false, true])
-  test(`one-finger inspect persists and preserves cursor placement state (${mobile ? "mobile" : "desktop"})`, async ({
+  test(`one-finger inspect persists and preserves cursor placement state (${mobile ? "narrow touch" : "wide touch"})`, async ({
     page,
     context,
   }) => {
@@ -539,4 +539,78 @@ test("editor navigation control follows scalar/image/scalar type transitions", a
     "data-navigation-tool",
     "navigate",
   );
+});
+
+async function spacePan(page: Page) {
+  const before = await state(page);
+  const a = await plotPoint(page, 0.45, 0.45);
+  await page.mouse.move(a.x, a.y);
+  await page.keyboard.down("Space");
+  await page.mouse.down();
+  await page.mouse.move(a.x + 40, a.y + 20, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.up("Space");
+  const after = await state(page);
+  expect(after.view.x[0]).not.toBe(before.view.x[0]);
+  expect(after.view.x[1] - after.view.x[0]).toBeCloseTo(before.view.x[1] - before.view.x[0], 6);
+  expect(after.pins).toEqual(before.pins);
+}
+
+test("Space-drag after turning touch navigation off never reactivates it", async ({ page }) => {
+  await fixture(page);
+  await tool(page).click();
+  await tool(page).click();
+  await expect(tool(page)).toHaveAttribute("aria-pressed", "false");
+  await spacePan(page);
+  await expect(tool(page)).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".uplot")).toHaveAttribute("data-navigation-tool", "zoom");
+  await spacePan(page);
+});
+
+test.describe("mouse-only desktop", () => {
+  test.use({ hasTouch: false });
+  test("touch tool is absent from cards and the editor, including narrow windows", async ({ page }) => {
+    await fixture(page, false, true);
+    await expect(tool(page)).toBeHidden();
+    await page.evaluate(async () => {
+      const { openChartEditor } = await import("/src/chart-editor.ts");
+      const s = (window as any).touchChart;
+      openChartEditor({ card: s.card.spec, catalog: s.context.catalog,
+        selectedRunIds: ["a", "b"], store: s.context.store, api: {}, onSave() {} });
+    });
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.locator(".u-over")).toBeVisible();
+    await expect(dialog.getByRole("button", { name: label, exact: true })).toBeHidden();
+    await dialog.getByLabel("Plot type", { exact: true }).selectOption("image");
+    await dialog.getByLabel("Plot type", { exact: true }).selectOption("line");
+    await expect(dialog.getByRole("button", { name: label, exact: true })).toBeHidden();
+  });
+  test("desktop Space-drag works after clicking a chart toolbar button", async ({ page }) => {
+    await fixture(page);
+    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await spacePan(page);
+    await expect(page.locator(".uplot")).toHaveAttribute("data-navigation-tool", "zoom");
+  });
+});
+
+test("mouse panning stays normal even while touch navigation is selected", async ({ page }) => {
+  await fixture(page);
+  await tool(page).click();
+  await spacePan(page);
+  await expect(tool(page)).toHaveAttribute("aria-pressed", "true");
+  expect((await state(page)).contacts).toBe(0);
+  await tool(page).click();
+  await spacePan(page);
+  await expect(tool(page)).toHaveAttribute("aria-pressed", "false");
+});
+
+test("Space still activates a keyboard-focused toolbar button away from the plot", async ({ page }) => {
+  await fixture(page);
+  const zoom = page.getByRole("button", { name: "Zoom in", exact: true });
+  await zoom.hover();
+  await zoom.focus();
+  const before = await state(page);
+  await page.keyboard.press("Space");
+  const after = await state(page);
+  expect(after.view.x[1] - after.view.x[0]).toBeCloseTo((before.view.x[1] - before.view.x[0]) / 1.5, 6);
 });

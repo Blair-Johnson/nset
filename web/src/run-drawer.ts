@@ -1,3 +1,4 @@
+import { touchPrimary } from "./input-capabilities";
 import { uuid } from "./uuid";
 import "./run-drawer.css";
 import type { Catalog } from "./workspace-types";
@@ -78,7 +79,7 @@ export class RunDrawer {
     this.state.status = this.status.value = "all";
     this.session.setFilter(emptyFilter());
     this.filter();
-    this.search.focus({ preventScroll: true });
+    if (!touchPrimary()) this.search.focus({ preventScroll: true });
   });
   private readonly session: RunFilterSession;
   private readonly ownsSession: boolean;
@@ -449,9 +450,11 @@ export class RunDrawer {
     if (open) {
       this.list.scrollTop = this.state.scrollTop;
       if (focus)
-        (this.previousFocus?.isConnected
-          ? this.previousFocus
-          : this.search
+        (touchPrimary()
+          ? this.toggle
+          : this.previousFocus?.isConnected
+            ? this.previousFocus
+            : this.search
         ).focus({ preventScroll: true });
     } else if (focus) this.toggle.focus({ preventScroll: true });
   }

@@ -1,3 +1,4 @@
+import { touchPrimary } from "./input-capabilities";
 import { nearestCrossingRuns, plottedSeries } from "./crossings";
 import { loadRecordPlot, recordConfig } from "./records";
 import {
@@ -474,9 +475,11 @@ export class ChartCard {
       this.backButton,
     );
     this.navigateButton = iconButton("navigate", NAVIGATE_LABEL, () => {
+      if (!touchPrimary()) return;
       this.mode = this.mode === "navigate" ? "zoom" : "navigate";
       this.configure();
     });
+    this.navigateButton.hidden = !touchPrimary();
     toolbar.append(this.navigateButton);
     for (const [axis, icon, label] of [
       ["x", "vertical-cursor", "Add vertical cursor"],

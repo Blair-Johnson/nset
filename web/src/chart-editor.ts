@@ -1,3 +1,4 @@
+import { touchPrimary } from "./input-capabilities";
 import { NAVIGATE_LABEL, plotIcon } from "./plot-icons";
 import { mountRecordControls } from "./record-controls";
 import { newRecordBinding, loadRecordPlot } from "./records";
@@ -501,6 +502,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   const previewTitle = el("h3", "", draft.title || "Untitled chart");
   const previewToolbar = el("div", "ce-preview-toolbar");
   const previewNavigation = button("", () => {
+    if (!touchPrimary()) return;
     previewNavigate = !previewNavigate;
     configurePreviewNavigation();
   }, "card-button");
@@ -508,7 +510,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   previewNavigation.setAttribute("aria-label", NAVIGATE_LABEL);
   previewNavigation.setAttribute("aria-pressed", "false");
   previewNavigation.append(plotIcon("navigate"));
-  previewNavigation.hidden = draft.kind === "image";
+  previewNavigation.hidden = draft.kind === "image" || !touchPrimary();
   previewToolbar.append(previewTitle, previewNavigation);
   function configurePreviewNavigation() {
     previewNavigation.setAttribute("aria-pressed", String(previewNavigate));
@@ -736,7 +738,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   let pickerSearch = "";
   let renderChoices = () => {};
   function renderAll() {
-    previewNavigation.hidden = draft.kind === "image";
+    previewNavigation.hidden = draft.kind === "image" || !touchPrimary();
     recordControls?.destroy(); recordControls = undefined;
     renderChart();
     renderData();

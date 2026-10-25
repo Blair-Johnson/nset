@@ -179,6 +179,7 @@ export class PlotNavigation {
   private pinch?: { view: Viewport; points: ContactPair };
   private space = false;
   private pointerButtons = 0;
+  private touchInput = false;
   private abort = new AbortController();
   private previousTouchAction: string;
   constructor(
@@ -440,7 +441,8 @@ export class PlotNavigation {
     return false;
   }
   private nativeEvent = (e: Event) => {
-    if (this.options.mode !== "navigate") return;
+    if (this.options.mode !== "navigate" ||
+        (!e.type.startsWith("touch") && !this.touchInput)) return;
     if (e.cancelable) e.preventDefault();
     e.stopImmediatePropagation();
   };
@@ -555,7 +557,8 @@ export class PlotNavigation {
     if (this.options.directGestures) e.preventDefault();
   };
   private down = (e: PointerEvent) => {
-    if (this.options.mode === "navigate") {
+    this.touchInput = e.pointerType === "touch";
+    if (this.options.mode === "navigate" && this.touchInput) {
       this.contactDown(e);
       return;
     }
@@ -623,7 +626,8 @@ export class PlotNavigation {
     this.cursor();
   };
   private move = (e: PointerEvent) => {
-    if (this.options.mode === "navigate") {
+    this.touchInput = e.pointerType === "touch";
+    if (this.options.mode === "navigate" && this.touchInput) {
       this.contactMove(e);
       return;
     }
@@ -682,7 +686,8 @@ export class PlotNavigation {
     return g;
   }
   private up = (e: PointerEvent) => {
-    if (this.options.mode === "navigate") {
+    this.touchInput = e.pointerType === "touch";
+    if (this.options.mode === "navigate" && this.touchInput) {
       this.contactUp(e);
       return;
     }
@@ -736,7 +741,7 @@ export class PlotNavigation {
     this.cancel();
   }
   private cancel = (event?: PointerEvent) => {
-    if (event && this.options.mode === "navigate") {
+    if (event?.pointerType === "touch" && this.options.mode === "navigate") {
       if (this.contacts.has(event.pointerId)) this.cancelContacts();
       return;
     }
@@ -839,10 +844,13 @@ export class PlotNavigation {
     this.options.onCursorModeCycle();
   };
   private spaceDown = (e: KeyboardEvent) => {
+    // A toolbar click leaves its button focused. Over the plot, Space must pan,
+    // not activate that old button on keyup (which can re-enable touch mode).
     if (
       !this.options.directGestures ||
       e.code !== "Space" ||
-      editable(e.target) ||
+      editable(e.target, false) ||
+      (editable(e.target) && !this.u.over.matches(":hover")) ||
       e.ctrlKey ||
       e.metaKey ||
       e.altKey
