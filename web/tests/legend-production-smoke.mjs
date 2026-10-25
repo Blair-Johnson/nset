@@ -246,8 +246,22 @@ async function assertPlotResponses(network, training) {
     entry.body.group === "phase" && entry.body.ys.length === 2 &&
     (training ? entry.body.filters.conditions.some((c) => c.path === "phase" && c.op === "eq" && c.value === "train")
       : entry.body.filters.conditions.length === 0));
-  const collect = () => new Map(matching().flatMap((entry) => entry.result.traces.map((trace) =>
-    [JSON.stringify([trace.run_uid, trace.y, trace.group]), trace.points])));
+  const collect = () => {
+    // Continuation pages may split one trace. Preview reloads may repeat it;
+    // merge by the stable event sequence, verifying repeats agree exactly.
+    const traces = new Map();
+    for (const entry of matching()) for (const trace of entry.result.traces) {
+      const key = JSON.stringify([trace.run_uid, trace.y, trace.group]);
+      if (!traces.has(key)) traces.set(key, new Map());
+      const points = traces.get(key);
+      for (const point of trace.points) {
+        if (points.has(point[2])) assert.deepEqual(points.get(point[2]), point);
+        points.set(point[2], point);
+      }
+    }
+    return new Map([...traces].map(([key, points]) => [key,
+      [...points.values()].sort((a, b) => BigInt(a[2]) < BigInt(b[2]) ? -1 : BigInt(a[2]) > BigInt(b[2]) ? 1 : 0)]));
+  };
   await expect.poll(() => collect().size, { timeout: 30000 }).toBe(expected.size);
   const actual = collect();
   assert.deepEqual([...actual.keys()].sort(), [...expected.keys()].sort());
