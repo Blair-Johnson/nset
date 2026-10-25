@@ -391,14 +391,20 @@ test("late cursor failure stops automatic search and only explicit Retry restart
     name: "Retry filter search",
     exact: true,
   });
+  await expect(page.locator("summary .run-filter-progress")).toHaveText("!");
+  await expect(retry).toBeHidden();
+  await menu(page).locator("summary").click();
   await expect(retry).toBeVisible();
+  await expect(menu(page).locator(".run-filter-error")).toContainText(
+    "late fixture unavailable",
+  );
   await expect(page.locator(".run-filter-control:visible")).toHaveAttribute(
     "aria-busy",
     "false",
   );
   await expect(page.locator("summary .run-filter-progress")).toHaveAttribute(
     "aria-label",
-    /late fixture unavailable/,
+    "Filter failed: open filters for details",
   );
   await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
   const failedCount = scans(calls).length;

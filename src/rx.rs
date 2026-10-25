@@ -27,8 +27,11 @@ const MAX_SCAN: usize = 20_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024;
 // Run predicates need complete events, unlike bounded record/field previews.
-// Keep an individual filter row within the per-request byte allowance.
-const MAX_FILTER_RECORD: usize = MAX_BYTES;
+// Large diagnostic events are legitimate rx data. Admit at most one bounded
+// large row per page; the normal aggregate page budget remains 8 MiB.
+const MAX_FILTER_RECORD: usize = 64 * 1024 * 1024;
+// Bound tag-object heap amplification before deserializing numeric extensions.
+const MAX_FILTER_NONFINITE: usize = 16_384;
 const MAX_POINTS: usize = 20_000;
 const MAX_TRACES: usize = 128;
 const MAX_FIELDS: usize = 64;
@@ -1672,6 +1675,134 @@ mod tests {
 }
 
 // RUN clauses are independent existential queries, not a conjunction on one event.
+// Python's json.dumps (used by rx producers) emits NaN/Infinity by default.
+// Keep these distinct from JSON null and strings. The ordinary JSON fast path
+// remains unchanged; the fallback only rewrites unquoted numeric extensions.
+struct FilterEvent {
+    value: Value,
+    marker: Option<String>,
+}
+impl FilterEvent {
+    fn parse(raw: &str) -> Result<Self> {
+        let unreadable = || {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "rx run filter cannot complete: an event is not valid JSON text or exceeds JSON parser limits",
+            )
+        };
+        if let Ok(value) = serde_json::from_str(raw) {
+            return Ok(Self {
+                value,
+                marker: None,
+            });
+        }
+        let marker = format!("rx-nonfinite-{}", uuid::Uuid::new_v4());
+        let bytes = raw.as_bytes();
+        let mut normalized = Vec::with_capacity(bytes.len());
+        let (mut i, mut start, mut count) = (0, 0, 0);
+        let mut quoted = false;
+        let mut quote_start = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if quoted => {
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    if quoted {
+                        let text = &bytes[quote_start..=i];
+                        // An ASCII marker can only decode from 1–6 bytes per
+                        // character. Check original strings, not surviving map
+                        // values: duplicate object keys legitimately overwrite.
+                        if (marker.len() + 2..=marker.len() * 6 + 2).contains(&text.len())
+                            && serde_json::from_slice::<String>(text).ok().as_deref()
+                                == Some(marker.as_str())
+                        {
+                            return Err(unreadable());
+                        }
+                    } else {
+                        quote_start = i;
+                    }
+                    quoted = !quoted;
+                }
+                _ => {}
+            }
+            if !quoted {
+                let token = [
+                    (b"NaN".as_slice(), 0),
+                    (b"Infinity".as_slice(), 1),
+                    (b"-Infinity".as_slice(), 2),
+                ]
+                .into_iter()
+                .find(|(token, _)| bytes[i..].starts_with(token));
+                if let Some((token, kind)) = token {
+                    if count >= MAX_FILTER_NONFINITE {
+                        return Err(ApiError(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "rx run filter cannot complete: an event exceeds the 16384 non-finite-number resource limit",
+                        ));
+                    }
+                    let replacement = format!("{{\"{marker}\":{kind}}}");
+                    if normalized.len() + i - start + replacement.len() > MAX_FILTER_RECORD {
+                        return Err(ApiError(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "rx run filter cannot complete: normalized event exceeds the 64 MiB row resource limit",
+                        ));
+                    }
+                    normalized.extend_from_slice(&bytes[start..i]);
+                    normalized.extend_from_slice(replacement.as_bytes());
+                    count += 1;
+                    i += token.len();
+                    start = i;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        if count == 0 {
+            return Err(unreadable());
+        }
+        if normalized.len() + bytes.len() - start > MAX_FILTER_RECORD {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "rx run filter cannot complete: normalized event exceeds the 64 MiB row resource limit",
+            ));
+        }
+        normalized.extend_from_slice(&bytes[start..]);
+        let value = serde_json::from_slice(&normalized).map_err(|_| unreadable())?;
+        Ok(Self {
+            value,
+            marker: Some(marker),
+        })
+    }
+    fn nonfinite(&self, value: &Value) -> Option<f64> {
+        let marker = self.marker.as_ref()?;
+        let map = value.as_object()?;
+        if map.len() != 1 {
+            return None;
+        }
+        match map.get(marker)?.as_u64()? {
+            0 => Some(f64::NAN),
+            1 => Some(f64::INFINITY),
+            2 => Some(f64::NEG_INFINITY),
+            _ => None,
+        }
+    }
+    fn get(&self, path: &FieldPath) -> Option<&Value> {
+        let mut value = &self.value;
+        for segment in &path.0 {
+            if self.nonfinite(value).is_some() {
+                return None;
+            }
+            value = match segment {
+                Segment::Key(key) => value.as_object()?.get(key)?,
+                Segment::Index(index) => value.as_array()?.get(*index)?,
+            };
+        }
+        Some(value)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunFilterRequest {
@@ -1889,7 +2020,7 @@ impl Source {
                 if bytes > MAX_FILTER_RECORD {
                     return Err(ApiError(
                         StatusCode::PAYLOAD_TOO_LARGE,
-                        "rx run filter cannot complete: an event exceeds the 8 MiB row resource limit",
+                        "rx run filter cannot complete: an event exceeds the 64 MiB row resource limit",
                     ));
                 }
                 if d.scanned > 0 && d.bytes + bytes > MAX_BYTES {
@@ -1909,29 +2040,36 @@ impl Source {
                     )
                 };
                 let raw = row.get::<_, String>(2).map_err(|_| unreadable())?;
-                let value: Value = serde_json::from_str(&raw).map_err(|_| unreadable())?;
+                let value = FilterEvent::parse(&raw)?;
                 for ((path, c), found) in paths.iter().zip(&q.conditions).zip(&mut proof.found) {
                     if *found {
                         continue;
                     }
-                    let v = path.get(&value);
+                    let v = value.get(path);
+                    let nonfinite = v.and_then(|v| value.nonfinite(v));
                     *found = match c.op.as_str() {
                         "exists" | "missing" => v.is_some(),
-                        "eq" => v.is_some_and(|v| scalar_equal(v, &c.value)),
+                        "eq" => nonfinite.is_none() && v.is_some_and(|v| scalar_equal(v, &c.value)),
                         "ne" => v.is_some_and(|v| !scalar_equal(v, &c.value)),
                         "contains" => v
                             .and_then(Value::as_str)
                             .is_some_and(|v| v.contains(c.value.as_str().unwrap())),
-                        op => {
-                            v.and_then(|v| numeric_cmp(v, &c.value))
-                                .is_some_and(|order| match op {
-                                    "lt" => order.is_lt(),
-                                    "lte" => !order.is_gt(),
-                                    "gt" => order.is_gt(),
-                                    "gte" => !order.is_lt(),
-                                    _ => false,
-                                })
-                        }
+                        op => nonfinite
+                            .map_or_else(
+                                || v.and_then(|v| numeric_cmp(v, &c.value)),
+                                |number| {
+                                    c.value
+                                        .as_f64()
+                                        .and_then(|other| number.partial_cmp(&other))
+                                },
+                            )
+                            .is_some_and(|order| match op {
+                                "lt" => order.is_lt(),
+                                "lte" => !order.is_gt(),
+                                "gt" => order.is_gt(),
+                                "gte" => !order.is_lt(),
+                                _ => false,
+                            }),
                     };
                 }
                 // All existential witnesses (including presence disproving

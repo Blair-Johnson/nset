@@ -432,9 +432,9 @@ function renderPage() {
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
-      if (catalog.rx?.id === experiment.id) {
+      if (catalog.rx?.id === experiment.id && (catalog.rx.error || catalog.rx.nextAfter != null)) {
         const note = element("div", "table-toolbar");
-        note.append(element("span", "muted", catalog.rx.error || "Read-only rx records. Select runs, open Charts, and add a record chart."));
+        if (catalog.rx.error) note.append(element("span", "muted", catalog.rx.error));
         if (catalog.rx.nextAfter != null) {
           const more = button("Load more rx runs", async () => {
             more.disabled = true;

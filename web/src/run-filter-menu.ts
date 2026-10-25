@@ -54,6 +54,8 @@ export class RunFilterMenu {
   private readonly badge = element("span", "run-filter-badge");
   private readonly popover = element("div", "menu-popover run-filter-popover");
   private readonly list = element("div", "run-filter-conditions");
+  private readonly failure = element("div", "run-filter-failure");
+  private readonly error = element("p", "run-filter-error");
   private readonly combine = element("select");
   private fields: FilterField[] = [];
   private runs: Run[] = [];
@@ -65,6 +67,7 @@ export class RunFilterMenu {
     private readonly onChange: (filter: RunFilter) => void,
     private readonly count: (filter: RunFilter) => number,
     private readonly events?: {
+      retry(): void;
       discover(
         prefix: string,
         signal: AbortSignal,
@@ -132,7 +135,14 @@ export class RunFilterMenu {
     };
     const foot = element("div", "run-filter-foot");
     foot.append(add, clear);
-    this.popover.append(head, this.list, foot);
+    const retry = element("button", "text-link run-filter-retry", "Retry");
+    retry.type = "button";
+    retry.setAttribute("aria-label", "Retry filter search");
+    retry.onclick = () => this.events?.retry();
+    this.error.setAttribute("role", "status");
+    this.failure.hidden = true;
+    this.failure.append(this.error, retry);
+    this.popover.append(head, this.failure, this.list, foot);
     this.root.append(this.summary, this.popover);
     this.root.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.root.open) {
@@ -166,6 +176,11 @@ export class RunFilterMenu {
     this.filter = structuredClone(filter);
     this.render();
   }
+  setError(error: string) {
+    this.error.textContent = error ? `Filter failed: ${error}` : "";
+    this.failure.hidden = !error;
+  }
+
   refreshCounts() {
     if (!this.destroyed) this.updateCounts();
   }

@@ -141,7 +141,7 @@ export function experimentTable(
       );
       body.append(tr);
     }
-    if (!rows.length) {
+    if (!rows.length && !filterSession.error) {
       const tr = element("tr");
       const td = cell(
         catalog.experiments.length
@@ -593,15 +593,13 @@ export function runTable(
       }
       body.append(tr);
     }
-    if (!rows.length) {
+    if (!rows.length && !filterSession.error) {
       const tr = element("tr");
       const td = cell(
         runs.length
-          ? filterSession.error
-            ? "Filter failed. Retry the search."
-            : filterSession.pending
-              ? "No verified matches yet."
-              : "No runs match your filters."
+          ? filterSession.pending
+            ? "No verified matches yet."
+            : "No runs match your filters."
           : "No runs in this experiment yet.",
         "empty-table",
       );

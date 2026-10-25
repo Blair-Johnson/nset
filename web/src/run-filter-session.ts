@@ -421,6 +421,7 @@ export class RunFilterControl {
       (filter) => session.setFilter(filter),
       (filter) => session.count(filter),
       {
+        retry: () => session.retry(),
         discover: (prefix, signal, more) =>
           session.discover(prefix, signal, more),
       },
@@ -428,11 +429,7 @@ export class RunFilterControl {
     const status = element("span", "run-filter-progress");
     status.setAttribute("role", "status");
     this.menu.root.querySelector("summary")!.append(status);
-    const retry = element("button", "text-link run-filter-retry", "Retry");
-    retry.type = "button";
-    retry.setAttribute("aria-label", "Retry filter search");
-    retry.onclick = () => session.retry();
-    this.root.append(this.menu.root, retry);
+    this.root.append(this.menu.root);
     let runs: Run[] | undefined;
     const update = () => {
       if (this.destroyed) return;
@@ -449,18 +446,17 @@ export class RunFilterControl {
       status.setAttribute(
         "aria-label",
         session.error
-          ? `Filter failed: ${session.error}`
+          ? "Filter failed: open filters for details"
           : searching
             ? `Searching · ${session.count()} matches`
             : "Search complete",
       );
-      status.title =
-        session.error ||
-        (searching
+      status.title = session.error
+        ? "Filter failed: open filters for details"
+        : searching
           ? `Searching · ${session.count()} matches · ${session.scanned.toLocaleString()} events checked`
-          : `${session.count()} matches`);
-      retry.hidden = !session.error;
-      retry.title = session.error;
+          : `${session.count()} matches`;
+      this.menu.setError(session.error);
       onChange();
     };
     this.unsubscribe = session.subscribe(update);

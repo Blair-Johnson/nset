@@ -673,3 +673,49 @@ test("unavailable source metadata is an explicit retryable error even with no lo
   assert.equal(session.error, "source unavailable");
   assert.equal(session.canContinue, false);
 });
+
+test("failure details survive until explicit recovery and loading/error/success notify controls", async (t) => {
+  const detail = "source unavailable: " + "long-diagnostic/".repeat(40);
+  let fail = true;
+  const { api, calls } = mockApi(({ body }) =>
+    fail
+      ? new Response(JSON.stringify({ error: detail }), { status: 503 })
+      : page(body.runs),
+  );
+  const session = new RunFilterSession(filter(event()), api);
+  t.after(() => session.destroy());
+  const states: { busy: boolean; error: string; count: number }[] = [];
+  // Explicit scans run before the scheduled timer; check each transition deterministically.
+  session.setRuns([run("a")]);
+  const unsubscribe = session.subscribe(() =>
+    states.push({
+      busy: session.busy,
+      error: session.error,
+      count: session.count(),
+    }),
+  );
+  t.after(unsubscribe);
+  await session.continueScan();
+  assert.equal(session.error, detail);
+  assert.equal(session.count(), 0);
+  assert.equal(session.canContinue, false);
+  await session.continueScan();
+  assert.equal(
+    calls.length,
+    1,
+    "failure must not retry on another scan request",
+  );
+  fail = false;
+  session.retry();
+  assert.equal(session.error, "");
+  await session.continueScan();
+  assert.equal(session.count(), 1);
+  assert.equal(calls.length, 2);
+  assert.ok(states.some((state) => state.busy && !state.error));
+  assert.ok(
+    states.some(
+      (state) => !state.busy && state.error === detail && state.count === 0,
+    ),
+  );
+  assert.deepEqual(states.at(-1), { busy: false, error: "", count: 1 });
+});

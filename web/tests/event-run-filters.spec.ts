@@ -1,4 +1,6 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 type Call = { path: string; body: any; method: string; authorization?: string };
 const source = "rx:filter-fixture";
@@ -365,13 +367,13 @@ test("failed Event scans expose unknown and Retry scan instead of accepting all 
   await addEvent(page, "metrics.loss", "lt", "0.5");
   await expect(page.locator(".run-filter-progress")).toHaveAttribute(
     "aria-label",
-    "Filter failed: source unavailable",
+    "Filter failed: open filters for details",
   );
   await expect(page.getByRole("checkbox", { name: /^Select r\d/ })).toHaveCount(
     0,
   );
   fail = false;
-  await menu(page).locator("summary").click();
+  await openMenu(page);
   await page
     .getByRole("button", { name: "Retry filter search", exact: true })
     .click();
@@ -621,9 +623,13 @@ for (const failure of ["stale cursor", "cursorless replacement"] as const) {
       .check();
     await addEvent(page, "metrics.accuracy", "exists");
     await menu(page).locator("summary").click();
+    await expect(menu(page).locator(".run-filter-progress")).toHaveText("!");
     await expect(
       page.getByRole("button", { name: "Retry filter search", exact: true }),
-    ).toBeVisible();
+    ).toBeHidden();
+    await openMenu(page);
+    await expect(menu(page).locator(".run-filter-error")).toBeVisible();
+    await menu(page).locator("summary").click();
     await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
     expect(await selected(page)).toEqual([id(3)]);
     await page
@@ -642,3 +648,207 @@ for (const failure of ["stale cursor", "cursorless replacement"] as const) {
     );
   });
 }
+
+for (const surface of ["table", "drawer"] as const) {
+  test(`production ${surface} keeps filter failures inside popup without layout shifts`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1100, height: 850 });
+    await page.addInitScript((source) => {
+      localStorage.setItem(
+        `nset.run-pane.${source}`,
+        JSON.stringify({ open: true, width: 250 }),
+      );
+    }, source);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fail = true;
+    const detail =
+      "rx source unavailable: failed reading event records. " +
+      "diagnostic/".repeat(24);
+    const calls = await fixture(page, async (route, call) => {
+      if (call.path !== "/api/rx/run-filter" || !fail) return false;
+      await held;
+      await route.fulfill({ status: 503, json: { error: detail } });
+      return true;
+    });
+    // A healthy rx runlist has only its actual control toolbar, not an empty note row.
+    await expect(
+      page.getByText("Read-only rx records.", { exact: false }),
+    ).toHaveCount(0);
+    await expect(page.locator(".table-toolbar")).toHaveCount(1);
+    await page
+      .getByRole("checkbox", { name: "Select r3", exact: true })
+      .check();
+    if (surface === "drawer") {
+      await page
+        .getByRole("button", { name: "View charts", exact: true })
+        .click();
+      if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
+        await page.getByLabel("Expand run list", { exact: true }).click();
+      await expect(page.locator(".run-drawer")).toBeVisible();
+      expect(
+        (await page.locator(".run-drawer").boundingBox())!.width,
+      ).toBeLessThanOrEqual(250);
+    }
+    const evidence =
+      process.env.RX_UI_EVIDENCE_DIR ?? testInfo.outputPath("ui");
+    await mkdir(evidence, { recursive: true });
+    const capture = async (state: string) => {
+      const path = join(evidence, `${surface}-${state}.png`);
+      await page.screenshot({ path });
+      await testInfo.attach(`${surface}-${state}`, {
+        path,
+        contentType: "image/png",
+      });
+    };
+    const geometry = () =>
+      menu(page).evaluate((root) => {
+        const control = root.closest(".run-filter-control")!;
+        const toolbar = root.closest(".run-drawer-search, .table-toolbar")!;
+        const rect = (node: Element) => {
+          const { x, y, width, height } = node.getBoundingClientRect();
+          return { x, y, width, height };
+        };
+        return {
+          trigger: rect(root.querySelector("summary")!),
+          control: rect(control),
+          toolbar: rect(toolbar),
+          search: rect(toolbar.querySelector('input[type="search"]')!),
+        };
+      });
+    try {
+      await addEvent(page, "metrics.loss", "lt", "0.5");
+      await menu(page).locator("summary").click();
+      await expect(menu(page).locator(".run-filter-progress")).toHaveText("…");
+      const loading = await geometry();
+      await capture("loading");
+      release();
+      await expect(menu(page).locator(".run-filter-progress")).toHaveText("!");
+      const failed = await geometry();
+      expect(failed).toEqual(loading);
+      expect(failed.control.width).toBe(failed.trigger.width);
+      const indicator = (await menu(page)
+        .locator(".run-filter-progress")
+        .boundingBox())!;
+      expect(indicator.x).toBeGreaterThanOrEqual(failed.trigger.x);
+      expect(indicator.y).toBeGreaterThanOrEqual(failed.trigger.y);
+      expect(indicator.x + indicator.width).toBeLessThanOrEqual(
+        failed.trigger.x + failed.trigger.width,
+      );
+      expect(indicator.y + indicator.height).toBeLessThanOrEqual(
+        failed.trigger.y + failed.trigger.height,
+      );
+      await expect(
+        page.getByRole("button", { name: "Retry filter search", exact: true }),
+      ).toBeHidden();
+      await expect(menu(page).locator(".run-filter-error")).toBeHidden();
+      await expect(
+        page.locator(".run-filter-control > .run-filter-retry"),
+      ).toHaveCount(0);
+      await expect(page.locator(".toast:visible")).toHaveCount(0);
+      expect
+        .soft(
+          await page.evaluate(() => {
+            const outside = document.body.cloneNode(true) as HTMLElement;
+            outside
+              .querySelectorAll(".run-filter-popover")
+              .forEach((popup) => popup.remove());
+            return outside.textContent;
+          }),
+        )
+        .not.toMatch(/Retry|rx source unavailable|Filter failed\./);
+      await capture("error-closed");
+      const failedCalls = calls.filter(
+        (call) => call.path === "/api/rx/run-filter",
+      ).length;
+      await page.waitForTimeout(250);
+      expect(
+        calls.filter((call) => call.path === "/api/rx/run-filter"),
+      ).toHaveLength(failedCalls);
+      const root = await openMenu(page);
+      await expect(root.locator(".run-filter-error")).toHaveText(
+        `Filter failed: ${detail}`,
+      );
+      await expect(
+        root.locator(".run-filter-popover .run-filter-retry"),
+      ).toBeVisible();
+      const popupGeometry = await root
+        .locator(".run-filter-popover")
+        .evaluate((popup) => {
+          const bounds = popup.getBoundingClientRect();
+          const error = popup.querySelector(".run-filter-error")!;
+          const retry = popup.querySelector(".run-filter-retry")!;
+          return {
+            x: bounds.x,
+            right: bounds.right,
+            bottom: bounds.bottom,
+            width: bounds.width,
+            scrollWidth: popup.scrollWidth,
+            clientWidth: popup.clientWidth,
+            errorWidth: error.getBoundingClientRect().width,
+            retryBottom: retry.getBoundingClientRect().bottom,
+          };
+        });
+      expect(popupGeometry.x).toBeGreaterThanOrEqual(0);
+      expect(popupGeometry.right).toBeLessThanOrEqual(1100);
+      expect(popupGeometry.bottom).toBeLessThanOrEqual(850);
+      expect(popupGeometry.scrollWidth).toBeLessThanOrEqual(
+        popupGeometry.clientWidth,
+      );
+      expect(popupGeometry.errorWidth).toBeLessThan(popupGeometry.width);
+      expect(popupGeometry.retryBottom).toBeLessThanOrEqual(
+        popupGeometry.bottom,
+      );
+      expect(await geometry()).toEqual(loading);
+      await capture("error-popup");
+      fail = false;
+      await root
+        .getByRole("button", { name: "Retry filter search", exact: true })
+        .click();
+      await expect(root.locator(".run-filter-progress")).toHaveText("");
+      await expect(root.locator(".run-filter-failure")).toBeHidden();
+      await root.locator("summary").click();
+      const success = await geometry();
+      expect(success).toEqual(loading);
+      await capture("success");
+      await writeFile(
+        join(evidence, `${surface}-geometry.json`),
+        JSON.stringify({ loading, failed, success, popupGeometry }, null, 2),
+      );
+      expect(await selected(page)).toEqual([id(3)]);
+    } finally {
+      release();
+    }
+  });
+}
+
+test("rx runlist retains a genuine catalog error without the routine instruction toolbar", async ({
+  page,
+}) => {
+  let unavailable = false;
+  const detail = "Cannot read rx catalog: fixture repository is unavailable";
+  await fixture(page, async (route, call) => {
+    if (call.path !== "/api/rx/catalog" || !unavailable) return false;
+    await route.fulfill({
+      json: {
+        source: { id: source, name: "Filter fixture", readonly: true },
+        runs: [],
+        next_after: null,
+        error: detail,
+      },
+    });
+    return true;
+  });
+  await expect(page.locator(".table-toolbar")).toHaveCount(1);
+  unavailable = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(
+    page.locator(".table-toolbar > .muted").filter({ hasText: detail }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Read-only rx records.", { exact: false }),
+  ).toHaveCount(0);
+});

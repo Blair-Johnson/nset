@@ -329,16 +329,14 @@ export class RunDrawer {
     this.matching.textContent = this.state.selectedOnly
       ? `${visible} of ${this.selected.size} selected shown`
       : `${matches.size} matching`;
-    this.empty.hidden = visible > 0;
+    this.empty.hidden = visible > 0 || !!this.session.error;
     this.empty.textContent = this.state.selectedOnly
       ? this.selected.size
         ? "No selected runs match these filters. Clear filters or turn off Selected."
         : "No runs selected. Turn off Selected to browse runs."
-      : this.session.error
-        ? "Filter failed. Retry the search."
-        : this.session.pending
-          ? "No verified matches yet."
-          : "No runs match these filters. Clear filters to browse runs.";
+      : this.session.error || this.session.pending
+        ? "No verified matches yet."
+        : "No runs match these filters. Clear filters to browse runs.";
     // Only move focus when its keyed row actually disappears. Rollback leaves
     // the accepted selection unchanged, so failed writes keep the same checkbox.
     if (focusedIndex >= 0 && rows[focusedIndex][1].root.hidden) {

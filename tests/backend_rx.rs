@@ -878,7 +878,7 @@ async fn run_filter_unreadable_events_are_visible_errors_not_completed_unknowns(
 #[tokio::test]
 async fn run_filter_resource_limit_is_a_visible_error_not_a_skipped_event() {
     let f = Fixture::new();
-    let data = json!({"padding":"x".repeat(8 * 1024 * 1024)}).to_string();
+    let data = json!({"padding":"x".repeat(64 * 1024 * 1024)}).to_string();
     Connection::open(&f.path)
         .unwrap()
         .execute("INSERT INTO events VALUES(859,6,'now',?)", [data])
@@ -886,7 +886,7 @@ async fn run_filter_resource_limit_is_a_visible_error_not_a_skipped_event() {
     let q = run_filter_query(&f, json!([{"path":"absent","op":"missing"}]));
     let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{result}");
-    assert!(result["error"].as_str().unwrap().contains("8 MiB"));
+    assert!(result["error"].as_str().unwrap().contains("64 MiB"));
     assert!(result.get("runs").is_none(), "{result}");
 }
 
@@ -1357,7 +1357,7 @@ async fn run_filter_unreadable_tail_fails_after_successful_continuations() {
     for (data, expected) in [
         ("bad json".to_owned(), StatusCode::UNPROCESSABLE_ENTITY),
         (
-            json!({"padding":"x".repeat(8 * 1024 * 1024)}).to_string(),
+            json!({"padding":"x".repeat(64 * 1024 * 1024)}).to_string(),
             StatusCode::PAYLOAD_TOO_LARGE,
         ),
     ] {
@@ -1471,4 +1471,149 @@ async fn catalog_snapshot_pins_exact_i64_high_water_and_rejects_shrink() {
         f.request("GET", &path, Value::Null, true).await.0,
         StatusCode::BAD_REQUEST
     );
+}
+
+#[tokio::test]
+async fn run_filter_real_source_large_event_preserves_late_match_and_absence() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    // Real rffm events include 13.4 MB and 54.6 MB diagnostic payloads.
+    let raw = json!({"stage_summary":"x".repeat(55 * 1024 * 1024)}).to_string();
+    db.execute("INSERT INTO events VALUES(859,6,'now',?)", [&raw])
+        .unwrap();
+    db.execute_batch("INSERT INTO events VALUES(859,7,'now','{\"metrics\":{\"accuracy\":0.9}}')")
+        .unwrap();
+    drop(db);
+    let mut q = run_filter_query(
+        &f,
+        json!([
+            {"path":"metrics.accuracy","op":"exists"},
+            {"path":"absent","op":"missing"}
+        ]),
+    );
+    let mut pages = 0;
+    loop {
+        let (status, result) = f
+            .request("POST", "/api/rx/run-filter", q.clone(), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        pages += 1;
+        assert!(pages < 10, "large row must make progress");
+        if result["diagnostics"]["bytes"].as_u64().unwrap() > 8 * 1024 * 1024 {
+            assert_eq!(result["diagnostics"]["scanned"], 1);
+        }
+        if result["cursor"].is_null() {
+            assert_eq!(result["runs"][0]["conditions"], json!([true, true]));
+            break;
+        }
+        assert_ne!(q["cursor"], result["cursor"]);
+        q["cursor"] = result["cursor"].clone();
+    }
+    assert!(pages >= 3);
+}
+
+#[tokio::test]
+async fn run_filter_real_source_nonfinite_numbers_are_not_null_or_strings() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute("INSERT INTO events VALUES(859,6,'now',?)", [r#"{"metrics":{"accuracy":0.9},"nan":NaN,"positive":Infinity,"negative":-Infinity,"nil":null,"text":"NaN Infinity -Infinity","array":[NaN]}"#]).unwrap();
+    drop(db);
+    let q = run_filter_query(
+        &f,
+        json!([
+            {"path":"metrics.accuracy","op":"exists"},
+            {"path":"nan","op":"exists"},
+            {"path":"nan","op":"missing"},
+            {"path":"nan","op":"eq","value":null},
+            {"path":"nan","op":"ne","value":null},
+            {"path":"nan","op":"eq","value":"NaN"},
+            {"path":"nan","op":"gt","value":0},
+            {"path":"positive","op":"gt","value":1e300},
+            {"path":"negative","op":"lt","value":-1e300},
+            {"path":"nil","op":"eq","value":null},
+            {"path":"text","op":"eq","value":"NaN Infinity -Infinity"},
+            {"path":"array[0]","op":"exists"},
+            {"path":"nan.child","op":"missing"},
+            {"path":"absent","op":"missing"}
+        ]),
+    );
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(result["cursor"].is_null());
+    assert_eq!(
+        result["runs"][0]["conditions"],
+        json!([
+            true, true, false, false, true, false, false, true, true, true, true, true, true, true
+        ])
+    );
+}
+
+#[tokio::test]
+async fn run_filter_nonfinite_extension_keeps_invalid_json_explicit() {
+    for raw in [
+        r#"{"x":NaNx}"#,
+        r#"{"x":+Infinity}"#,
+        r#"{"x":-NaN}"#,
+        r#"{NaN:1}"#,
+        r#"[Infinity,]"#,
+        r#"{"x":NaN,"broken":}"#,
+        r#"{"x":"unterminated NaN}"#,
+    ] {
+        let f = Fixture::new();
+        let db = Connection::open(&f.path).unwrap();
+        db.execute("INSERT INTO events VALUES(859,6,'now',?)", [raw])
+            .unwrap();
+        drop(db);
+        let q = run_filter_query(&f, json!([{"path":"absent","op":"missing"}]));
+        let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{raw}: {result}");
+        assert!(result.get("runs").is_none());
+    }
+}
+
+#[tokio::test]
+async fn run_filter_nonfinite_duplicate_keys_keep_last_value() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(859,6,'now',?)",
+        [r#"{"x":NaN,"x":1,"y":NaN,"y":Infinity,"sub":{"x":NaN},"sub":{"x":null}}"#],
+    )
+    .unwrap();
+    drop(db);
+    let q = run_filter_query(
+        &f,
+        json!([
+            {"path":"x","op":"eq","value":1},
+            {"path":"x","op":"eq","value":null},
+            {"path":"y","op":"gt","value":1e300},
+            {"path":"sub.x","op":"eq","value":null}
+        ]),
+    );
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(
+        result["runs"][0]["conditions"],
+        json!([true, false, true, true])
+    );
+}
+
+#[tokio::test]
+async fn run_filter_dense_nonfinite_has_explicit_preallocation_resource_bound() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    let raw = format!("{{\"dense\":[{}NaN]}}", "NaN,".repeat(999_999));
+    db.execute("INSERT INTO events VALUES(859,6,'now',?)", [&raw])
+        .unwrap();
+    drop(db);
+    let q = run_filter_query(&f, json!([{"path":"absent","op":"missing"}]));
+    let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("non-finite-number resource limit")
+    );
+    assert!(result.get("runs").is_none());
 }
