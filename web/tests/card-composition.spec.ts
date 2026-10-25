@@ -432,9 +432,10 @@ test("log/log three-run folds preserve the canvas and resize persists only base 
   expect(resized.layout.height).toBe(normal.layout.height + 60);
   expect(resized.plot.height).toBe(normal.plot.height + 60);
   expect(resized.viewport).toEqual(normal.viewport);
-  const retainedPins = resized.pins;
-  await card.getByRole("button", { name: "Hide cursor details" }).click();
-  expect((await geometry(page)).pins).toEqual(retainedPins);
+  await card.getByRole("button", { name: "Clear cursors" }).click();
+  const cleared = await geometry(page);
+  expect(cleared.pins).toEqual({ a: null, b: null, threshold: null, yA: null, yB: null });
+  expect(cleared.viewport).toEqual(resized.viewport);
   await card.getByText("Show legend", { exact: true }).click();
   const closed = await geometry(page);
   expect(closed.card.height).toBe(normal.layout.height + 60);
@@ -755,7 +756,7 @@ test("maximized folds retain both canvas dimensions under the browser scrollbar 
       "",
     );
     await card
-      .getByRole("button", { name: "Hide cursor details", exact: true })
+      .getByRole("button", { name: "Clear cursors", exact: true })
       .click();
     await card.getByText("Show legend", { exact: true }).click();
     const closed = await geometry(page);

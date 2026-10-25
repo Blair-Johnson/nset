@@ -814,6 +814,27 @@ test("cursor pairs return to zoom and existing horizontal/vertical pins drag dir
   expect(after.pins).toEqual(pins);
 });
 
+test("threshold clear action also removes every cursor without changing the camera", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await page.evaluate(() => {
+    const c = (window as any).geometry.card;
+    for (const [pin, value] of Object.entries({ a: 1, b: 5, yA: 0.3, yB: 1.7, threshold: 1 }))
+      c.setPin(pin, value);
+    c.mode = "threshold";
+    c.configure();
+  });
+  const before = await snapshot(page);
+  await page.getByText("Edit positions", { exact: true }).click();
+  await page.getByRole("button", { name: "Clear cursors", exact: true }).click();
+  expect(await snapshot(page)).toEqual({
+    ...before,
+    pins: { a: null, b: null, threshold: null, yA: null, yB: null },
+  });
+  expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe("zoom");
+  await expect(page.locator(".card-inspection")).toBeHidden();
+  await expect(page.locator(".card-crossings")).toHaveCount(0);
+});
 for (const touch of [false, true]) {
   test.describe(`cursor toolbar ${touch ? "touch" : "mouse"}`, () => {
     test.use({
@@ -821,6 +842,82 @@ for (const touch of [false, true]) {
       viewport: touch ? { width: 390, height: 844 } : { width: 1500, height: 1100 },
     });
 
+    for (const armedAxis of ["x", "y"] as const) {
+      test(`Clear Cursors removes both pairs while ${armedAxis} is armed and preserves zoom`, async ({ page }) => {
+        await fixture(page);
+        const axisButton = (axis: "x" | "y") => page.getByRole("button", {
+          name: axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
+          exact: true,
+        });
+        const activate = async (axis: "x" | "y") => {
+          if (touch) await axisButton(axis).tap();
+          else await axisButton(axis).click();
+        };
+        const point = async (x: number, y: number) => page.evaluate(async ({ x, y }) => {
+          await new Promise(requestAnimationFrame);
+          await new Promise(requestAnimationFrame);
+          const u = (window as any).geometry.card.plot.chart;
+          const rect = u.over.getBoundingClientRect();
+          return { x: rect.left + u.valToPos(x, "x"), y: rect.top + u.valToPos(y, "y") };
+        }, { x, y });
+        const place = async (x: number, y: number) => {
+          const p = await point(x, y);
+          if (touch) await page.touchscreen.tap(p.x, p.y);
+          else await page.mouse.click(p.x, p.y);
+        };
+        await activate("x");
+        await place(1, 0.4);
+        await place(5, 0.4);
+        await activate("y");
+        await place(3, 0.3);
+        await place(3, 1.7);
+        // A threshold left by another inspection mode must not survive either.
+        await page.evaluate(() => (window as any).geometry.card.setPin("threshold", 1));
+        const zoom = page.getByRole("button", { name: "Zoom in", exact: true });
+        if (touch) await zoom.tap();
+        else await zoom.click();
+        await activate(armedAxis);
+        await expect(axisButton(armedAxis)).toHaveAttribute("aria-pressed", "true");
+        const before = await snapshot(page);
+        for (const pin of ["a", "b", "yA", "yB", "threshold"])
+          expect(before.pins[pin]).not.toBeNull();
+        expect(before.history).toBe(true);
+        await expect(page.locator(".card-position-group")).toHaveCount(2);
+        await page.getByText("Edit positions", { exact: true }).click();
+        const clear = page.getByRole("button", { name: "Clear cursors", exact: true });
+        await expect(clear).toHaveCount(1);
+        await expect(clear).toHaveText("Clear Cursors");
+        await expect(page.getByRole("button", { name: "Hide cursor details" })).toHaveCount(0);
+        if (touch) await clear.tap();
+        else await clear.click();
+
+        const empty = { a: null, b: null, threshold: null, yA: null, yB: null };
+        expect(await snapshot(page)).toEqual({ ...before, pins: empty });
+        expect(await page.evaluate(() => (window as any).geometry.card.plot.pins)).toEqual(empty);
+        expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe("zoom");
+        for (const axis of ["x", "y"] as const)
+          await expect(axisButton(axis)).toHaveAttribute("aria-pressed", "false");
+        await expect(page.locator(".card-inspection")).toBeHidden();
+        await expect(page.locator(".card-position-readout, .card-crossings, .card-value-table")).toHaveCount(0);
+        await place(3, 0.9); // Ordinary clicks/taps cannot recreate cleared pins.
+        expect(await snapshot(page)).toEqual({ ...before, pins: empty });
+        if (!touch) {
+          const p = await point(3.5, 1);
+          await page.mouse.move(p.x, p.y);
+          await expect(page.locator(".card-hover-row").first()).toBeVisible();
+        }
+        // Both axes can start fresh, without stale values in the other pair.
+        await activate(armedAxis);
+        await place(2, 0.8);
+        const pin = armedAxis === "x" ? "a" : "yA";
+        const fresh = (await snapshot(page)).pins;
+        expect(fresh[pin]).toBeCloseTo(armedAxis === "x" ? 2 : 0.8, 1);
+        expect({ ...fresh, [pin]: null }).toEqual(empty);
+        await expect(page.locator(".card-position-group")).toHaveCount(1);
+        expect((await snapshot(page)).viewport).toEqual(before.viewport);
+        expect((await snapshot(page)).loads).toBe(before.loads);
+      });
+    }
     test("active axis toggles off, other axis switches, and pins/camera survive", async ({ page }) => {
       await fixture(page);
       const button = (axis: "x" | "y") => page.getByRole("button", {

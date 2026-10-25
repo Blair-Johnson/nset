@@ -656,15 +656,8 @@ export class ChartCard {
       label.append(input);
       fields.append(label);
     }
-    fields.append(
-      button("×", "Clear cursors", () => {
-        this.pins = { a: null, b: null, threshold: null, yA: null, yB: null };
-        this.plot?.setPins(this.pins);
-        this.mode = "zoom";
-        this.inspectOpen = false;
-        this.configure();
-      }),
-    );
+    if (this.mode === "threshold")
+      fields.append(button("×", "Clear cursors", () => this.clearCursors()));
     const editor = element("details", "card-position-editor");
     editor.open = positionsOpen;
     editor.append(element("summary", "", "Edit positions"), fields);
@@ -728,6 +721,14 @@ export class ChartCard {
     this.updateLegendReadout();
   }
 
+  private clearCursors() {
+    this.pins = { a: null, b: null, threshold: null, yA: null, yB: null };
+    this.plot?.setPins(this.pins);
+    this.mode = "zoom";
+    this.inspectOpen = false;
+    this.renderResults();
+    this.configure();
+  }
   private setPin(pin: keyof Pins, value: number | null) {
     this.pins = { ...this.pins, [pin]: value };
     const input = this.inputs.get(pin);
@@ -825,11 +826,7 @@ export class ChartCard {
         readout.append(group);
       }
       readout.append(
-        button("Hide", "Hide cursor details", () => {
-          this.inspectOpen = false;
-          this.mode = "zoom";
-          this.configure();
-        }),
+        button("Clear Cursors", "Clear cursors", () => this.clearCursors()),
       );
       this.results.append(readout);
     }
