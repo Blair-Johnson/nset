@@ -1014,6 +1014,7 @@ async function crossingFixture(
         ...s.card.spec.config,
         xMin: 0, xMax: 100, yMin: 0, yMax: 150,
         ...options.config,
+        style: { ...s.card.spec.config.style, ...(options.config?.style as object ?? {}) },
       },
     });
     s.context = {
@@ -1335,4 +1336,68 @@ test("stationary mouse readouts recompute against the live plot rectangle after 
   await expect(page.locator(".mouse-axis-tick-y")).toHaveText(expected[1]);
   await expect(hoverNames(page)).toHaveCount(4);
   await expect(hoverValues(page)).not.toHaveText(["50.00", "60.00", "70.00", "80.00"]);
+});
+
+
+test("automatic markers contribute crossings only when the live renderer draws them", async ({ page }) => {
+  await crossingFixture(page, [{ id: "dense", points: Array.from({ length: 1001 }, (_, x) => [x, 10] as [number, number]) }], {
+    config: { xMin: 0, xMax: 1000, yMin: 0, yMax: 20,
+      style: { width: 0, fill: 0, markers: { show: "auto", size: 5, space: 10 } } },
+  });
+  await moveCrossingPointer(page, 500, 10);
+  await expect(hoverNames(page)).toHaveCount(0);
+  await page.getByText("Show legend", { exact: true }).click();
+  await expect(page.locator(".card-legend-name")).toHaveText("Run dense");
+  await page.evaluate(() => (window as any).geometry.card.plot.showView({ x: [495, 505], y: [0, 20] }));
+  await moveCrossingPointer(page, 500, 10);
+  await expect(hoverNames(page)).toHaveText(["Run dense"]);
+  await expect(hoverValues(page)).toHaveText(["10"]);
+  await page.evaluate(() => (window as any).geometry.card.plot.showView({ x: [0, 1000], y: [0, 20] }));
+  await moveCrossingPointer(page, 500, 10);
+  await expect(hoverNames(page)).toHaveCount(0);
+});
+
+test("smoothed lines do not report suppressed automatic raw markers as extra neighbors", async ({ page }) => {
+  await crossingFixture(page, [{ id: "smooth", points: Array.from({ length: 1001 }, (_, x) => [x, x === 500 ? 10 : 0] as [number, number]) }], {
+    config: { xMin: 0, xMax: 1000, yMin: 0, yMax: 20, smoothing: true,
+      style: { markers: { show: "auto", size: 5, space: 10 } } },
+  });
+  await moveCrossingPointer(page, 500, 5);
+  await expect(hoverNames(page)).toHaveText(["Run smooth"]);
+  await expect(hoverValues(page)).not.toContainText("(");
+  await expect(hoverValues(page)).not.toHaveText(["10"]);
+});
+
+test("moving ticks honor advanced axis notation and restore ordinary labels", async ({ page }) => {
+  await crossingFixture(page, rankedTraces(), { config: {
+    xFormat: "number", yFormat: "number",
+    advanced: { axes: [{ values: "scientific" }, { values: "fixed-2" }] },
+  } });
+  await moveCrossingPointer(page, 50, 75);
+  await expect(page.locator(".mouse-axis-tick-x")).toHaveText("5.000e+1");
+  await expect(page.locator(".mouse-axis-tick-y")).toHaveText("75.00");
+  const read = () => page.evaluate(() => {
+    const u = (window as any).geometry.card.plot.chart;
+    return [u.axes[0].values(u, [50], 0, 50, 25), u.axes[1].values(u, [75], 1, 50, 25)];
+  });
+  expect(await read()).toEqual([[""], [""]]);
+  await page.mouse.move(0, 0);
+  await expect(page.locator(".mouse-axis-tick-x")).toBeHidden();
+  await expect(page.locator(".mouse-axis-tick-y")).toBeHidden();
+  expect(await read()).toEqual([["5.000e+1"], ["75.00"]]);
+});
+
+test("many selected missing-field runs keep late multi-metric source identities without a legend ceiling", async ({ page }) => {
+  const traces: HoverTrace[] = Array.from({ length: 70 }, (_, i) => ({
+    id: String(i), points: i < 64 ? [] : [[0, i], [100, i]],
+  }));
+  for (let i = 64; i < 70; i++) traces.push({ id: String(i), key: "other/value", points: [[0, i + 0.4], [100, i + 0.4]] });
+  await crossingFixture(page, traces);
+  await moveCrossingPointer(page, 50, 67.1);
+  await expect(hoverNames(page)).toHaveText(["Run 67", "Run 66", "Run 68", "Run 65"]);
+  await expect(page.locator(".card-hover")).not.toContainText(/loss|other|more/);
+  await page.getByText("Show legend", { exact: true }).click();
+  await expect(page.locator(".card-legend-item")).toHaveCount(12);
+  await moveCrossingPointer(page, 50, 69.2);
+  await expect(hoverNames(page)).toHaveText(["Run 69", "Run 68", "Run 67", "Run 66"]);
 });

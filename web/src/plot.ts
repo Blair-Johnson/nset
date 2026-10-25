@@ -14,6 +14,7 @@ import {
 import { extent, unionSorted } from "./utils";
 import {
   resolveOptions,
+  coordinateFormatter,
   fillColor,
   rawMarkerOptions,
   pairedVisibility,
@@ -96,6 +97,7 @@ export class PlotPanel {
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
   private geometry: (CrossingPath | undefined)[] = [];
+  private markerShown: boolean[] = [];
   private plotted: boolean[] = [];
   private hoverPointer?: XY;
   private hoverClient?: XY;
@@ -161,6 +163,7 @@ export class PlotPanel {
     this.hoverClient = undefined;
     this.interaction?.onHover?.(null);
     this.geometry = [];
+    this.markerShown = [];
     this.mouseAxisTicks?.update(null);
     this.generation++;
     this.navigation?.destroy();
@@ -263,8 +266,8 @@ export class PlotPanel {
           for (const position of this.geometry[index]?.crossings(axis, fixed, mouse, bounds) ?? []) positions.push(position);
         }
       }
-      const markers = markerEnabled(config, d.run.id, index) && u.series[2 * index + 2]?.show !== false ? d.observations : [];
-      const singleton = d.points.length === 1 && (style.markers?.size ?? style.pointSize) > 0 ? d.points : [];
+      const markers = markerEnabled(config, d.run.id, index) && this.markerShown[2 * index + 2] && u.series[2 * index + 2]?.show !== false ? d.observations : [];
+      const singleton = d.points.length === 1 && this.markerShown[2 * index + 1] && (style.markers?.size ?? style.pointSize) > 0 ? d.points : [];
       for (const [x, y] of [...markers, ...singleton]) {
         if (drawablePoint([x, y], config) && Math.abs(u.valToPos(axis === "x" ? x : y, axis, true) - fixed) <= 1e-7) add(x, y);
       }
@@ -520,11 +523,25 @@ export class PlotPanel {
       return;
     }
     let visibilityChanges = 0;
+    const markerShown: boolean[] = [];
     const opts = resolveOptions(
       config,
       this.host.clientWidth,
       series,
       {
+      init: [
+        (u) => u.series.forEach((series, index) => {
+          if (!index || !series.points) return;
+          const show = series.points.show;
+          // Capture the renderer's actual density decision, not permission in
+          // the config. Recomputed on every draw (including zoom and resize).
+          series.points.show = (...args) => {
+            const visible = typeof show === "function" ? show(...args) : show;
+            markerShown[index] = !!visible;
+            return visible;
+          };
+        }),
+      ],
       draw: [
         (u) => { if (this.chart === u) this.publishHover(); },
         (u) =>
@@ -602,8 +619,8 @@ export class PlotPanel {
       quantity,
     );
     const mouseAxisTicks = installMouseAxisTicks(opts, {
-      x: (value) => formatXValue(value, quantity, config.xFormat),
-      y: (value) => formatValue(value, config.yFormat),
+      x: coordinateFormatter(config, quantity, 0),
+      y: coordinateFormatter(config, quantity, 1),
     });
     if (this.fillHost) {
       opts.width = Math.max(1, this.host.clientWidth);
@@ -672,6 +689,7 @@ export class PlotPanel {
     this.chart = candidate;
     this.mouseAxisTicks = mouseAxisTicks;
     this.geometry = geometry;
+    this.markerShown = markerShown;
     this.plotted = data.map((d, i) => plottedSeries(d, config, i));
     this.config = config;
     this.analyzed = data;
