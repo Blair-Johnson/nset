@@ -1,3 +1,4 @@
+import { uuid } from "./uuid";
 import "./run-drawer.css";
 import type { Catalog } from "./workspace-types";
 import type { Run } from "./api";
@@ -127,7 +128,7 @@ export class RunDrawer {
     });
     this.state.filter = this.session.filter;
     this.filterSlot.append(this.filterControl.root);
-    this.root.id = `runs-${crypto.randomUUID()}`;
+    this.root.id = `runs-${uuid()}`;
     this.root.setAttribute("aria-label", "Chart runs");
     this.toggle.type = "button";
     this.toggle.setAttribute("aria-controls", this.root.id);

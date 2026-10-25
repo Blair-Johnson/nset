@@ -1,3 +1,4 @@
+import { uuid } from "./uuid";
 import { validateRecordBinding, recordRuns } from "./records";
 import { assertSafe, defaults, parseSafeJson, validateConfig } from "./config";
 import type {
@@ -15,7 +16,7 @@ import type { Run } from "./api";
 const STORAGE_KEY = "nset.workspaces.v2";
 const forbidden = new Set(["__proto__", "constructor", "prototype"]);
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-const uniqueId = (prefix: string) => `${prefix}:${crypto.randomUUID()}`;
+const uniqueId = (prefix: string) => `${prefix}:${uuid()}`;
 function object(value: unknown, fields?: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected an object.");

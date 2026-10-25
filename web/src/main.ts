@@ -1,3 +1,4 @@
+import { uuid } from "./uuid";
 import { appendRxCatalog } from "./records";
 import "./style.css";
 import { Api, type Run } from "./api";
@@ -537,7 +538,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
             );
             if (!section) {
               section = {
-                id: crypto.randomUUID(),
+                id: uuid(),
                 title: "Custom charts",
                 collapsed: false,
                 cards: [],
@@ -574,7 +575,7 @@ async function ask(
   const dialog = element("dialog", "small-dialog");
   const form = element("form");
   const heading = element("h2", "", title);
-  heading.id = `dialog-${crypto.randomUUID()}`;
+  heading.id = `dialog-${uuid()}`;
   dialog.setAttribute("aria-labelledby", heading.id);
   const field = element("label", "field");
   const input = element("input");
@@ -753,7 +754,7 @@ function workspaceToolbar(workspace: Workspace) {
         // The new view takes the current (possibly modified) layout; the
         // original goes back to its last saved layout instead of keeping edits.
         const copy = structuredClone(workspace);
-        copy.id = crypto.randomUUID();
+        copy.id = uuid();
         copy.name = name;
         copy.updatedAt = Date.now();
         const saved = baselineFor(workspace);
@@ -800,7 +801,7 @@ function workspaceToolbar(workspace: Workspace) {
         if (title)
           change(workspace, () =>
             workspace.sections.push({
-              id: crypto.randomUUID(),
+              id: uuid(),
               title,
               collapsed: false,
               cards: [],
@@ -834,7 +835,7 @@ function workspaceToolbar(workspace: Workspace) {
         throw new Error(
           "This view belongs to an experiment that is not on this server.",
         );
-      imported.id = crypto.randomUUID();
+      imported.id = uuid();
       if (
         !commitLibrary(() => {
           library.views.push(imported);
@@ -1215,7 +1216,7 @@ function renderCharts(workspace: Workspace) {
               const found = locate(workspace, id);
               if (found) {
                 const copy = structuredClone(found.card);
-                copy.id = crypto.randomUUID();
+                copy.id = uuid();
                 copy.title += " copy";
                 found.section.cards.splice(found.index + 1, 0, copy);
               }
