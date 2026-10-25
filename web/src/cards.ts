@@ -571,7 +571,8 @@ export class ChartCard {
         if (x === null || !pointer) return;
         this.lastHoverX = x;
         this.updateLegendReadout();
-        const crossings = this.plot!.hoverCrossings(pointer, this.cursorAxis);
+        const popupAxis = this.mode === "inspect" ? this.cursorAxis : "x";
+        const crossings = this.plot!.hoverCrossings(pointer, popupAxis);
         const rows = nearestCrossingRuns(crossings.rows,
           (index) => this.sources[index]?.runId ?? this.data[index].run.id,
           crossings.mouse);
@@ -581,7 +582,7 @@ export class ChartCard {
           name.title = name.textContent ?? "";
           name.style.color = this.plot!.seriesColor(index) ?? "";
           const values = positions.map(crossings.value).sort((a, b) => a - b)
-            .map((value) => this.cursorAxis === "x" ? this.number(value) : this.xText(value));
+            .map((value) => popupAxis === "x" ? this.number(value) : this.xText(value));
           row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
           this.hover.append(row);
         }

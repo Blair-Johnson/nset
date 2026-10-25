@@ -1586,3 +1586,42 @@ test("many selected missing-field runs keep late multi-metric source identities 
   await moveCrossingPointer(page, 50, 69.2);
   await expect(hoverNames(page)).toHaveText(["Run 69", "Run 68", "Run 67", "Run 66"]);
 });
+
+test.describe("default crosshair orientation", () => {
+  test.use({ hasTouch: true });
+  for (const exit of ["toggle", "keyboard", "complete pair", "clear", "touch navigation"]) {
+    test(`default popup matches vertical crossings after horizontal ${exit}`, async ({ page }) => {
+      await crossingFixture(page, [{ id: "loop", name: "Loop run",
+        points: [[10, 20], [10, 80], [30, 80], [30, 20], [10, 20]],
+      }], { xy: true, config: { xFormat: "fixed-2", yFormat: "number" } });
+      const horizontal = page.getByRole("button", { name: "Add horizontal cursor", exact: true });
+      await horizontal.click();
+      await moveCrossingPointer(page, 20, 45);
+      await expect(hoverValues(page)).toHaveText(["(10.00, 30.00)"]);
+      if (exit === "toggle") await horizontal.click();
+      else if (exit === "keyboard") await page.keyboard.press("c");
+      else if (exit === "touch navigation") {
+        await page.getByRole("button", { name: "Touch navigation: drag to inspect, two fingers to pan and pinch to zoom", exact: true }).click();
+      } else {
+        for (const y of [30, 70]) {
+          await moveCrossingPointer(page, 20, y);
+          await page.mouse.down();
+          await page.mouse.up();
+        }
+        if (exit === "clear") await page.getByRole("button", { name: "Clear cursors", exact: true }).click();
+      }
+      await expect(horizontal).toHaveAttribute("aria-pressed", "false");
+      await moveCrossingPointer(page, 20, 45);
+      await expect(hoverValues(page)).toHaveText(["(20, 80)"]);
+      await moveCrossingPointer(page, 20, 100);
+      await expect(hoverNames(page)).toHaveText(["Loop run"]);
+      await expect(hoverValues(page)).toHaveText(["80"]);
+      const before = await snapshot(page);
+      await page.getByRole("button", { name: "Add vertical cursor", exact: true }).click();
+      await moveCrossingPointer(page, 20, 100);
+      await expect(hoverValues(page)).toHaveText(["80"]);
+      expect((await snapshot(page)).pins).toEqual(before.pins);
+      expect((await snapshot(page)).viewport).toEqual(before.viewport);
+    });
+  }
+});
