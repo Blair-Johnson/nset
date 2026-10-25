@@ -26,7 +26,7 @@ use tokio::sync::Semaphore;
 const MAX_SCAN: usize = 20_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024;
-// Run predicates need complete events, unlike bounded record/field previews.
+// Plots and run predicates need complete events, unlike record/field previews.
 // Large diagnostic events are legitimate rx data. Admit at most one bounded
 // large row per page; the normal aggregate page budget remains 8 MiB.
 const MAX_FILTER_RECORD: usize = 64 * 1024 * 1024;
@@ -505,8 +505,9 @@ pub struct Cursor {
     scope: String,
     generation: String,
     run: usize,
-    seq: i64,
-    high: Vec<i64>,
+    seq: Option<i64>,
+    high: Vec<Option<i64>>,
+    ids: Vec<i64>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -527,6 +528,8 @@ pub struct Request {
     search: String,
     #[serde(default)]
     cursor: Option<String>,
+    #[serde(default)]
+    source_generation: Option<String>,
     #[serde(default = "page_size")]
     limit: usize,
 }
@@ -768,13 +771,16 @@ impl Source {
             || q.runs.iter().any(|s| s.len() > 128 || s.is_empty())
             || q.runs.iter().collect::<BTreeSet<_>>().len() != q.runs.len()
         {
-            return Err(ApiError::bad("select 1–32 distinct rx run identities"));
+            return Err(ApiError::bad(
+                "rx request exceeds its internal run batch bounds",
+            ));
         }
         if q.limit == 0
             || q.limit > 100
             || q.prefix.len() > 1024
             || q.search.len() > 1024
             || q.ys.len() > 16
+            || q.ys.iter().collect::<BTreeSet<_>>().len() != q.ys.len()
         {
             return Err(ApiError::bad("rx request exceeds its field/page bounds"));
         }
@@ -845,7 +851,10 @@ impl Source {
                     q.filters,
                     mode,
                     q.prefix,
-                    q.search
+                    q.search,
+                    q.x,
+                    q.ys,
+                    q.group
                 ]))
                 .unwrap(),
             )
@@ -854,7 +863,26 @@ impl Source {
         // before opening and recheck after SQLite has read the file to catch a
         // replacement during open. Later requests compare the cursor generation.
         let generation = self.generation()?;
+        let source_generation = URL_SAFE_NO_PAD.encode(self.run_filter_mac(generation.as_bytes()));
+        if q.source_generation
+            .as_ref()
+            .is_some_and(|pin| pin != &source_generation)
+        {
+            return Err(ApiError::bad("rx source changed; refresh the catalog"));
+        }
         let conn = self.connection()?;
+        let record_budget = if mode == Mode::Plot {
+            MAX_FILTER_RECORD
+        } else {
+            MAX_RECORD
+        };
+        if mode == Mode::Plot {
+            conn.set_limit(
+                rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+                (MAX_FILTER_RECORD + 4096) as i32,
+            )
+            .map_err(unavailable)?;
+        }
         if self.generation()? != generation {
             return Err(ApiError::bad(
                 "rx database replaced during open; retry the query",
@@ -866,12 +894,10 @@ impl Source {
             let id: i64 = conn
                 .query_row("SELECT id FROM runs WHERE run_uid=?", [uid], |r| r.get(0))
                 .map_err(|_| ApiError::bad("an rx run is unavailable"))?;
-            let high: i64 = conn
-                .query_row(
-                    "SELECT coalesce(max(seq),0) FROM events WHERE run_id=?",
-                    [id],
-                    |r| r.get(0),
-                )
+            let high: Option<i64> = conn
+                .query_row("SELECT max(seq) FROM events WHERE run_id=?", [id], |r| {
+                    r.get(0)
+                })
                 .map_err(unavailable)?;
             ids.push(id);
             highs.push(high);
@@ -880,26 +906,32 @@ impl Source {
             if encoded.len() > 4096 {
                 return Err(ApiError::bad("record cursor exceeds its size limit"));
             }
-            let bytes = URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| ApiError::bad("invalid record cursor"))?;
-            serde_json::from_slice::<Cursor>(&bytes)
-                .map_err(|_| ApiError::bad("invalid record cursor"))?
+            let stale = || ApiError::bad("invalid/stale record cursor; restart the query");
+            let (payload, signature) = encoded.split_once('.').ok_or_else(stale)?;
+            let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| stale())?;
+            let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| stale())?;
+            use subtle::ConstantTimeEq;
+            if !bool::from(self.run_filter_mac(&bytes).ct_eq(&signature)) {
+                return Err(stale());
+            }
+            serde_json::from_slice::<Cursor>(&bytes).map_err(|_| stale())?
         } else {
             Cursor {
                 scope: scope.clone(),
                 generation: generation.clone(),
                 run: 0,
-                seq: 0,
+                seq: None,
                 high: highs.clone(),
+                ids: ids.clone(),
             }
         };
         if cursor.scope != scope
             || cursor.generation != generation
+            || cursor.ids != ids
             || cursor.run >= ids.len()
-            || cursor.seq < 0
             || cursor.high.len() != ids.len()
-            || cursor.high.iter().zip(&highs).any(|(a, b)| *a < 0 || a > b)
+            || cursor.high.iter().zip(&highs).any(|(a, b)| a > b)
+            || cursor.seq > cursor.high[cursor.run]
         {
             return Err(ApiError::bad(
                 "invalid/stale record cursor; restart inspection",
@@ -918,21 +950,29 @@ impl Source {
         let mut visits = 0;
         let mut stopped = false;
         while cursor.run < ids.len() {
-            let mut stmt=conn.prepare("SELECT seq,substr(received_at,1,64),octet_length(data),CASE WHEN octet_length(data)<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?").map_err(unavailable)?;
+            let mut stmt=conn.prepare("SELECT seq,substr(received_at,1,64),octet_length(data),CASE WHEN octet_length(data)<=? THEN data ELSE NULL END FROM events WHERE run_id=? AND seq>=? AND (? IS NULL OR seq>?) AND seq<=? ORDER BY seq LIMIT ?").map_err(unavailable)?;
             let mut rows = stmt
                 .query(params![
-                    MAX_RECORD as i64,
+                    record_budget as i64,
                     ids[cursor.run],
+                    cursor.seq.unwrap_or(i64::MIN),
+                    cursor.seq,
                     cursor.seq,
                     cursor.high[cursor.run],
                     MAX_SCAN as i64 + 1
                 ])
                 .map_err(unavailable)?;
             while let Some(row) = rows.next().map_err(unavailable)? {
-                if d.scanned >= MAX_SCAN
-                    || d.bytes >= byte_budget
-                    || started.elapsed() > Duration::from_millis(500)
-                    || (mode == Mode::Fields && d.scanned >= 2000)
+                // Stop BETWEEN events. Reserve room for all Ys of the next event,
+                // including new groups, so continuation can never lose a Y pair.
+                if d.scanned > 0
+                    && (d.scanned >= MAX_SCAN
+                        || d.bytes >= byte_budget
+                        || started.elapsed() > Duration::from_millis(500)
+                        || (mode == Mode::Plot
+                            && (d.points + ys.len() > MAX_POINTS
+                                || traces.len() + ys.len() > MAX_TRACES))
+                        || (mode == Mode::Fields && d.scanned >= 2000))
                 {
                     d.limit("scan budget reached");
                     stopped = true;
@@ -940,24 +980,41 @@ impl Source {
                 }
                 let seq: i64 = row.get(0).map_err(unavailable)?;
                 let bytes = row.get::<_, i64>(2).map_err(unavailable)? as usize;
-                if bytes <= MAX_RECORD && d.bytes + bytes > byte_budget {
+                if d.scanned > 0 && bytes <= record_budget && d.bytes + bytes > byte_budget {
                     d.limit("byte budget reached");
                     stopped = true;
                     break;
                 }
-                cursor.seq = seq;
+                cursor.seq = Some(seq);
                 d.scanned += 1;
-                if bytes > MAX_RECORD {
+                if bytes > record_budget {
+                    if mode == Mode::Plot {
+                        return Err(ApiError(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "rx plot cannot complete: an event exceeds the 64 MiB row resource limit",
+                        ));
+                    }
                     d.oversized += 1;
                     d.limit("oversized records skipped");
                     continue;
                 }
                 d.bytes += bytes;
                 let raw: String = row.get(3).map_err(unavailable)?;
-                let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-                    d.invalid_json += 1;
-                    d.limit("invalid JSON records skipped");
-                    continue;
+                let value = if mode == Mode::Plot {
+                    // rx producers permit NaN/Infinity. These remain nonnumeric
+                    // axis values; unrelated finite fields in the event still plot.
+                    FilterEvent::parse(&raw).map_err(|error| ApiError(error.0,
+                        match error.0 {
+                            StatusCode::PAYLOAD_TOO_LARGE => "rx plot cannot complete: event exceeds the 64 MiB normalized row or 16384 non-finite-number resource limit",
+                            _ => "rx plot cannot complete: an event is invalid JSON or exceeds JSON parser limits",
+                        }))?.value
+                } else {
+                    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+                        d.invalid_json += 1;
+                        d.limit("invalid JSON records skipped");
+                        continue;
+                    };
+                    value
                 };
                 if !matches(&value, &filters, q.filters.any) {
                     continue;
@@ -1053,11 +1110,13 @@ impl Source {
                         };
                         let g = if let Some(p) = &group {
                             match p.get(&value) {
-                                Some(v)
-                                    if !v.is_array()
-                                        && !v.is_object()
-                                        && v.to_string().len() <= 1024 =>
-                                {
+                                Some(v) if !v.is_array() && !v.is_object() => {
+                                    if v.to_string().len() > 1024 {
+                                        return Err(ApiError(
+                                            StatusCode::PAYLOAD_TOO_LARGE,
+                                            "rx plot cannot complete: a group label exceeds the 1024-byte resource limit",
+                                        ));
+                                    }
                                     Some(scalar_group(v))
                                 }
                                 _ => {
@@ -1078,16 +1137,6 @@ impl Source {
                                 continue;
                             };
                             let key = serde_json::to_string(&(cursor.run, index, &g)).unwrap();
-                            if !traces.contains_key(&key) && traces.len() >= MAX_TRACES {
-                                d.omitted_traces += 1;
-                                d.limit("trace/group limit reached");
-                                continue;
-                            }
-                            if d.points >= MAX_POINTS {
-                                d.limit("point budget reached");
-                                stopped = true;
-                                break;
-                            }
                             traces
                                 .entry(key)
                                 .or_insert_with(|| Trace {
@@ -1119,16 +1168,26 @@ impl Source {
                 break;
             }
             cursor.run += 1;
-            cursor.seq = 0;
+            cursor.seq = None;
         }
         // Fields cursors continue at the next event, not within a truncated event.
-        let next = if stopped && matches!(mode, Mode::Records | Mode::Fields) {
-            Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).unwrap()))
+        let next = if stopped {
+            let payload = serde_json::to_vec(&cursor).unwrap();
+            Some(format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(&payload),
+                URL_SAFE_NO_PAD.encode(self.run_filter_mac(&payload))
+            ))
         } else {
             None
         };
+        if self.generation()? != generation {
+            return Err(ApiError::bad(
+                "rx database replaced during query; refresh the catalog",
+            ));
+        }
         Ok(
-            json!({"diagnostics":d,"records":records,"next_cursor":next,"fields":hints.into_values().collect::<Vec<_>>(),"traces":traces.into_values().collect::<Vec<_>>(),"coverage":if mode==Mode::Fields {"sampled hints, not a complete schema"} else if mode==Mode::Records {"bounded page; append-only sequence pagination (in-place edits/lower-sequence inserts are not frozen)"} else {"bounded committed snapshot; numeric axes use finite double precision"}}),
+            json!({"source_generation":source_generation,"diagnostics":d,"records":records,"next_cursor":next,"fields":hints.into_values().collect::<Vec<_>>(),"traces":traces.into_values().collect::<Vec<_>>(),"coverage":if mode==Mode::Fields {"sampled hints, not a complete schema"} else if mode==Mode::Records {"bounded page; append-only sequence pagination (in-place edits/lower-sequence inserts are not frozen)"} else {"bounded page of captured per-run high-water marks; continue next_cursor to completion; numeric axes use finite double precision"}}),
         )
     }
 }
@@ -1433,7 +1492,44 @@ mod tests {
         assert_eq!(result["diagnostics"]["partial"], true);
     }
     #[test]
-    fn typed_numeric_equality_and_group_limits() {
+    fn plot_sequence_zero_and_negative_positions_are_not_start_sentinels() {
+        let f = fixture(false);
+        for seq in [-1, 0, 1] {
+            add(
+                &f,
+                859,
+                seq,
+                json!({"kind":"epoch","epoch":0.25,"train_loss":seq}),
+            );
+        }
+        let result = f
+            .source
+            .query(request(json!({"ys":["train_loss"]})), Mode::Plot)
+            .unwrap();
+        assert_eq!(
+            result["traces"][0]["points"],
+            json!([[0.25, -1.0, "-1"], [0.25, 0.0, "0"], [0.25, 1.0, "1"]])
+        );
+        assert!(result["next_cursor"].is_null());
+    }
+    #[test]
+    fn oversized_plot_group_is_an_explicit_resource_error_not_a_dropped_trace() {
+        let f = fixture(false);
+        add(
+            &f,
+            859,
+            1,
+            json!({"kind":"epoch","epoch":1,"train_loss":1,"group":"x".repeat(1025)}),
+        );
+        let error = f
+            .source
+            .query(request(json!({"group":"group"})), Mode::Plot)
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.1.contains("group label"));
+    }
+    #[test]
+    fn typed_numeric_equality_and_group_pagination() {
         assert!(scalar_equal(&json!(1), &json!(1.0)));
         assert!(!scalar_equal(&json!(1), &json!(true)));
         assert!(!scalar_equal(&json!(1), &json!("1")));
@@ -1458,8 +1554,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result["traces"].as_array().unwrap().len(), 128);
-        assert_eq!(result["diagnostics"]["omitted_traces"], 2);
+        assert_eq!(result["diagnostics"]["omitted_traces"], 0);
         assert_eq!(result["diagnostics"]["partial"], true);
+        let last = f
+            .source
+            .query(
+                request(json!({"group":"g","ys":["train_loss"],"cursor":result["next_cursor"]})),
+                Mode::Plot,
+            )
+            .unwrap();
+        assert_eq!(last["traces"].as_array().unwrap().len(), 2);
+        assert_eq!(last["diagnostics"]["omitted_traces"], 0);
+        assert!(last["next_cursor"].is_null());
     }
     #[test]
     fn groups_normalize_numbers_but_retain_large_integer_identity() {
@@ -1555,9 +1661,15 @@ mod tests {
         );
         for mode in [Mode::Records, Mode::Fields, Mode::Plot] {
             let result = f.source.query(request(json!({"limit":1})), mode).unwrap();
-            assert_eq!(result["diagnostics"]["oversized"], 1);
-            assert_eq!(result["diagnostics"]["partial"], true);
-            assert!(result["diagnostics"]["bytes"].as_u64().unwrap() < 1024);
+            if mode == Mode::Plot {
+                assert_eq!(result["diagnostics"]["oversized"], 0);
+                assert_eq!(result["diagnostics"]["partial"], false);
+                assert!(result["diagnostics"]["bytes"].as_u64().unwrap() > 1024 * 1024);
+            } else {
+                assert_eq!(result["diagnostics"]["oversized"], 1);
+                assert_eq!(result["diagnostics"]["partial"], true);
+                assert!(result["diagnostics"]["bytes"].as_u64().unwrap() < 1024);
+            }
             if mode == Mode::Records {
                 assert_eq!(result["records"][0]["seq"], "2");
                 let next = f
@@ -1897,8 +2009,8 @@ impl Source {
         );
         let generation = self.generation()?;
         let conn = self.connection()?;
-        // The shared preview reader caps SQLite values at 1 MiB. Only this
-        // endpoint may materialize larger events; allow bounded row overhead
+        // The shared preview reader caps SQLite values at 1 MiB. Complete-record
+        // queries may materialize larger events; allow bounded row overhead
         // while the SELECT's CASE still enforces MAX_FILTER_RECORD on data.
         conn.set_limit(
             rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,

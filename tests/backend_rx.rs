@@ -1617,3 +1617,201 @@ async fn run_filter_dense_nonfinite_has_explicit_preallocation_resource_bound() 
     );
     assert!(result.get("runs").is_none());
 }
+
+#[tokio::test]
+async fn record_plot_batches_complete_all_256_runs_and_more_than_128_traces() {
+    use std::collections::BTreeMap;
+    let f = Fixture::new();
+    let mut db = Connection::open(&f.path).unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute_batch("DELETE FROM events; DELETE FROM runs;")
+        .unwrap();
+    for run in 1..=256 {
+        tx.execute(
+            "INSERT INTO runs(id,run_uid,state,argv,created_at) VALUES(?,?,'succeeded','[]','2026-10-01T00:00:00Z')",
+            rusqlite::params![run, format!("u{run}")],
+        )
+        .unwrap();
+        for seq in 1..=if run == 1 { 20_005 } else { 3 } {
+            let group = if run == 1 {
+                json!(1)
+            } else {
+                match seq % 3 {
+                    0 => json!(null),
+                    1 => json!("1"),
+                    _ => json!(1),
+                }
+            };
+            let value = if run % 7 == 0 {
+                json!({"epoch":seq as f64 % 13.0 + 0.25,"phase":group,"unrelated":1})
+            } else {
+                json!({"epoch":seq as f64 % 13.0 + 0.25,"phase":group,"loss":seq,"score":-seq})
+            };
+            tx.execute(
+                "INSERT INTO events VALUES(?,?,'now',?)",
+                rusqlite::params![run, seq, value.to_string()],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let (_, catalog) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+    assert_eq!(catalog["runs"].as_array().unwrap().len(), 200);
+    assert!(catalog["next_after"].is_string());
+    let generation = catalog["source_generation"].clone();
+    assert!(generation.is_string());
+    let (_, late_catalog) = f
+        .request(
+            "GET",
+            &format!(
+                "/api/rx/catalog?after={}&high_water={}&source_generation={}",
+                catalog["next_after"].as_str().unwrap(),
+                catalog["high_water"].as_str().unwrap(),
+                generation.as_str().unwrap()
+            ),
+            Value::Null,
+            true,
+        )
+        .await;
+    assert_eq!(late_catalog["runs"].as_array().unwrap().len(), 56);
+    assert!(late_catalog["next_after"].is_null());
+    let mut traces: BTreeMap<String, (String, String, Vec<Value>)> = BTreeMap::new();
+    let mut page_count = 0;
+    let mut captured = None;
+    for first in (1..=256).step_by(32) {
+        let mut query = json!({"source_id":f.source_id,"source_generation":generation,"runs":(first..first+32).map(|r|format!("u{r}")).collect::<Vec<_>>(),"x":"epoch","ys":["loss","score"],"group":"phase"});
+        loop {
+            let (status, page) = f.request("POST", "/api/rx/plot", query.clone(), true).await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            assert_eq!(page["source_generation"], generation);
+            assert!(page["diagnostics"]["points"].as_u64().unwrap() <= 20_000);
+            assert!(page["traces"].as_array().unwrap().len() <= 128);
+            assert_eq!(page["diagnostics"]["omitted_traces"], 0);
+            for trace in page["traces"].as_array().unwrap() {
+                let entry = traces
+                    .entry(trace["id"].as_str().unwrap().to_owned())
+                    .or_insert_with(|| {
+                        (
+                            trace["run_uid"].as_str().unwrap().to_owned(),
+                            trace["y"].as_str().unwrap().to_owned(),
+                            vec![],
+                        )
+                    });
+                entry
+                    .2
+                    .extend(trace["points"].as_array().unwrap().iter().cloned());
+            }
+            page_count += 1;
+            assert!(page_count < 100, "continuation did not terminate");
+            if page_count == 1 {
+                assert!(page["next_cursor"].is_string());
+                captured = Some((query.clone(), page["next_cursor"].clone()));
+                db.execute("INSERT INTO events VALUES(1,20006,'later','{\"epoch\":99,\"loss\":99,\"score\":99,\"phase\":1}')", []).unwrap();
+            }
+            if page["next_cursor"].is_null() {
+                break;
+            }
+            assert_ne!(query["cursor"], page["next_cursor"]);
+            query["cursor"] = page["next_cursor"].clone();
+        }
+    }
+    let eligible = (1..=256).filter(|run| run % 7 != 0).count();
+    assert_eq!(traces.len(), (eligible - 1) * 6 + 2);
+    let mut points = 0;
+    for (uid, y, values) in traces.values() {
+        assert_ne!(uid[1..].parse::<usize>().unwrap() % 7, 0);
+        let mut previous = 0;
+        for point in values {
+            let seq = point[2].as_str().unwrap().parse::<i64>().unwrap();
+            assert!(seq > previous, "duplicated/reordered event");
+            assert!(seq <= if uid == "u1" { 20_005 } else { 3 });
+            assert_eq!(point[0].as_f64().unwrap(), seq as f64 % 13.0 + 0.25);
+            assert_eq!(
+                point[1].as_f64().unwrap(),
+                if y == "loss" { seq as f64 } else { -seq as f64 }
+            );
+            previous = seq;
+            points += 1;
+        }
+    }
+    assert_eq!(points, 20_005 * 2 + (eligible - 1) * 6);
+    assert!(traces.values().any(|(uid, _, _)| uid == "u256"));
+    assert!(page_count > 5);
+    // Continuations bind axes, typed grouping, run identities and generation.
+    let (original, cursor) = captured.unwrap();
+    for (key, changed) in [
+        ("x", json!("other")),
+        ("ys", json!(["score"])),
+        ("group", json!("other")),
+        ("source_generation", json!("stale")),
+    ] {
+        let mut query = original.clone();
+        query["cursor"] = cursor.clone();
+        query[key] = changed;
+        assert_eq!(
+            f.request("POST", "/api/rx/plot", query, true).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut query = original;
+    let encoded = cursor.as_str().unwrap();
+    let (payload, signature) = encoded.split_once('.').unwrap();
+    query["cursor"] = json!(format!(
+        "{payload}.{}{}",
+        if signature.starts_with('A') { "B" } else { "A" },
+        &signature[1..]
+    ));
+    assert_eq!(
+        f.request("POST", "/api/rx/plot", query, true).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let before = std::fs::read(&f.path).unwrap();
+    let mut query = f.query();
+    query["runs"] = json!(["u256"]);
+    query["filters"] = json!({});
+    assert_eq!(
+        f.request("POST", "/api/rx/plot", query, true).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+}
+
+#[tokio::test]
+async fn record_plot_keeps_large_valid_events_with_unrelated_nonfinite_values() {
+    let f = Fixture::new();
+    let db = Connection::open(&f.path).unwrap();
+    db.execute_batch("DELETE FROM events").unwrap();
+    // Larger than the aggregate page budget: admit one bounded event and resume.
+    let raw = format!(
+        "{{\"kind\":\"epoch\",\"epoch\":0.25,\"loss\":2,\"bad\":NaN,\"inf\":Infinity,\"padding\":\"{}\"}}",
+        "x".repeat(8 * 1024 * 1024 + 1)
+    );
+    db.execute("INSERT INTO events VALUES(859,1,'now',?)", [&raw])
+        .unwrap();
+    db.execute("INSERT INTO events VALUES(859,2,'now','{\"kind\":\"epoch\",\"epoch\":0.25,\"loss\":3,\"bad\":-Infinity}')", []).unwrap();
+    let before = std::fs::read(&f.path).unwrap();
+    let mut query = f.query();
+    query["ys"] = json!(["loss", "bad"]);
+    let (status, first) = f.request("POST", "/api/rx/plot", query.clone(), true).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["traces"][0]["points"], json!([[0.25, 2.0, "1"]]));
+    assert!(first["next_cursor"].is_string());
+    query["cursor"] = first["next_cursor"].clone();
+    let (status, second) = f.request("POST", "/api/rx/plot", query, true).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["traces"][0]["points"], json!([[0.25, 3.0, "2"]]));
+    assert!(second["next_cursor"].is_null());
+    assert_eq!(before, std::fs::read(&f.path).unwrap());
+    db.execute("INSERT INTO events VALUES(859,3,'now','not-json')", [])
+        .unwrap();
+    let (status, error) = f.request("POST", "/api/rx/plot", json!({"source_id":f.source_id,"runs":["u859"],"x":"epoch","ys":["loss"],"cursor":first["next_cursor"]}), true).await;
+    // The modified filter scope must be rejected, not silently reused.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let (_, first) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+    let mut query = f.query();
+    query["cursor"] = first["next_cursor"].clone();
+    assert_eq!(
+        f.request("POST", "/api/rx/plot", query, true).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
