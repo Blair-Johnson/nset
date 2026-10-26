@@ -9,6 +9,11 @@ interface Cached {
   url: string;
   bytes: number;
 }
+type FrameResult =
+  { status: "loaded" | "cancelled" } | { status: "failed"; error: unknown };
+const FRAME_TIMEOUT_MS = 10_000;
+const FRAME_RETRY_MS = 200;
+const MAX_CONSECUTIVE_FAILURES = 3;
 /** Visible region in viewport coordinates (image width = 1), plus orientation. */
 export interface ImageCamera {
   x: number;
@@ -21,7 +26,7 @@ export interface ImageCamera {
 const editableTarget = (target: EventTarget | null) =>
   target instanceof Element &&
   !!target.closest(
-    'input, select, textarea, button, [contenteditable]:not([contenteditable="false"])',
+    'input, select, textarea, button, .image-frame-status, [contenteditable]:not([contenteditable="false"])',
   );
 export class ImagePanel {
   private viewer: OpenSeadragon.Viewer;
@@ -41,6 +46,7 @@ export class ImagePanel {
   private requested?: string;
   private metadata = new Latest();
   private requests = new Latest();
+  private playback = new Latest();
   private frameAbort?: AbortController;
   private metadataAbort?: AbortController;
   private prefetchAbort?: AbortController;
@@ -778,7 +784,26 @@ export class ImagePanel {
     }
   }
   async show(requested: number): Promise<void> {
-    if (this.destroyed || !this.frames.length) return;
+    this.stop();
+    const result = await this.showFrame(requested);
+    if (result.status === "failed")
+      this.frameFailure(`Frame unavailable: ${message(result.error)}`);
+  }
+  private frameFailure(text: string) {
+    if (!this.displayed) this.info.textContent = "Frame unavailable";
+    const retry = element("button", "", "Retry frame");
+    retry.type = "button";
+    const index = this.index;
+    retry.onclick = () => void this.show(index);
+    const detail = element("span", "", text);
+    detail.title = text;
+    this.status.replaceChildren(detail, retry);
+  }
+  private async showFrame(
+    requested: number,
+    notice = "",
+  ): Promise<FrameResult> {
+    if (this.destroyed || !this.frames.length) return { status: "cancelled" };
     const index = boundedIndex(requested, this.frames.length);
     this.index = index;
     this.slider.value = String(index);
@@ -789,15 +814,37 @@ export class ImagePanel {
     this.frameAbort?.abort();
     const controller = new AbortController();
     this.frameAbort = controller;
+    const { signal } = controller;
+    let interrupt!: () => void;
+    const interrupted = new Promise<never>((_, reject) => {
+      interrupt = () => reject(signal.reason);
+      signal.addEventListener("abort", interrupt, { once: true });
+    });
+    const timeout = setTimeout(
+      () =>
+        controller.abort(
+          new DOMException(
+            "Frame loading timed out after 10 seconds.",
+            "TimeoutError",
+          ),
+        ),
+      FRAME_TIMEOUT_MS,
+    );
+    const started = performance.now();
+    let entry: Cached | undefined;
+    let fetched: number | undefined;
     // Keep the last decoded image and metadata visible while preparing.
-    this.status.textContent = "";
+    this.status.textContent = notice;
     try {
-      const entry = await this.blob(frame, controller.signal);
-      if (!this.requests.current(generation)) return;
-      const itemOpened = await this.prepare(entry.url, controller.signal);
-      if (!this.requests.current(generation)) {
+      // Racing the fetch also settles cancellation for non-cooperative transports.
+      entry = await Promise.race([this.blob(frame, signal), interrupted]);
+      fetched = performance.now();
+      signal.throwIfAborted();
+      if (!this.requests.current(generation)) return { status: "cancelled" };
+      const itemOpened = await this.prepare(entry.url, signal);
+      if (!this.requests.current(generation) || signal.aborted) {
         this.viewer.world.removeItem(itemOpened);
-        return;
+        return { status: "cancelled" };
       }
       const bounds = this.viewer.viewport.getBounds(true);
       const first = !this.displayed;
@@ -830,8 +877,6 @@ export class ImagePanel {
       }
       this.info.dataset.step = String(frame.step);
       this.evict(frame.id);
-      if (!this.requests.current(generation)) return;
-      this.prefetchAbort?.abort();
       const prefetch = new AbortController();
       this.prefetchAbort = prefetch;
       const next = this.frames[index + 1];
@@ -839,17 +884,29 @@ export class ImagePanel {
         void this.blob(next, prefetch.signal)
           .then(() => this.evict(frame.id))
           .catch(() => {});
+      return { status: "loaded" };
     } catch (error) {
-      if (this.requests.current(generation) && !isAbort(error)) {
-        const failed = this.cache.get(frame.id);
-        if (failed && frame.id !== this.displayed) {
-          URL.revokeObjectURL(failed.url);
-          this.cache.delete(frame.id);
-        }
-        if (!this.displayed) this.info.textContent = "Frame unavailable";
-        this.status.textContent = `Frame unavailable: ${message(error)}`;
-        this.stop();
+      const failure = signal.aborted ? signal.reason : error;
+      if (!this.requests.current(generation) || isAbort(failure))
+        return { status: "cancelled" };
+      const failed = this.cache.get(frame.id);
+      if (failed && frame.id !== this.displayed) {
+        URL.revokeObjectURL(failed.url);
+        this.cache.delete(frame.id);
       }
+      console.warn("nset image frame unavailable", {
+        frameId: frame.id,
+        step: frame.step,
+        stage: fetched === undefined ? "fetch" : "decode/display",
+        bytes: entry?.bytes,
+        fetchMs: fetched === undefined ? undefined : fetched - started,
+        elapsedMs: performance.now() - started,
+        error: failure,
+      });
+      return { status: "failed", error: failure };
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", interrupt);
     }
   }
   /** Invisible staging; cancellation settles even during decode. */
@@ -915,7 +972,12 @@ export class ImagePanel {
               fail(new Error("Image decoder could not open this frame.")),
           });
         },
-        () => fail(new Error("Image decoder could not decode this frame.")),
+        (error) =>
+          fail(
+            new Error("Image decoder could not decode this frame.", {
+              cause: error,
+            }),
+          ),
       );
     });
   }
@@ -923,8 +985,17 @@ export class ImagePanel {
     await this.show(this.index + delta);
   }
   private stop() {
+    const wasPlaying = this.playing;
     this.playing = false;
+    this.playback.next();
     clearTimeout(this.timer);
+    if (wasPlaying) {
+      this.requests.next();
+      this.frameAbort?.abort();
+      this.prefetchAbort?.abort();
+      if (this.requested !== this.displayed)
+        this.status.textContent = "Playback paused.";
+    }
     if (this.compact) {
       this.play.replaceChildren(plotIcon("play"));
       this.play.title = "Play";
@@ -936,24 +1007,71 @@ export class ImagePanel {
       this.stop();
       return;
     }
-    if (!this.frames.length) return;
+    if (this.destroyed || !this.active || !this.frames.length) return;
     this.playing = true;
+    const generation = this.playback.next();
+    const current = () => this.playing && this.playback.current(generation);
+    // Resume an interrupted/failed frame rather than silently jumping past it.
+    let nextIndex =
+      this.requested !== this.displayed ? this.index : this.index + 1;
+    let consecutive = 0;
+    let skipped = 0;
+    let lastSkipped: number | undefined;
+    const summary = () =>
+      skipped
+        ? `Skipped step ${lastSkipped} · ${skipped} frame${skipped === 1 ? "" : "s"} skipped.`
+        : "";
     if (this.compact) {
       this.play.replaceChildren(plotIcon("pause"));
       this.play.title = "Pause";
     } else this.play.textContent = "Pause";
     this.play.setAttribute("aria-pressed", "true");
-    const advance = async () => {
-      if (!this.playing) return;
-      if (this.index >= this.frames.length - 1) {
+    const schedule = (retry = false) => {
+      if (current())
+        this.timer = setTimeout(
+          () => void advance(retry),
+          retry ? FRAME_RETRY_MS : Number(this.speed.value),
+        );
+    };
+    const advance = async (retry = false) => {
+      if (!current()) return;
+      if (nextIndex >= this.frames.length) {
+        this.stop();
+        this.status.textContent = summary();
+        return;
+      }
+      const frame = this.frames[nextIndex];
+      const result = await this.showFrame(
+        nextIndex,
+        retry ? `Retrying step ${frame.step}… ${summary()}`.trim() : summary(),
+      );
+      if (!current()) return;
+      if (result.status === "cancelled") {
         this.stop();
         return;
       }
-      await this.step(1);
-      if (this.playing)
-        this.timer = setTimeout(() => void advance(), Number(this.speed.value));
+      if (result.status === "failed") {
+        if (!retry) {
+          this.status.textContent =
+            `Step ${frame.step} unavailable; retrying… ${summary()}`.trim();
+          schedule(true);
+          return;
+        }
+        skipped++;
+        lastSkipped = frame.step;
+        if (++consecutive >= MAX_CONSECUTIVE_FAILURES) {
+          this.stop();
+          this.frameFailure(
+            `Playback paused after ${consecutive} consecutive unavailable frames. ${summary()} ${message(result.error)}`,
+          );
+          return;
+        }
+      } else consecutive = 0;
+      this.status.textContent = summary();
+      nextIndex++;
+      schedule();
     };
-    this.timer = setTimeout(() => void advance(), Number(this.speed.value));
+    schedule();
   }
   clear() {
     this.resume = false;

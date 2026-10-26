@@ -18,6 +18,22 @@
   overflow: auto;
   pointer-events: none;
 }
+.card-image-panel .image-frame-status:has(button) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-image-panel .image-frame-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+.card-image-panel .image-frame-status button {
+  flex: none;
+  pointer-events: auto;
+}
 .card-image-panel .image-frame-status:empty {
   display: none;
 }
