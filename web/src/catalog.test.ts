@@ -276,3 +276,29 @@ test("catalog rejects duplicate identities, unknown kinds, dangling references a
       ),
     );
 });
+
+test("catalog response entry budgets remain independent of unlimited local JSON", async () => {
+  let nested: unknown = null;
+  for (let i = 0; i < 33; i++) nested = { nested };
+  for (const params of [
+    { string: "a".repeat(8193) },
+    { ["k".repeat(8193)]: 0 },
+    { array: Array(4097).fill(0) },
+    { values: Array.from({ length: 10 }, () => Array(2500).fill(0)) },
+    Object.fromEntries(Array.from({ length: 20001 }, (_, i) => [`k${i}`, 0])),
+    { bytes: Array.from({ length: 40 }, () => "a".repeat(8000)) },
+    { nested },
+  ]) {
+    const value = metadata();
+    value.runs[0].params = params;
+    await assert.rejects(
+      fetchCatalog(
+        new Api(
+          () => "",
+          async () => Response.json(value),
+        ),
+      ),
+      /Catalog entry exceeds JSON/,
+    );
+  }
+});

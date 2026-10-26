@@ -656,7 +656,6 @@ async function ask(
   const input = element("input");
   input.value = value;
   input.required = true;
-  input.maxLength = 160;
   field.append(document.createTextNode(label), input);
   const actions = element("div", "dialog-actions");
   const cancel = button("Cancel", () => dialog.close());
@@ -904,7 +903,6 @@ function workspaceToolbar(workspace: Workspace) {
     try {
       const selected = file.files?.[0];
       if (!selected) return;
-      if (selected.size > 2_000_000) throw new Error("View file is too large.");
       const imported = importWorkspace(await selected.text());
       if (!catalog.experiments.some((e) => e.id === imported.experimentId))
         throw new Error(

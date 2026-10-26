@@ -1,5 +1,6 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { test, expect, type Page } from "@playwright/test";
+import type { WorkspaceLibrary } from "../src/workspace-types";
 
 const runs = Array.from({ length: 60 }, (_, index) => ({
   id: `run-${index}`,
@@ -334,6 +335,261 @@ test("390px drawer is an explicit overlay and leaves charts full width when clos
   });
 });
 
+const savedLibrary = (page: Page): Promise<WorkspaceLibrary> =>
+  page.evaluate(() => JSON.parse(localStorage.getItem("nset.workspaces.v2")!));
+
+test("oversized saved-view styles persist selection and filtering without changing charts", async ({
+  page,
+}) => {
+  await fixture(page);
+  await charts(page);
+  const seeded = await page.evaluate(() => {
+    const key = "nset.workspaces.v2";
+    const library: WorkspaceLibrary = JSON.parse(localStorage.getItem(key)!);
+    const view = library.views[0];
+    view.name = "Large styled workspace";
+    const chart = view.sections[0].cards[0];
+    chart.title = "Styled loss";
+    // Saved overrides can outlive the runs currently returned by the catalog.
+    // Use real style fields, not padding strings or unsupported JSON properties.
+    chart.config.runs = Object.fromEntries(
+      Array.from({ length: 2400 }, (_, index) => [
+        JSON.stringify(["metric", `run-${index}`, "train/loss"]),
+        {
+          color: index % 2 ? "#c084fc" : "#60a5fa",
+          width: 1 + (index % 3),
+          dash: index % 2 ? [4, 2] : [],
+          points: false,
+          pointSize: 5,
+          fill: 0,
+          visible: true,
+          path: "linear",
+          cap: "round",
+          alpha: 0.8,
+        },
+      ]),
+    );
+    const reference = structuredClone(chart);
+    reference.id = "large-view-reference";
+    reference.title = "Fixed reference";
+    reference.source = {
+      mode: "explicit",
+      series: [{ runId: "run-0", key: "train/loss", kind: "metric" }],
+    };
+    view.sections[0].cards.push(reference);
+    const json = JSON.stringify(library);
+    localStorage.setItem(key, json);
+    return {
+      library,
+      bytes: new TextEncoder().encode(json).byteLength,
+      configBytes: new TextEncoder().encode(JSON.stringify(chart.config))
+        .byteLength,
+    };
+  });
+  expect(seeded.bytes).toBeGreaterThan(262144);
+  expect(seeded.configBytes).toBeGreaterThan(262144);
+  await test.info().attach("oversized-saved-view.json", {
+    body: JSON.stringify({
+      libraryBytes: seeded.bytes,
+      chartConfigBytes: seeded.configBytes,
+    }),
+    contentType: "application/json",
+  });
+
+  // Reload through the real startup/loadLibrary path, not a test-only renderer.
+  await page.reload();
+  await expect(page.locator(".card-title")).toHaveText([
+    "Styled loss",
+    "Fixed reference",
+  ]);
+  const reference = page.locator(
+    '.dashboard-cell[data-card-id="large-view-reference"]',
+  );
+  await reference.locator("canvas").waitFor();
+  await reference.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const canvas = await reference.locator("canvas").elementHandle();
+  const drawer = page.locator(".run-drawer");
+  const choice = drawer.getByRole("checkbox", {
+    name: `Show ${runs[1].name}`,
+    exact: true,
+  });
+  await choice.check();
+  await expect
+    .poll(async () => (await savedLibrary(page)).views[0].selectedRunIds)
+    .toEqual(["run-0", "run-1"]);
+  await expect(page.locator("#global-error")).not.toContainText(
+    "Could not save this view in your browser",
+  );
+
+  await drawer.getByLabel("Find runs", { exact: true }).fill(runs[1].name);
+  await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(1);
+  await expect(choice).toBeChecked();
+  await expect
+    .poll(async () => (await savedLibrary(page)).views[0].selectedRunIds)
+    .toEqual(["run-1"]);
+  await expect(drawer.locator(".drawer-selection-count")).toHaveText(
+    "Selected (1)",
+  );
+  const saved = await savedLibrary(page);
+  expect(saved.activeByExperiment).toEqual(seeded.library.activeByExperiment);
+  expect(saved.views[0].id).toBe(seeded.library.views[0].id);
+  expect(saved.views[0].name).toBe("Large styled workspace");
+  expect(saved.views[0].sections).toEqual(seeded.library.views[0].sections);
+  expect(
+    await reference
+      .locator("canvas")
+      .evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  await expect(
+    reference.getByRole("button", { name: "Previous view", exact: true }),
+  ).toBeEnabled();
+  await expect(page.locator("#global-error")).not.toContainText(
+    "Could not save this view in your browser",
+  );
+
+  await page.reload();
+  await expect(page.locator(".card-title")).toHaveText([
+    "Styled loss",
+    "Fixed reference",
+  ]);
+  await expect(choice).toBeChecked();
+  expect((await savedLibrary(page)).views[0].selectedRunIds).toEqual(["run-1"]);
+  expect((await savedLibrary(page)).views[0].sections).toEqual(
+    seeded.library.views[0].sections,
+  );
+  await expect(page.locator("#global-error")).not.toContainText(
+    "Could not save this view in your browser",
+  );
+
+  const downloaded = page.waitForEvent("download");
+  await page.getByLabel("View actions", { exact: true }).click();
+  await page.getByRole("button", { name: "Export view", exact: true }).click();
+  const contents = await readFile((await (await downloaded).path())!, "utf8");
+  const exported = JSON.parse(contents);
+  expect(exported.sections).toEqual(seeded.library.views[0].sections);
+  // Pretty-printed exports are valid JSON too; the UI must not impose a separate file cap.
+  const importedFile = Buffer.from(JSON.stringify(exported, null, 8));
+  expect(importedFile.byteLength).toBeGreaterThan(2_000_000);
+  await test.info().attach("view-import.json", {
+    body: JSON.stringify({
+      exportedBytes: Buffer.byteLength(contents),
+      importedBytes: importedFile.byteLength,
+    }),
+    contentType: "application/json",
+  });
+  await page.getByLabel("Import view file", { exact: true }).setInputFiles({
+    name: "large-view.json",
+    mimeType: "application/json",
+    buffer: importedFile,
+  });
+  await expect
+    .poll(async () => (await savedLibrary(page)).views.length)
+    .toBe(2);
+  const importedLibrary = await savedLibrary(page);
+  const imported = importedLibrary.views[1];
+  expect(imported.id).not.toBe(exported.id);
+  expect(imported).toEqual({ ...exported, id: imported.id });
+  expect(importedLibrary.activeByExperiment[imported.experimentId]).toBe(
+    imported.id,
+  );
+  await page.reload();
+  expect((await savedLibrary(page)).views).toEqual(importedLibrary.views);
+  await expect(page.locator("#global-error")).not.toContainText(
+    "Could not save this view in your browser",
+  );
+});
+
+test("native localStorage quota failure preserves the saved view and recovers after freeing space", async ({
+  browser,
+  baseURL,
+}) => {
+  const context = await browser.newContext({
+    baseURL,
+    viewport: { width: 1500, height: 1100 },
+  });
+  try {
+    const page = await context.newPage();
+    await fixture(page);
+    await charts(page);
+    const before = await page.evaluate(() =>
+      localStorage.getItem("nset.workspaces.v2"),
+    );
+    const canvas = await page.locator(".dashboard-cell canvas").elementHandle();
+    const quota = await page.evaluate(() => {
+      const key = "nset.quota-regression-filler";
+      let filler = "";
+      let lastError = "";
+      // Discover this browser's actual quota, then consume the remaining space
+      // down to one character. No estimated quota or Storage monkeypatch.
+      for (let step = 1024 * 1024; step >= 1;) {
+        if (filler.length + step > 16 * 1024 * 1024)
+          throw new Error(
+            "No localStorage quota reached within fixture budget",
+          );
+        try {
+          const next = filler + "x".repeat(step);
+          localStorage.setItem(key, next);
+          filler = next;
+        } catch (error) {
+          if (
+            !(error instanceof DOMException) ||
+            error.name !== "QuotaExceededError"
+          )
+            throw error;
+          lastError = error.name;
+          step = Math.floor(step / 2);
+        }
+      }
+      return { name: lastError, filled: filler.length };
+    });
+    expect(quota.name).toBe("QuotaExceededError");
+    expect(quota.filled).toBeGreaterThan(0);
+    await test.info().attach("native-storage-quota.json", {
+      body: JSON.stringify(quota),
+      contentType: "application/json",
+    });
+    const choice = page.getByRole("checkbox", {
+      name: `Show ${runs[1].name}`,
+      exact: true,
+    });
+    await choice.focus();
+    await choice.press("Space");
+    await expect(page.locator("#global-error")).toContainText(
+      "Could not save this view in your browser",
+    );
+    await expect(page.locator("#global-error")).toContainText(/quota/i);
+    await expect(choice).not.toBeChecked();
+    await expect(choice).toBeFocused();
+    await expect(page.locator(".drawer-selection-count")).toHaveText(
+      "Selected (1)",
+    );
+    expect(
+      await page.evaluate(() => localStorage.getItem("nset.workspaces.v2")),
+    ).toBe(before);
+    expect(
+      await page
+        .locator(".dashboard-cell canvas")
+        .evaluate((node, old) => node === old, canvas),
+    ).toBe(true);
+
+    await page.evaluate(() =>
+      localStorage.removeItem("nset.quota-regression-filler"),
+    );
+    await choice.check();
+    await expect
+      .poll(async () => (await savedLibrary(page)).views[0].selectedRunIds)
+      .toEqual(["run-0", "run-1"]);
+    expect((await savedLibrary(page)).views[0].sections).toEqual(
+      (JSON.parse(before!) as WorkspaceLibrary).views[0].sections,
+    );
+    await expect(page.locator("#global-error")).not.toContainText(
+      "Could not save this view in your browser",
+    );
+  } finally {
+    await context.close();
+  }
+});
+
 test("selection persistence failure rolls back drawer checks without replacing focus", async ({
   page,
 }) => {
@@ -664,7 +920,11 @@ test("full shell: one cursor activation places A then B while armed drags still 
     card.getByLabel("Cursor A coordinate", { exact: true }),
   ).toHaveValue("");
   await expect(
-    card.getByRole("button", { name: "Place vertical cursor A", exact: true, includeHidden: true }),
+    card.getByRole("button", {
+      name: "Place vertical cursor A",
+      exact: true,
+      includeHidden: true,
+    }),
   ).toHaveAttribute("aria-pressed", "true");
   for (const [letter, fraction] of [
     ["A", 0.25],

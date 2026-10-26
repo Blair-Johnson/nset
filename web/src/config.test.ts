@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   assertSafe,
-  JSON_LIMITS,
   parseSafeJson,
   isSafeColor,
   effectiveRange,
@@ -534,40 +533,70 @@ test("browser CSS.supports is authoritative after the literal safety filter", ()
   }
 });
 
-test("JSON budgets cover input bytes, values, strings, arrays, depth and object keys", () => {
-  assert.throws(
-    () => parseAdvanced(" ".repeat(JSON_LIMITS.bytes + 1) + "{}"),
-    /bytes/,
+test("local JSON accepts values beyond former byte, node, string, key, array and depth caps", () => {
+  assert.deepEqual(parseAdvanced(" ".repeat(262145) + "{}"), {});
+  const text = "😀".repeat(65537);
+  assert.equal(parseSafeJson(JSON.stringify(text)), text);
+  const value = {
+    ["key".repeat(3000)]: "a".repeat(8193),
+    values: Array.from({ length: 10 }, () => Array(2500).fill(0)),
+    array: Array(4097).fill(null),
+    keys: Object.fromEntries(
+      Array.from({ length: 20001 }, (_, i) => [`key${i}`, i]),
+    ),
+    escaped: Array.from({ length: 40 }, () => "\u0000".repeat(1200)),
+  };
+  assert.deepEqual(parseSafeJson(JSON.stringify(value)), value);
+  // JSON.parse supports deeply nested documents without recursive JS validation.
+  let nested = parseSafeJson("[".repeat(20000) + "null" + "]".repeat(20000));
+  assert.doesNotThrow(() => assertSafe(nested));
+  nested = deepMerge(null, nested);
+  for (let i = 0; i < 20000; i++) nested = (nested as unknown[])[0];
+  assert.equal(nested, null);
+});
+
+test("advanced editor and per-run styles round-trip above former JSON budgets", () => {
+  const advanced = {
+    title: "Long title ".repeat(1000),
+    axes: [
+      {
+        splits: Array.from({ length: 4097 }, (_, i) => i),
+        values: Array.from({ length: 4097 }, (_, i) =>
+          `A detailed label for tick ${i} `.repeat(3),
+        ),
+      },
+    ],
+  };
+  const text = JSON.stringify(advanced);
+  assert.ok(new TextEncoder().encode(text).length > 262144);
+  assert.deepEqual(parseAdvanced(text), advanced);
+  const config = defaults();
+  config.runs = Object.fromEntries(
+    Array.from({ length: 4097 }, (_, i) => [
+      JSON.stringify(["metric", `run-${i}`, "train/loss"]),
+      {
+        color: "#123456",
+        width: 2,
+        points: true,
+        pointSize: 5,
+        visible: true,
+        alpha: 0.75,
+      },
+    ]),
   );
-  assert.throws(
-    () => parseSafeJson(JSON.stringify("😀".repeat(JSON_LIMITS.bytes / 4))),
-    /bytes/,
+  assert.ok(JSON.stringify(config).length > 262144);
+  assert.deepEqual(
+    validateConfig(parseSafeJson(JSON.stringify(config))),
+    config,
   );
-  assert.throws(() => assertSafe("a".repeat(JSON_LIMITS.string + 1)), /string/);
-  assert.throws(
-    () => assertSafe({ ["a".repeat(JSON_LIMITS.string + 1)]: 0 }),
-    /string/,
-  );
-  assert.throws(
-    () => assertSafe(Array(JSON_LIMITS.array + 1).fill(0)),
-    /array/,
-  );
-  assert.throws(
-    () => assertSafe(Array.from({ length: 10 }, () => Array(2500).fill(0))),
-    /count/,
-  );
-  assert.throws(
-    () => assertSafe(Array.from({ length: 40 }, () => "a".repeat(8000))),
-    /bytes/,
-  );
-  let nested: unknown = null;
-  for (let i = 0; i < 34; i++) nested = { nested };
-  assert.throws(() => assertSafe(nested), /nesting/);
-  assert.doesNotThrow(() =>
-    assertSafe({
-      a: "x".repeat(JSON_LIMITS.string),
-      b: Array(JSON_LIMITS.array).fill(0),
-    }),
+  const legacy = {
+    ...saved(),
+    config,
+    runIds: Array.from({ length: 4097 }, (_, i) => `run-${i}`),
+  };
+  assert.deepEqual(
+    readLibrary({ getItem: () => JSON.stringify({ large: legacy }) }).large,
+    legacy,
   );
 });
 
@@ -586,7 +615,35 @@ test("non-JSON shapes and accessors never execute", () => {
   assert.throws(() => assertSafe({ [Symbol("x")]: 1 }), /symbol/);
   const cycle: Record<string, unknown> = {};
   cycle.self = cycle;
-  assert.throws(() => assertSafe(cycle), /nesting/);
+  assert.throws(() => assertSafe(cycle), /cyclic/);
+  const indirect: unknown[] = [cycle];
+  cycle.self = indirect;
+  assert.throws(() => assertSafe(indirect), /cyclic/);
+  const shared = { value: [1, 2] };
+  assert.doesNotThrow(() => assertSafe({ left: shared, right: shared }));
+  assert.throws(() => parseSafeJson('{"a":'), SyntaxError);
+  assert.throws(() => parseSafeJson('{"__proto__":{}}'), /protected/);
+  assert.throws(() => parseSafeJson("1e999"), /finite/);
+  for (const value of [
+    undefined,
+    NaN,
+    Infinity,
+    1n,
+    () => 1,
+    new Date(),
+    Object.create({ x: 1 }),
+  ])
+    assert.throws(() => assertSafe(value));
+  assert.throws(
+    () => assertSafe(Object.defineProperty({}, "hidden", { value: 1 })),
+    /plain JSON/,
+  );
+  const disguisedSparse = new Array(1);
+  Object.defineProperty(disguisedSparse, "4294967295", {
+    value: 1,
+    enumerable: true,
+  });
+  assert.throws(() => assertSafe(disguisedSparse), /dense/);
 });
 
 test("documentation states adaptive rendering and updated safe merge contract", () => {
@@ -611,9 +668,8 @@ test("run style lookup never treats inherited object names as overrides", () => 
   assert.equal(styleFor(defaults(), "toString", 0).width, 2);
 });
 
-test("byte budget counts JSON escaping, punctuation and multibyte values", () => {
-  const value = Array.from({ length: 40 }, () => "\u0000".repeat(1200));
-  assert.throws(() => assertSafe(value), /bytes/);
+test("literal CSS color validity does not depend on string length", () => {
+  assert.equal(isSafeColor(`rgb(${" ".repeat(300)}10, 20, 30)`), true);
   assert.equal(isSafeColor("hsl(20% 30% 40%)"), false);
 });
 

@@ -25,27 +25,26 @@ function object(value: unknown, fields?: string[]): Record<string, unknown> {
     throw new Error("Unknown field in saved view.");
   return result;
 }
-function text(value: unknown, label: string, max = 2048): string {
-  if (typeof value !== "string" || !value.trim() || value.length > max)
+function text(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim())
     throw new Error(`Invalid ${label}.`);
   return value;
 }
 function id(value: unknown): string {
-  const result = text(value, "identity", 8192);
+  const result = text(value, "identity");
   if (forbidden.has(result)) throw new Error("Unsafe identity.");
   return result;
 }
-function array(value: unknown, max: number): unknown[] {
-  if (!Array.isArray(value) || value.length > max)
-    throw new Error(`Expected an array of at most ${max} entries.`);
+function array(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error("Expected an array.");
   return value;
 }
 function distinct(values: string[], label: string): void {
   if (new Set(values).size !== values.length)
     throw new Error(`Duplicate ${label}.`);
 }
-function strings(value: unknown, max: number): string[] {
-  const result = array(value, max).map((v) => text(v, "key"));
+function strings(value: unknown): string[] {
+  const result = array(value).map((v) => text(v, "key"));
   distinct(result, "key");
   return result;
 }
@@ -62,7 +61,8 @@ export function seriesId(ref: SeriesRef): string {
 /** Identity of what a chart's X coordinate means. Cameras, cursors and zoom
  * history are only meaningful while this is unchanged. */
 export function cameraAxis(card: ChartSpec): string {
-  if (card.records) return JSON.stringify(["records", card.records.sourceId, card.records.x]);
+  if (card.records)
+    return JSON.stringify(["records", card.records.sourceId, card.records.x]);
   const x = card.kind === "timeseries" ? card.x : undefined;
   if (!x) return card.config.axis;
   return JSON.stringify([
@@ -78,9 +78,20 @@ export function resolveSources(
   if (card.records) {
     const b = card.records;
     const uids = recordRuns(b, catalog, selectedRunIds);
-    return catalog.runs.filter(run => run.rx?.sourceId === b.sourceId && uids.includes(run.rx.uid)).flatMap(run => b.ys.map(key => ({
-      id: JSON.stringify([b.sourceId, run.rx!.uid, key, null]), runId: run.id, key, kind: "metric" as const, run, label: `${run.name} · ${key}`,
-    })));
+    return catalog.runs
+      .filter(
+        (run) => run.rx?.sourceId === b.sourceId && uids.includes(run.rx.uid),
+      )
+      .flatMap((run) =>
+        b.ys.map((key) => ({
+          id: JSON.stringify([b.sourceId, run.rx!.uid, key, null]),
+          runId: run.id,
+          key,
+          kind: "metric" as const,
+          run,
+          label: `${run.name} · ${key}`,
+        })),
+      );
   }
   const kind = card.kind === "image" ? "image" : "metric";
   const runs = new Map(catalog.runs.map((run) => [run.id, run]));
@@ -116,7 +127,11 @@ export function resolveSources(
     const xRun = runs.get(xRef.runId);
     if (xRef.kind !== "metric" || !xRun || !available.has(seriesId(xRef)))
       return null;
-    return { ref: { ...xRef }, run: xRun, label: `${runLabel(xRun)} \u00b7 ${xRef.key}` };
+    return {
+      ref: { ...xRef },
+      run: xRun,
+      label: `${runLabel(xRun)} \u00b7 ${xRef.key}`,
+    };
   };
   for (const ref of refs) {
     const identity = seriesId(ref),
@@ -270,10 +285,10 @@ export function validateChart(value: unknown): ChartSpec {
   let binding: ChartSpec["source"];
   if (source.mode === "selected") {
     object(source, ["mode", "keys"]);
-    binding = { mode: "selected", keys: strings(source.keys, 512) };
+    binding = { mode: "selected", keys: strings(source.keys) };
   } else if (source.mode === "explicit") {
     object(source, ["mode", "series"]);
-    const series = array(source.series, 4096).map((value) => {
+    const series = array(source.series).map((value) => {
       const s = object(value, ["runId", "key", "kind"]);
       const ref: SeriesRef = {
         runId: id(s.runId),
@@ -287,8 +302,10 @@ export function validateChart(value: unknown): ChartSpec {
     distinct(series.map(seriesId), "series identity");
     binding = { mode: "explicit", series };
   } else throw new Error("Unknown source mode.");
-  const records = v.records === undefined ? undefined : validateRecordBinding(v.records);
-  if (records && (kind !== "timeseries" || v.x !== undefined)) throw new Error("Record charts use their own paired X field.");
+  const records =
+    v.records === undefined ? undefined : validateRecordBinding(v.records);
+  if (records && (kind !== "timeseries" || v.x !== undefined))
+    throw new Error("Record charts use their own paired X field.");
   let x: XBinding | undefined;
   if (v.x !== undefined) {
     if (kind !== "timeseries")
@@ -333,7 +350,7 @@ export function validateChart(value: unknown): ChartSpec {
   }
   return {
     id: id(v.id),
-    title: text(v.title, "chart title", 256),
+    title: text(v.title, "chart title"),
     kind,
     source: binding,
     ...(records ? { records } : {}),
@@ -363,15 +380,15 @@ export function validateWorkspace(value: unknown): Workspace {
     v.updatedAt < 0
   )
     throw new Error("Invalid updatedAt.");
-  const sections = array(v.sections, 128).map((value) => {
+  const sections = array(v.sections).map((value) => {
     const s = object(value, ["id", "title", "collapsed", "cards"]);
     if (typeof s.collapsed !== "boolean")
       throw new Error("Invalid section collapse state.");
     return {
       id: id(s.id),
-      title: text(s.title, "section title", 256),
+      title: text(s.title, "section title"),
       collapsed: s.collapsed,
-      cards: array(s.cards, 256).map(validateChart),
+      cards: array(s.cards).map(validateChart),
     };
   });
   distinct(
@@ -379,21 +396,20 @@ export function validateWorkspace(value: unknown): Workspace {
     "section identity",
   );
   const cards = sections.flatMap((s) => s.cards);
-  if (cards.length > 512) throw new Error("Too many charts.");
   distinct(
     cards.map((c) => c.id),
     "chart identity",
   );
-  const selectedRunIds = array(v.selectedRunIds, 4096).map(id);
+  const selectedRunIds = array(v.selectedRunIds).map(id);
   const pendingSelectedRunIds =
     v.pendingSelectedRunIds === undefined
       ? []
-      : array(v.pendingSelectedRunIds, 4096).map(id);
+      : array(v.pendingSelectedRunIds).map(id);
   distinct([...selectedRunIds, ...pendingSelectedRunIds], "selected run");
   return {
     version: 2,
     id: id(v.id),
-    name: text(v.name, "view name", 256),
+    name: text(v.name, "view name"),
     experimentId: id(v.experimentId),
     selectedRunIds,
     ...(pendingSelectedRunIds.length ? { pendingSelectedRunIds } : {}),
@@ -408,7 +424,7 @@ function validateLibrary(value: unknown): WorkspaceLibrary {
   assertSafe(value);
   const v = object(value, ["version", "views", "activeByExperiment"]);
   if (v.version !== 2) throw new Error("Unsupported library version.");
-  const views = array(v.views, 128).map(validateWorkspace);
+  const views = array(v.views).map(validateWorkspace);
   distinct(
     views.map((view) => view.id),
     "view identity",

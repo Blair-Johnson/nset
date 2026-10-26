@@ -130,51 +130,31 @@ export function defaults(): ViewConfig {
   };
 }
 const badKeys = new Set(["__proto__", "constructor", "prototype"]);
-/** Limits apply to a complete input, including keys and UTF-8 encoded JSON. */
-export const JSON_LIMITS = Object.freeze({
-  bytes: 262144,
-  nodes: 20000,
-  string: 8192,
-  array: 4096,
-  depth: 32,
-});
-export function assertSafe(value: unknown, path = "$", depth = 0): void {
-  let count = 0;
-  let bytes = 0;
-  const charge = (amount: number, p: string) => {
-    bytes += amount;
-    if (bytes > JSON_LIMITS.bytes)
-      throw new Error(`${p}: JSON exceeds ${JSON_LIMITS.bytes} bytes.`);
-  };
-  const encoded = (v: string) =>
-    new TextEncoder().encode(JSON.stringify(v)).byteLength;
-  const visit = (v: unknown, p: string, level: number): void => {
-    if (++count > JSON_LIMITS.nodes)
-      throw new Error(`${p}: JSON value count exceeds ${JSON_LIMITS.nodes}.`);
-    if (level > JSON_LIMITS.depth)
-      throw new Error(
-        `${p}: nesting is limited to ${JSON_LIMITS.depth} levels.`,
-      );
-    if (typeof v === "string") {
-      if (v.length > JSON_LIMITS.string)
-        throw new Error(
-          `${p}: string exceeds ${JSON_LIMITS.string} characters.`,
-        );
-      charge(encoded(v), p);
-      return;
+/** Validate JSON shape without imposing local size/count/depth budgets. */
+export function assertSafe(value: unknown, path = "$"): void {
+  type Frame = { value: unknown; path: string; exit?: boolean };
+  const stack: Frame[] = [{ value, path }];
+  // Only ancestors count as cycles: repeated references in separate branches are JSON-safe.
+  const ancestors = new WeakSet<object>();
+  while (stack.length) {
+    const { value: v, path: p, exit } = stack.pop()!;
+    if (exit) {
+      ancestors.delete(v as object);
+      continue;
     }
     if (
       v === null ||
+      typeof v === "string" ||
       typeof v === "boolean" ||
       (typeof v === "number" && Number.isFinite(v))
-    ) {
-      charge(JSON.stringify(v).length, p);
-      return;
-    }
+    )
+      continue;
     if (typeof v !== "object")
       throw new Error(
         `${p}: only finite JSON values are supported; executable callbacks are not accepted.`,
       );
+    if (ancestors.has(v))
+      throw new Error(`${p}: cyclic JSON values are unsupported.`);
     const array = Array.isArray(v);
     const prototype = Object.getPrototypeOf(v);
     if (
@@ -183,41 +163,27 @@ export function assertSafe(value: unknown, path = "$", depth = 0): void {
         : prototype !== Object.prototype && prototype !== null
     )
       throw new Error(`${p}: plain JSON objects and arrays required.`);
-    if (array && v.length > JSON_LIMITS.array)
-      throw new Error(`${p}: array exceeds ${JSON_LIMITS.array} entries.`);
     if (Object.getOwnPropertySymbols(v).length)
       throw new Error(`${p}: symbol keys are not JSON.`);
-    if (Object.getOwnPropertyNames(v).length > JSON_LIMITS.nodes)
-      throw new Error(`${p}: JSON value count exceeds ${JSON_LIMITS.nodes}.`);
-    const entries = Object.getOwnPropertyDescriptors(v);
-    if (array && Object.keys(entries).length !== v.length + 1)
+    const entries = Object.entries(Object.getOwnPropertyDescriptors(v));
+    if (array && entries.length !== v.length + 1)
       throw new Error(`${p}: dense JSON arrays required.`);
-    charge(2, p); // braces or brackets
-    let first = true;
-    for (const [key, descriptor] of Object.entries(entries)) {
+    ancestors.add(v);
+    stack.push({ value: v, path: p, exit: true });
+    for (const [key, descriptor] of entries) {
       if (array && key === "length") continue;
       if (badKeys.has(key)) throw new Error(`${p}.${key}: protected key.`);
-      if (key.length > JSON_LIMITS.string)
-        throw new Error(`${p}: key string is too long.`);
       if (!descriptor.enumerable || !("value" in descriptor))
         throw new Error(
           `${p}.${key}: plain JSON properties required; accessors are unsupported.`,
         );
-      if (array && !/^(0|[1-9]\d*)$/.test(key))
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= v.length))
         throw new Error(`${p}: dense JSON arrays required.`);
-      charge((first ? 0 : 1) + (array ? 0 : encoded(key) + 1), p);
-      first = false;
-      visit(descriptor.value, `${p}.${key}`, level + 1);
+      stack.push({ value: descriptor.value, path: `${p}.${key}` });
     }
-  };
-  visit(value, path, depth);
+  }
 }
 export function parseSafeJson(text: string): unknown {
-  if (
-    text.length > JSON_LIMITS.bytes ||
-    new TextEncoder().encode(text).byteLength > JSON_LIMITS.bytes
-  )
-    throw new Error(`JSON exceeds ${JSON_LIMITS.bytes} bytes.`);
   const value: unknown = JSON.parse(text);
   assertSafe(value);
   return value;
@@ -252,7 +218,7 @@ const namedColors = new Set(
 );
 /** Literal colors only: never URLs, variables, relative colors, CSS-wide keywords or executable CSS. */
 export function isSafeColor(value: unknown): value is string {
-  if (typeof value !== "string" || value.length > 256) return false;
+  if (typeof value !== "string") return false;
   const v = value.trim().toLowerCase();
   if (
     !v ||
@@ -383,25 +349,44 @@ export function validateStyle(v: unknown, p = "style"): void {
 /** Arrays replace, except the two positional axis patches. Built-in callbacks survive untouched. */
 export function deepMerge<T>(base: T, patch: unknown): T {
   assertSafe(patch);
+  type Pending = { base: unknown; patch: object; out: object };
+  const pending: Pending[] = [];
   function merge(a: unknown, b: unknown, key = ""): unknown {
-    if (Array.isArray(b)) {
-      if (key !== "axes") return b.map((v) => merge(undefined, v));
-      const out = Array.isArray(a) ? a.slice() : [];
-      b.forEach((v, i) => {
-        out[i] = merge(out[i], v);
-      });
-      return out;
-    }
-    if (b !== null && typeof b === "object") {
-      const out: Record<string, unknown> = {
-        ...(a !== null && typeof a === "object" && !Array.isArray(a) ? a : {}),
-      };
-      for (const [k, v] of Object.entries(b)) out[k] = merge(out[k], v, k);
-      return out;
-    }
-    return b;
+    if (b === null || typeof b !== "object") return b;
+    const out = Array.isArray(b)
+      ? key === "axes" && Array.isArray(a)
+        ? a.slice()
+        : []
+      : {
+          ...(a !== null && typeof a === "object" && !Array.isArray(a)
+            ? a
+            : {}),
+        };
+    pending.push({
+      base: Array.isArray(b)
+        ? key === "axes" && Array.isArray(a)
+          ? a
+          : undefined
+        : a !== null && typeof a === "object" && !Array.isArray(a)
+          ? a
+          : undefined,
+      patch: b,
+      out,
+    });
+    return out;
   }
-  return merge(base, patch) as T;
+  const result = merge(base, patch);
+  while (pending.length) {
+    const { base: a, patch: b, out } = pending.pop()!;
+    for (const [key, value] of Object.entries(b)) {
+      const previous =
+        a !== null && typeof a === "object"
+          ? (a as Record<string, unknown>)[key]
+          : undefined;
+      (out as Record<string, unknown>)[key] = merge(previous, value, key);
+    }
+  }
+  return result as T;
 }
 function rangeCheck(v: unknown, p: string) {
   if (Array.isArray(v)) {
@@ -794,4 +779,4 @@ Scales: dir (-1|1), log (2|10), asinh (>0), auto, range [min,max] (null = automa
 Axes: show, label, font, labelFont, stroke, size, gap, labelSize, labelGap, rotate (bottom x only), side (x:0|2, y:1|3), align/alignTo (1|2), lineGap, space, positive increasing incrs, increasing splits, values (number|fixed-2|scientific|iso-time or a static string/number/null array paired with equal-length splits). grid/ticks/border: show, stroke, width, dash, cap; ticks also size.
 Cursor: show,x,y,lock; points {show,one,size,width,stroke,fill}; focus {prox,bias}; hover {prox,bias,skip} (skip: null or numbers); drag {x,y,dist,setScale,uni} (uni may be null). Legend: show,live,isolate,markers {show,width,stroke,fill,dash}; legend dash is a CSS border style such as dashed, not a numeric dash array.
 Styles: existing color,width,dash,points,pointSize,fill,visible,path plus cap,alpha,pxAlign,fillColor,fillTo,auto; markers {show:boolean|"auto",size,space,width,stroke,fill,dash,cap}; pathOptions {alignGaps:-1|0|1,align:-1|1,ascDesc,extend}. Marker fields override legacy points/pointSize. auto excludes a series from auto-ranging only, not analysis. Colors are safe CSS literals, never URLs or variables. No JavaScript, callbacks, hooks, plugins, data replacement, scale identity, or series identity overrides. Unlisted options are rejected.
-JSON limits: 256 KiB UTF-8, 20,000 values, 8,192 characters per string/key, 4,096 entries per array, 32 nesting levels. Matched PCHIP and matched linear interpolation on nonlinear axes are adaptively tessellated in screen space with a 0.35 CSS-pixel target tolerance before optional pixel snapping and bounded work. Explicit log fillTo must be positive; omitted log baselines use the visible lower bound. Other display paths and pathOptions are cosmetic and never change numerical interpolation, readouts, or exports.`;
+Matched PCHIP and matched linear interpolation on nonlinear axes are adaptively tessellated in screen space with a 0.35 CSS-pixel target tolerance before optional pixel snapping and bounded work. Explicit log fillTo must be positive; omitted log baselines use the visible lower bound. Other display paths and pathOptions are cosmetic and never change numerical interpolation, readouts, or exports.`;

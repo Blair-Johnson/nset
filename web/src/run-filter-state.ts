@@ -6,14 +6,13 @@ import {
 } from "./run-filter";
 import { TIME_OPS, TIME_UNITS, type TimeUnit } from "./run-time-filter";
 
-/** Restore only known, bounded rule shapes. Invalid time values remain editable
+/** Restore only known rule shapes. Invalid time values remain editable
  * and match nothing; never resolve relative windows while saving/restoring. */
 export function restoreRunFilter(value: unknown): RunFilter {
   if (!value || typeof value !== "object") return emptyFilter();
   const raw = value as Record<string, unknown>;
   if (
     !Array.isArray(raw.conditions) ||
-    raw.conditions.length > 64 ||
     (raw.combine !== "all" && raw.combine !== "any")
   )
     return emptyFilter();
@@ -24,9 +23,7 @@ export function restoreRunFilter(value: unknown): RunFilter {
     if (
       !["params", "tags", "event", "time"].includes(String(c.scope)) ||
       typeof c.path !== "string" ||
-      c.path.length > 8192 ||
       typeof c.value !== "string" ||
-      c.value.length > 8192 ||
       !["exclude", "include", "default"].includes(String(c.missing))
     )
       return emptyFilter();
@@ -40,15 +37,14 @@ export function restoreRunFilter(value: unknown): RunFilter {
       value: c.value,
       missing: time ? "exclude" : (c.missing as FilterCondition["missing"]),
     };
-    if (!time && typeof c.fallback === "string" && c.fallback.length <= 8192)
+    if (!time && typeof c.fallback === "string")
       condition.fallback = c.fallback;
     if (time) {
       if (c.precision === "date" || c.precision === "datetime")
         condition.precision = c.precision;
       if (typeof c.unit === "string" && Object.hasOwn(TIME_UNITS, c.unit))
         condition.unit = c.unit as TimeUnit;
-      if (typeof c.valueTo === "string" && c.valueTo.length <= 32)
-        condition.valueTo = c.valueTo;
+      if (typeof c.valueTo === "string") condition.valueTo = c.valueTo;
     }
     conditions.push(condition);
   }
