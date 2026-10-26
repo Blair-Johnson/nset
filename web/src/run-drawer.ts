@@ -408,7 +408,11 @@ export class RunDrawer {
     try {
       localStorage.setItem(
         preferenceKey(this.experimentId),
-        JSON.stringify({ open: this.state.open, width: this.state.width }),
+        JSON.stringify({
+          open: this.state.open,
+          width: this.state.width,
+          filter: this.session.filter,
+        }),
       );
     } catch {
       /* Browser preferences must not block chart interactions. */

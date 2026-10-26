@@ -602,7 +602,7 @@ export async function appendRxCatalog(
       });
     if (value.error) return catalog;
     for (const r of value.runs) {
-      const created = Date.parse(r.created_at) || 0;
+      const created = rxTimestamp(r.created_at);
       catalog.runs.push({
         id: `${s.id}:${r.run_uid}`,
         experiment_id: s.id,
@@ -623,8 +623,7 @@ export async function appendRxCatalog(
         },
         tags: {},
         created_at: created,
-        updated_at:
-          Date.parse(r.finished_at ?? r.started_at ?? r.created_at) || created,
+        updated_at: rxTimestamp(r.finished_at, r.started_at, r.created_at),
       });
     }
     after = value.next_after;
@@ -634,6 +633,14 @@ export async function appendRxCatalog(
     seen.add(after);
   }
   return catalog;
+}
+/** Preserve unknown rx dates as NaN; epoch zero is a valid timestamp. */
+export function rxTimestamp(...values: (string | null | undefined)[]): number {
+  for (const value of values) {
+    const time = value == null ? NaN : Date.parse(value);
+    if (Number.isFinite(time)) return time;
+  }
+  return NaN;
 }
 export function newRecordBinding(catalog: Catalog): RecordBinding {
   return {

@@ -22,12 +22,14 @@ export const tableState = (): TableState => ({
   metrics: null,
 });
 export const timeLabel = (time: number) =>
-  new Date(time).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  !Number.isFinite(new Date(time).getTime())
+    ? "Unknown"
+    : new Date(time).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 export const numberLabel = (value: number | null | undefined) =>
   value == null
     ? "—"

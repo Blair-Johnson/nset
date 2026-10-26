@@ -536,3 +536,40 @@
     background: var(--backdrop);
   }
 }
+
+.run-filter-time-line {
+  flex-wrap: wrap;
+}
+.run-filter-time-line .run-filter-path {
+  flex: 1 1 80px;
+  font-family: inherit;
+}
+.run-filter-time-line .run-filter-value {
+  flex: 1 1 125px;
+}
+.run-filter-time-unit {
+  width: auto;
+}
+.run-filter-time-help,
+.run-filter-time-error {
+  font-size: 11px;
+}
+.run-filter-time-error:not(:empty) {
+  color: var(--danger, #c33);
+}
+
+.run-filter-time-help {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.run-filter-time-precision {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.run-filter-time-precision input {
+  width: auto;
+  margin: 0;
+}

@@ -719,3 +719,76 @@ test("failure details survive until explicit recovery and loading/error/success 
   );
   assert.deepEqual(states.at(-1), { busy: false, error: "", count: 1 });
 });
+
+test("aging into a stale time rule queues Event evidence without sending timestamp clauses", async (t) => {
+  let now = Date.UTC(2026, 9, 26, 12);
+  t.mock.method(Date, "now", () => now);
+  const { api, calls } = mockApi((call) => page(call.body.runs));
+  const time: FilterCondition = {
+    scope: "time",
+    path: "updated_at",
+    op: "older",
+    value: "7",
+    unit: "days",
+    missing: "exclude",
+  };
+  const session = new RunFilterSession(filter(time, event()), api);
+  const candidate = { ...run("aging"), updated_at: now - 7 * 86400000 };
+  session.setRuns([candidate]);
+  assert.equal(session.matches(candidate), false);
+  assert.equal(session.canContinue, false);
+  now++;
+  session.refreshTime();
+  assert.equal(session.result(candidate), null);
+  assert.equal(session.canContinue, true);
+  await session.continueScan();
+  assert.equal(session.matches(candidate), true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body.conditions, [
+    { path: "metrics.loss", op: "lt", value: 0.5 },
+  ]);
+  session.refreshTime();
+  assert.equal(session.canContinue, false);
+  assert.equal(session.count(), 1);
+  session.destroy();
+});
+
+test("clock changes during an Event scan resolve newly eligible runs before completion", async (t) => {
+  let now = Date.UTC(2026, 9, 26, 12);
+  t.mock.method(Date, "now", () => now);
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { api, calls } = mockApi(async (call, index) => {
+    if (index === 0) await waiting;
+    return page(call.body.runs);
+  });
+  const time: FilterCondition = {
+    scope: "time",
+    path: "updated_at",
+    op: "older",
+    value: "7",
+    unit: "days",
+    missing: "exclude",
+  };
+  const session = new RunFilterSession(filter(time, event()), api);
+  t.after(() => session.destroy());
+  const old = { ...run("old"), updated_at: now - 7 * 86400000 - 1 };
+  const aging = { ...run("aging"), updated_at: now - 7 * 86400000 };
+  session.setRuns([old, aging]);
+  const scan = session.continueScan();
+  assert.equal(session.busy, true);
+  now++;
+  session.refreshTime();
+  assert.equal(session.result(aging), null);
+  release();
+  await scan;
+  assert.deepEqual(
+    calls.map((call) => call.body.runs),
+    [["old"], ["aging"]],
+  );
+  assert.equal(session.pending, 0);
+  assert.equal(session.canContinue, false);
+  assert.equal(session.count(), 2);
+});

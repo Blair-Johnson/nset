@@ -35,6 +35,8 @@ const conditionKey = (c: FilterCondition) => JSON.stringify(c);
 export class RunFilterSession {
   api?: Api;
   private current: RunFilter;
+  private now = Date.now();
+  private clock?: ReturnType<typeof setInterval>;
   runs: Run[] = [];
   private revision: unknown;
   private sourceSnapshot?: {
@@ -69,6 +71,7 @@ export class RunFilterSession {
     filter: RunFilter = emptyFilter(),
     api?: Api,
     private readonly refreshScope?: () => void,
+    private readonly onFilterChange?: (filter: RunFilter) => void,
   ) {
     this.current = structuredClone(filter);
     this.api = api;
@@ -95,6 +98,8 @@ export class RunFilterSession {
       JSON.stringify(eventClauses(filter)) ===
       JSON.stringify(eventClauses(this.current));
     this.current = structuredClone(filter);
+    this.onFilterChange?.(this.current);
+    this.now = Date.now();
     if (
       unchangedEvents &&
       !this.busy &&
@@ -108,8 +113,13 @@ export class RunFilterSession {
     revision?: unknown,
     sourceSnapshot?: { id: string; sourceGeneration?: string; error?: string },
   ) {
-    if (revision !== undefined && revision === this.revision) return;
-    if (revision === undefined && runs === this.runs) return;
+    if (
+      (revision !== undefined && revision === this.revision) ||
+      (revision === undefined && runs === this.runs)
+    ) {
+      this.refreshTime();
+      return;
+    }
     this.runs = runs;
     this.refreshing = false;
     this.revision = revision;
@@ -141,6 +151,7 @@ export class RunFilterSession {
     this.busy = false;
   }
   private reset() {
+    this.now = Date.now();
     this.stop();
     this.proofs.clear();
     this.sourceGenerations.clear();
@@ -171,11 +182,17 @@ export class RunFilterSession {
       this.timer = setTimeout(() => void this.continueScan(), 180);
   }
   subscribe(listener: () => void) {
+    // Reopening a view may cross a relative boundary while no clock is running.
+    if (!this.listeners.size) this.refreshTime();
     this.listeners.add(listener);
-    if (this.listeners.size === 1) this.schedule();
+    if (this.listeners.size === 1) {
+      this.clock = setInterval(() => this.refreshTime(), 30_000);
+      this.schedule();
+    }
     return () => {
       this.listeners.delete(listener);
       if (!this.listeners.size) {
+        clearInterval(this.clock);
         this.stop();
         this.discoveryAbort?.abort();
       }
@@ -188,18 +205,45 @@ export class RunFilterSession {
     const evidence = run.rx
       ? this.proofs.get(identity(run.rx.sourceId, run.rx.uid))
       : undefined;
-    return runFilterResult(run, filter, (c) => {
-      const i = this.clauses.findIndex(
-        (clause) => conditionKey(clause) === conditionKey(c),
-      );
-      return i < 0 ? null : (evidence?.[i] ?? null);
-    });
+    return runFilterResult(
+      run,
+      filter,
+      (c) => {
+        const i = this.clauses.findIndex(
+          (clause) => conditionKey(clause) === conditionKey(c),
+        );
+        return i < 0 ? null : (evidence?.[i] ?? null);
+      },
+      this.now,
+    );
   }
   matches(run: Run) {
     return this.result(run) === true;
   }
   count(filter = this.current) {
     return this.runs.filter((r) => this.result(r, filter) === true).length;
+  }
+
+  /** A single clock snapshot shared by counts, table, drawer and event proofs. */
+  refreshTime() {
+    if (
+      !this.active ||
+      !this.current.conditions.some(
+        (c) =>
+          c.scope === "time" &&
+          ["last", "older", "today", "yesterday"].includes(c.op),
+      )
+    )
+      return;
+    this.now = Date.now();
+    // Time can make a previously excluded run need Event evidence. Keep existing
+    // proofs and queue only unresolved candidates rather than re-querying all runs.
+    if (!this.busy && this.clauses.length && !this.refreshing && !this.error) {
+      this.batches = this.candidates(true);
+      this.batch = 0;
+    }
+    this.emit();
+    this.schedule();
   }
 
   async continueScan() {
@@ -277,6 +321,12 @@ export class RunFilterSession {
             );
           this.batch++;
         }
+        // A rolling time boundary may have admitted more runs while awaiting
+        // this page. Resolve those before declaring the full search complete.
+        if (!this.canContinue) {
+          this.batches = this.candidates(true);
+          this.batch = 0;
+        }
         this.emit();
       }
     } catch (error) {
@@ -308,8 +358,10 @@ export class RunFilterSession {
   setActive(active: boolean) {
     if (active === this.active) return;
     this.active = active;
-    if (active) this.schedule();
-    else {
+    if (active) {
+      this.refreshTime();
+      this.schedule();
+    } else {
       this.stop();
       this.discoveryAbort?.abort();
     }
@@ -396,6 +448,7 @@ export class RunFilterSession {
     }
   }
   destroy() {
+    clearInterval(this.clock);
     this.stop();
     this.discoveryAbort?.abort();
     this.discovery = undefined;

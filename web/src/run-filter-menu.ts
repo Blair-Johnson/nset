@@ -1,4 +1,10 @@
 import type { Run } from "./api";
+import {
+  TIME_OPS,
+  TIME_UNITS,
+  timeConditionError,
+  type TimeUnit,
+} from "./run-time-filter";
 import { element } from "./utils";
 import { plotIcon } from "./plot-icons";
 import { attachSuggestions } from "./suggest";
@@ -105,10 +111,11 @@ export class RunFilterMenu {
     this.root.dataset.menu = "run-filter";
     this.summary.setAttribute(
       "aria-label",
-      this.options.label ?? "Filter runs by config, tags or events",
+      this.options.label ?? "Filter runs by config, tags, time or events",
     );
     this.summary.title =
-      this.options.label ?? "Filter runs by config values, tags or events";
+      this.options.label ??
+      "Filter runs by config values, tags, time or events";
     this.summary.append(plotIcon("filter"), this.badge);
     const head = element("div", "run-filter-head");
     head.append(element("strong", "", this.options.label ?? "Filter runs"));
@@ -245,7 +252,7 @@ export class RunFilterMenu {
       "aria-label",
       this.options.label ??
         (runs.some((run) => run.rx)
-          ? "Filter runs by config, tags or events"
+          ? "Filter runs by config, tags, time or events"
           : "Filter runs by config or tags"),
     );
     this.fields = filterFields(runs);
@@ -308,7 +315,8 @@ export class RunFilterMenu {
         )
           .map((c) => describeCondition(c, this.label(c)))
           .join(this.filter.combine === "any" ? " OR " : " AND ")}`
-      : (this.options.label ?? "Filter runs by config values, tags or events");
+      : (this.options.label ??
+        "Filter runs by config values, tags, time or events");
   }
   private updateCounts() {
     const rows = this.list.querySelectorAll<HTMLElement>(".run-filter-row");
@@ -325,6 +333,172 @@ export class RunFilterMenu {
     });
   }
 
+  private renderTimeRow(
+    row: HTMLElement,
+    scope: HTMLSelectElement,
+    condition: FilterCondition,
+    index: number,
+    update: (patch: Partial<FilterCondition>, rerender?: boolean) => void,
+  ) {
+    const line = element("div", "run-filter-line run-filter-time-line");
+    const field = element("select", "run-filter-path");
+    field.setAttribute("aria-label", `Condition ${index + 1} time field`);
+    for (const [value, label] of [
+      ["created_at", "Created"],
+      ["updated_at", "Updated"],
+    ]) {
+      const option = element("option", "", label);
+      option.value = value;
+      field.append(option);
+    }
+    field.value = condition.path;
+    if (this.runs.some((run) => run.rx))
+      field.title =
+        "For rx runs, Updated uses finish time, then start time, then creation time.";
+    field.onchange = () => update({ path: field.value });
+    const op = element("select", "run-filter-op");
+    op.setAttribute("aria-label", `Condition ${index + 1} operator`);
+    for (const item of TIME_OPS) {
+      const option = element("option", "", item.label);
+      option.value = item.op;
+      op.append(option);
+    }
+    op.value = condition.op;
+    op.onchange = () => {
+      const current = this.filter.conditions[index];
+      const relative = op.value === "last" || op.value === "older";
+      const wasRelative = current.op === "last" || current.op === "older";
+      const precision = op.value === "on" ? undefined : current.precision;
+      let value =
+        relative === wasRelative ? current.value : relative ? "7" : "";
+      if (op.value === "on") value = value.slice(0, 10);
+      update(
+        {
+          op: op.value as FilterOp,
+          value,
+          precision,
+          unit: current.unit ?? "days",
+        },
+        true,
+      );
+    };
+    line.append(scope, field, op);
+    const relative = condition.op === "last" || condition.op === "older";
+    const precise = condition.precision === "datetime";
+    const error = element("span", "run-filter-time-error");
+    error.setAttribute("role", "status");
+    const inputs: HTMLInputElement[] = [];
+    const validate = () => {
+      const message = timeConditionError(this.filter.conditions[index]);
+      error.textContent = message;
+      for (const input of inputs) {
+        input.setCustomValidity(message);
+        input.setAttribute("aria-invalid", String(!!message));
+      }
+    };
+    if (condition.op !== "today" && condition.op !== "yesterday") {
+      const value = element("input", "run-filter-value");
+      value.type = relative ? "number" : precise ? "datetime-local" : "date";
+      value.setAttribute(
+        "aria-label",
+        `Condition ${index + 1} ${relative ? "duration" : "date"}`,
+      );
+      if (relative) {
+        value.min = "0";
+        value.step = "any";
+      } else if (precise) value.step = "1";
+      value.value = condition.value;
+      value.oninput = () => {
+        update({ value: value.value });
+        validate();
+      };
+      inputs.push(value);
+      line.append(value);
+      if (relative) {
+        const unit = element("select", "run-filter-time-unit");
+        unit.setAttribute("aria-label", `Condition ${index + 1} unit`);
+        for (const key of Object.keys(TIME_UNITS)) {
+          const option = element("option", "", key);
+          option.value = key;
+          unit.append(option);
+        }
+        unit.value = condition.unit ?? "days";
+        unit.onchange = () => {
+          update({ unit: unit.value as TimeUnit });
+          validate();
+        };
+        line.append(unit);
+      } else if (condition.op === "between") {
+        const end = element("input", "run-filter-value");
+        end.type = precise ? "datetime-local" : "date";
+        if (precise) end.step = "1";
+        end.setAttribute("aria-label", `Condition ${index + 1} end date`);
+        end.value = condition.valueTo ?? "";
+        end.oninput = () => {
+          update({ valueTo: end.value });
+          validate();
+        };
+        inputs.push(end);
+        line.append(element("span", "", "to"), end);
+      }
+    }
+    const remove = element("button", "run-filter-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove condition ${index + 1}`);
+    remove.onclick = () => {
+      this.filter = {
+        ...this.filter,
+        conditions: this.filter.conditions.filter((_, i) => i !== index),
+      };
+      this.emit();
+      this.render();
+    };
+    line.append(remove);
+    row.append(line);
+    if (!relative) {
+      const help = element("div", "run-filter-time-help muted");
+      if (["before", "after", "between"].includes(condition.op)) {
+        const label = element("label", "run-filter-time-precision");
+        const toggle = element("input");
+        toggle.type = "checkbox";
+        toggle.checked = precise;
+        toggle.setAttribute(
+          "aria-label",
+          `Condition ${index + 1} include time`,
+        );
+        toggle.onchange = () => {
+          const withTime = toggle.checked;
+          const convert = (text: string) =>
+            !text
+              ? ""
+              : withTime
+                ? `${text.slice(0, 10)}T00:00`
+                : text.slice(0, 10);
+          const current = this.filter.conditions[index];
+          update(
+            {
+              precision: withTime ? "datetime" : "date",
+              value: convert(current.value),
+              valueTo: convert(current.valueTo ?? ""),
+            },
+            true,
+          );
+        };
+        label.append(toggle, element("span", "", "Include time"));
+        help.append(label);
+      }
+      help.append(
+        element(
+          "span",
+          "",
+          `Local time (${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
+        ),
+      );
+      row.append(help);
+    }
+    row.append(error, element("span", "run-filter-count muted"));
+    validate();
+  }
   private render() {
     this.cleanups.splice(0).forEach((cleanup) => cleanup());
     this.retryHints = undefined;
@@ -343,7 +517,7 @@ export class RunFilterMenu {
           "muted run-filter-empty",
           this.options.scope
             ? "Add a condition."
-            : "Add a condition on run config, tags, or logged Event fields.",
+            : "Add a condition on run config, tags, time, or logged Event fields.",
         ),
       );
     this.filter.conditions.forEach((condition, index) => {
@@ -367,6 +541,7 @@ export class RunFilterMenu {
       for (const [key, label] of [
         ["params", "Config"],
         ["tags", "Tag"],
+        ["time", "Time"],
         ["event", "Event"],
       ]) {
         if (this.options.scope && key !== this.options.scope) continue;
@@ -386,7 +561,12 @@ export class RunFilterMenu {
         update(
           {
             scope: scope.value as FilterCondition["scope"],
-            path: "",
+            path: scope.value === "time" ? "created_at" : "",
+            op: scope.value === "time" ? "last" : "eq",
+            value: scope.value === "time" ? "7" : "",
+            unit: scope.value === "time" ? "days" : undefined,
+            valueTo: undefined,
+            precision: undefined,
             missing: "exclude",
           },
           true,
@@ -395,6 +575,19 @@ export class RunFilterMenu {
           .querySelectorAll<HTMLInputElement>(".run-filter-path")
           [index]?.focus();
       };
+      if (index > 0)
+        this.list.append(
+          element(
+            "div",
+            "run-filter-joiner",
+            this.filter.combine === "any" ? "or" : "and",
+          ),
+        );
+      if (condition.scope === "time") {
+        this.renderTimeRow(row, scope, condition, index, update);
+        this.list.append(row);
+        return;
+      }
       const eventScope = condition.scope === "event";
       const path = element("input", "run-filter-path");
       path.type = "text";
@@ -734,14 +927,6 @@ export class RunFilterMenu {
       if (!eventScope) {
         missingLine.append(element("span", "run-filter-count muted"));
         row.append(missingLine);
-      }
-      if (index > 0) {
-        const joiner = element(
-          "div",
-          "run-filter-joiner",
-          this.filter.combine === "any" ? "or" : "and",
-        );
-        this.list.append(joiner);
       }
       this.list.append(row);
     });

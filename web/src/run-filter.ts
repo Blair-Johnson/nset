@@ -1,4 +1,10 @@
 import type { Run } from "./api";
+import {
+  timeConditionMatches,
+  describeTimeCondition,
+  type TimeOp,
+  type TimeUnit,
+} from "./run-time-filter";
 import { scalarParameters, displayPath } from "./run-table-fields";
 
 /**
@@ -7,6 +13,7 @@ import { scalarParameters, displayPath } from "./run-table-fields";
  * literal dots in keys never become nested lookups.
  */
 export type FilterOp =
+  | TimeOp
   | "eq"
   | "neq"
   | "lt"
@@ -20,7 +27,7 @@ export type FilterOp =
 export type MissingPolicy = "exclude" | "include" | "default";
 export interface FilterCondition {
   /** "params" (run config) or "tags". */
-  scope: "params" | "tags" | "event";
+  scope: "params" | "tags" | "event" | "time";
   /** Exact JSONPath identity, e.g. `$["train"]["optim"]["lr"]`. */
   path: string;
   op: FilterOp;
@@ -29,6 +36,10 @@ export interface FilterCondition {
   missing: MissingPolicy;
   /** Used when missing === "default": the value a missing path is treated as. */
   fallback?: string;
+  /** Time rules retain their duration/date text, not a resolved timestamp. */
+  unit?: TimeUnit;
+  valueTo?: string;
+  precision?: "date" | "datetime";
 }
 export interface RunFilter {
   combine: "all" | "any";
@@ -69,7 +80,7 @@ export function formatFilterValue(value: unknown): string {
 }
 
 export interface FilterField {
-  scope: "params" | "tags" | "event";
+  scope: "params" | "tags" | "event" | "time";
   path: string;
   label: string;
   /** Number of runs that have this path. */
@@ -199,7 +210,12 @@ function compare(actual: unknown, op: FilterOp, expected: unknown): boolean {
   }
 }
 
-export function conditionMatches(run: Run, c: FilterCondition): boolean {
+export function conditionMatches(
+  run: Run,
+  c: FilterCondition,
+  now = Date.now(),
+): boolean {
+  if (c.scope === "time") return timeConditionMatches(run, c, now);
   if (c.scope === "event") return c.op === "missing" && !run.rx;
   let actual = readPath(run[c.scope] ?? {}, c.path);
   if (c.op === "missing") return actual === undefined;
@@ -222,6 +238,7 @@ export function runFilterResult(
   run: Run,
   filter: RunFilter | undefined,
   event: (condition: FilterCondition) => boolean | null = () => null,
+  now = Date.now(),
 ): boolean | null {
   const conditions = activeConditions(filter);
   if (!conditions.length) return true;
@@ -230,7 +247,7 @@ export function runFilterResult(
       ? run.rx
         ? event(c)
         : c.op === "missing"
-      : conditionMatches(run, c),
+      : conditionMatches(run, c, now),
   );
   if (filter!.combine === "any")
     return results.includes(true)
@@ -240,11 +257,16 @@ export function runFilterResult(
         : false;
   return results.includes(false) ? false : results.includes(null) ? null : true;
 }
-export function runMatchesFilter(run: Run, filter: RunFilter | undefined) {
-  return runFilterResult(run, filter) === true;
+export function runMatchesFilter(
+  run: Run,
+  filter: RunFilter | undefined,
+  now = Date.now(),
+) {
+  return runFilterResult(run, filter, undefined, now) === true;
 }
 
 export function describeCondition(c: FilterCondition, label?: string) {
+  if (c.scope === "time") return describeTimeCondition(c);
   const name = `${c.scope === "event" ? "Event: " : ""}${label ?? c.path}`;
   const op = OPS.find((o) => o.op === c.op)?.label ?? c.op;
   const missing =

@@ -56,7 +56,13 @@ export function createRunOrder(runs: Run[], catalogSeries: CatalogSeries[]) {
             parameters.get(b.id)?.get(key)?.value,
             state.descending,
           );
-        } else result = a.created_at - b.created_at;
+        } else {
+          const valid = (value: number) =>
+            Number.isFinite(value) && Math.abs(value) <= 8.64e15;
+          if (!valid(a.created_at)) return valid(b.created_at) ? 1 : 0;
+          if (!valid(b.created_at)) return -1;
+          result = a.created_at - b.created_at;
+        }
         return (state.descending ? -1 : 1) * result;
       });
     },

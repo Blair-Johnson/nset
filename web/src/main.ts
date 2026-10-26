@@ -1,3 +1,4 @@
+import { loadRunFilter, saveRunFilter } from "./run-filter-state";
 import { uuid } from "./uuid";
 import { appendRxCatalog } from "./records";
 import "./style.css";
@@ -64,7 +65,12 @@ let runDrawer: RunDrawer | undefined;
 function filterSessionFor(experimentId: string) {
   let session = runFilterSessions.get(experimentId);
   if (!session) {
-    session = new RunFilterSession(undefined, api, () => void connect(true));
+    session = new RunFilterSession(
+      loadRunFilter(experimentId),
+      api,
+      () => void connect(true),
+      (filter) => saveRunFilter(experimentId, filter),
+    );
     runFilterSessions.set(experimentId, session);
   }
   session.setRuns(
@@ -356,7 +362,8 @@ function renderPage() {
   const route = currentRoute();
   for (const [id, session] of runFilterSessions) {
     session.setActive(false);
-    if (id === route.experimentId && route.view !== "detail") session.setActive(true);
+    if (id === route.experimentId && route.view !== "detail")
+      session.setActive(true);
   }
   const key = location.hash;
   const routeChanged = key !== previousRoute;
@@ -403,7 +410,8 @@ function renderPage() {
             onTags: async (patch) => {
               const generation = catalogGeneration;
               const updated = await api.patchRun(run.id, { tags: patch });
-              if (generation !== catalogGeneration || !connected) return updated;
+              if (generation !== catalogGeneration || !connected)
+                return updated;
               catalog = {
                 ...catalog,
                 runs: catalog.runs.map((r) => (r.id === run.id ? updated : r)),
@@ -436,20 +444,32 @@ function renderPage() {
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
-      if (catalog.rx?.id === experiment.id && (catalog.rx.error || catalog.rx.nextAfter != null)) {
+      if (
+        catalog.rx?.id === experiment.id &&
+        (catalog.rx.error || catalog.rx.nextAfter != null)
+      ) {
         const note = element("div", "table-toolbar");
-        if (catalog.rx.error) note.append(element("span", "muted", catalog.rx.error));
+        if (catalog.rx.error)
+          note.append(element("span", "muted", catalog.rx.error));
         if (catalog.rx.nextAfter != null) {
           const more = button("Load more rx runs", async () => {
             more.disabled = true;
             const generation = catalogGeneration;
             try {
-              const next = await appendRxCatalog(api, structuredClone(catalog), undefined, catalog.rx!.nextAfter!);
+              const next = await appendRxCatalog(
+                api,
+                structuredClone(catalog),
+                undefined,
+                catalog.rx!.nextAfter!,
+              );
               if (generation !== catalogGeneration || !connected) return;
               catalog = next;
               refreshRunFilterSessions();
               renderPage();
-            } catch (e) { error(`Could not load rx runs: ${message(e)}`); more.disabled = false; }
+            } catch (e) {
+              error(`Could not load rx runs: ${message(e)}`);
+              more.disabled = false;
+            }
           });
           note.append(more);
         }
@@ -1424,7 +1444,8 @@ async function connect(refresh = false) {
   } catch (e) {
     if (isAbort(e) || generation !== catalogGeneration) return;
     catalogRefreshing = false;
-    for (const session of runFilterSessions.values()) session.invalidate(message(e));
+    for (const session of runFilterSessions.values())
+      session.invalidate(message(e));
     if (connected)
       error(`Could not refresh. Previous data is still shown. ${message(e)}`);
     else {

@@ -8,6 +8,7 @@ import {
   recordPath,
   validateRecordScalar,
   type RecordFilters,
+  type RecordCondition,
 } from "./records";
 
 export const RECORD_FILTER_OPERATORS: readonly FilterOp[] = [
@@ -60,9 +61,7 @@ export function menuToRecordFilters(
         {
           path: c.path,
           op:
-            c.op === "neq"
-              ? ("ne" as const)
-              : (c.op as Exclude<typeof c.op, "neq" | "contains">),
+            c.op === "neq" ? ("ne" as const) : (c.op as RecordCondition["op"]),
           value,
         },
       ];
