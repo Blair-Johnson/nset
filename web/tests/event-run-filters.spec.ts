@@ -44,7 +44,9 @@ async function fixture(
     };
     calls.push(call);
     if (handler && (await handler(route, call))) return;
-    if (call.path === "/api/catalog") {
+    if (call.path === "/api/views") {
+      await route.fulfill({ json: { views: [] } });
+    } else if (call.path === "/api/catalog") {
       await route.fulfill({
         json: { experiments: [], runs: [], series: [], rx_enabled: true },
       });

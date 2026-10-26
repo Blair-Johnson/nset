@@ -18,11 +18,11 @@ fn schema(connection: &Connection) -> Vec<(String, Option<String>)> {
 }
 
 #[test]
-fn fresh_database_is_version_three() {
+fn fresh_database_is_version_four() {
     let directory = tempfile::tempdir().unwrap();
     let _db = Database::open(directory.path()).unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
     assert_eq!(version(&connection), SCHEMA_VERSION);
     for table in [
         "experiments",
@@ -33,6 +33,7 @@ fn fresh_database_is_version_three() {
         "compat_kv",
         "compat_sequences",
         "compat_batches",
+        "views",
     ] {
         assert!(schema(&connection).iter().any(|(name, _)| name == table));
     }
@@ -93,7 +94,7 @@ async fn original_unversioned_schema_is_adopted_without_losing_data() {
         .unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
     connection
-        .execute_batch("DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches;")
+        .execute_batch("DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP TABLE views;")
         .unwrap();
     connection.pragma_update(None, "user_version", 0).unwrap();
     let original_schema = schema(&connection);
@@ -164,7 +165,7 @@ async fn version_one_migrates_receipts_without_recreating_legacy_objects() {
     .unwrap();
     let conn = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
     conn.execute_batch(
-        "DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP INDEX metrics_stream; PRAGMA user_version=1;",
+        "DROP TABLE ingest_receipts; DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP TABLE views; DROP INDEX metrics_stream; PRAGMA user_version=1;",
     )
     .unwrap();
     let original = schema(&conn);
@@ -379,7 +380,7 @@ async fn version_two_adds_compatibility_without_recreating_native_objects() {
     let db = Database::open(directory.path()).unwrap();
     let (experiment, _) = db.create_experiment("version two".into()).await.unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
-    connection.execute_batch("DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP INDEX metrics_stream; PRAGMA user_version=2;").unwrap();
+    connection.execute_batch("DROP TABLE compat_kv; DROP TABLE compat_sequences; DROP TABLE compat_batches; DROP TABLE views; DROP INDEX metrics_stream; PRAGMA user_version=2;").unwrap();
     let original = schema(&connection);
     let reopened = Database::open(directory.path()).unwrap();
     assert_eq!(version(&connection), SCHEMA_VERSION);

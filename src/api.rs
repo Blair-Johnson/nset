@@ -40,10 +40,24 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/runs/{id}/ingest/{batch_id}",
-            put(durable_submit).route_layer(admission),
+            put(durable_submit).route_layer(admission.clone()),
         );
     let api = Router::new()
+        .merge(
+            Router::new()
+                .route(
+                    "/views",
+                    post(crate::views::create).route_layer(admission.clone()),
+                )
+                .route(
+                    "/views/{id}",
+                    put(crate::views::update).route_layer(admission),
+                )
+                .layer(DefaultBodyLimit::max(crate::views::MAX_BODY)),
+        )
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route("/views", get(crate::views::list))
+        .route("/views/{id}", get(crate::views::get))
         .route("/catalog", get(catalog))
         .route("/rx/catalog", get(crate::rx::catalog))
         .merge(
@@ -106,6 +120,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
 }
 async fn normalize_errors(request: Request, next: Next) -> Response {
     let rx_query = request.uri().path().contains("/rx/");
+    let views_query = request.uri().path().contains("/views");
     let mut response = next.run(request).await;
     if (response.status().is_client_error() || response.status().is_server_error())
         && response
@@ -118,6 +133,7 @@ async fn normalize_errors(request: Request, next: Next) -> Response {
         response = ApiError(
             status,
             match status {
+                StatusCode::PAYLOAD_TOO_LARGE if views_query => "view request body exceeds 2 MiB",
                 StatusCode::PAYLOAD_TOO_LARGE if rx_query => "rx request body exceeds 32 KiB",
                 StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds 32 MiB",
                 StatusCode::METHOD_NOT_ALLOWED => "method not allowed",

@@ -32,6 +32,15 @@ CI=1 pixi run npm --prefix web run test:browser
 
 Playwright starts a local Vite server; `NSET_TEST_PORT` selects its port (default 4173). Failure screenshots and traces go to `web/test-results`. The broader `bash scripts/verify.sh` also builds a release binary, runs strict Clippy, installs Chromium, and exercises real-server browser journeys and performance probes. It is separate from the opt-in SDK check above.
 
+For [server-backed saved views](server-views.md), install Chromium with `pixi run browser-install` if needed, then run:
+
+```sh
+pixi run server-debug
+pixi run python scripts/smoke_server_views.py
+```
+
+This real-server smoke test creates a temporary rx database, exercises two browser clients, and restarts the server to check persistence.
+
 ## UI development
 
 Start a server as in the README, then run:

@@ -45,6 +45,10 @@ Select runs, open Charts, and add an **rx records** chart. Enter a numeric X fie
 
 Charts retain fractional, repeated, and restarted X coordinates in event order. Preview notes show sampled discovery coverage, skipped values, and query limits. Refresh reads a new committed snapshot. The database is opened read-only; normal SQLite WAL/shared-memory reader coordination is allowed. Permission or recovery failures are reported without a writable fallback. Inspection pages assume append-only event sequences and detect database replacement; in-place edits are not frozen across pages. Numeric axes use finite double precision; the filter editor rejects unsafe integers rather than rounding them.
 
+## Share a saved view
+
+Server-backed views appear in the **Saved view** picker and have stable links for people using the same server token. See [Server-backed saved views](docs/server-views.md) for editing behavior and an agent API example.
+
 ## Log data
 
 Install the native client in your training environment from this checkout:

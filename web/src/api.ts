@@ -56,12 +56,39 @@ export class Api {
   }
   async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const response = await this.fetcher(`/api${path}`, {
-      method: "POST", headers: { Authorization: `Bearer ${this.token()}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body), signal, cache: "no-store",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal,
+      cache: "no-store",
     });
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
       throw new Error(detail.error ?? `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+  async put<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    const response = await this.fetcher(`/api${path}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${this.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(
+        response.status === 409
+          ? "This server view has changed (409). Your draft is retained. Revert to saved to load the latest version, or Save view as to keep a local copy."
+          : (detail.error ?? `HTTP ${response.status}`),
+      );
     }
     return response.json();
   }

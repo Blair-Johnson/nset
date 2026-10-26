@@ -1,3 +1,4 @@
+#![cfg_attr(test, recursion_limit = "256")]
 pub mod api;
 pub mod assets;
 pub mod auth;
@@ -9,6 +10,8 @@ pub mod errors;
 pub mod ingest;
 pub mod models;
 pub mod rx;
+mod view_config;
+mod views;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
 #[derive(Clone)]
