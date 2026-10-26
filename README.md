@@ -39,7 +39,7 @@ Use `--host 0.0.0.0` for remote clients, with HTTPS or a secure tunnel on untrus
 
 ## Read local rx records
 
-Add `--rx-repo /path/to/repository` to `nset serve` to browse that repository’s recorded structured events alongside native data. The repository appears as a read-only source; Git worktrees resolve to their shared repository storage. Supported storage is the canonical `<Git common dir>/rx/rx.sqlite` database with rx schema 8 or 9; other schemas and non-SQLite filesystem-store markers are rejected without migration.
+Add `--rx-repo /path/to/repository` to `nset serve` to browse that repository’s recorded structured events alongside native data. The repository appears as a read-only source; Git worktrees resolve to their shared repository storage.
 
 Select runs, open Charts, and add an **rx records** chart. Enter a numeric X field and add Y fields with Tab completion. **Filter records** selects observations within those runs; **Group by** separates curves using a scalar field on each record. For example, filter `kind = "epoch"`, choose X `epoch`, and add `train_loss` and `val_loss`. Use `metrics.loss` for a nested field and `$["metrics.loss"]` for a literal dotted key. **Inspect records** pages through the underlying JSON.
 
