@@ -262,9 +262,7 @@ for (const source of ["native", "rx"] as const) {
     await expectTable(page, source, [1, 3, 4, 6]);
     await charts(page);
     await expectDrawer(page, [1, 3, 4, 6]);
-    await expect(page.locator(".drawer-outside-count")).toContainText(
-      "2 outside filters",
-    );
+    await expect(page.locator(".drawer-outside-count")).toBeHidden();
     const shared = await openMenu(page);
     await expect(control(shared, "scope")).toHaveValue("time");
     await expect(control(shared, "duration")).toHaveValue("7");
@@ -275,9 +273,7 @@ for (const source of ["native", "rx"] as const) {
     await expect(control(await openMenu(page), "time field")).toHaveValue(
       "updated_at",
     );
-    expect(await selected(page)).toEqual(
-      [runId(source, 2), runId(source, 5)].sort(),
-    );
+    expect(await selected(page)).toEqual([]);
     expect(
       calls.filter((call) => call.path === "/api/rx/run-filter"),
     ).toHaveLength(0);

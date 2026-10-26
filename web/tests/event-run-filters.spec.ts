@@ -209,7 +209,7 @@ const selected = (page: Page) =>
     return (saved.views[0].selectedRunIds as string[]).slice().sort();
   });
 
-test("Event Tab completion and shared table/drawer filtering never deselect hidden runs", async ({
+test("Event Tab completion and shared table/drawer filtering reconcile hidden selections without restoring confirmed nonmatches", async ({
   page,
 }) => {
   const calls = await fixture(page);
@@ -240,25 +240,26 @@ test("Event Tab completion and shared table/drawer filtering never deselect hidd
   await expect(
     page.getByRole("checkbox", { name: /^Select r\d/, exact: false }),
   ).toHaveCount(1);
-  await expect(page.locator(".selection-count")).toHaveText("2 selected");
+  await expect(page.locator(".selection-count")).toHaveText("0 selected");
   const all = page.getByRole("checkbox", {
     name: "Select all matching runs",
     exact: true,
   });
   await all.check();
-  await expect(page.locator(".selection-count")).toHaveText("3 selected");
+  await expect(page.locator(".selection-count")).toHaveText("1 selected");
   await all.uncheck();
-  await expect(page.locator(".selection-count")).toHaveText("2 selected");
-  expect(await selected(page)).toEqual([id(2), id(3)].sort());
+  await expect(page.locator(".selection-count")).toHaveText("0 selected");
+  expect(await selected(page)).toEqual([]);
 
-  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Experiment views" })
+    .getByRole("button", { name: "Charts", exact: true })
+    .click();
   if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
     await page.getByLabel("Expand run list", { exact: true }).click();
   const drawer = page.locator(".run-drawer");
   await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(1);
-  await expect(drawer.locator(".drawer-outside-count")).toContainText(
-    "2 outside filters",
-  );
+  await expect(drawer.locator(".drawer-outside-count")).toBeHidden();
   const shared = await openMenu(page);
   await expect(
     shared.getByLabel("Condition 1 path", { exact: true }),
@@ -270,11 +271,11 @@ test("Event Tab completion and shared table/drawer filtering never deselect hidd
   await drawer
     .getByRole("button", { name: "Select matching", exact: true })
     .click();
-  await expect.poll(() => selected(page)).toEqual([id(1), id(2), id(3)].sort());
+  await expect.poll(() => selected(page)).toEqual([id(1)]);
   await drawer
     .getByRole("checkbox", { name: "Show r1", exact: true })
     .uncheck();
-  await expect.poll(() => selected(page)).toEqual([id(2), id(3)].sort());
+  await expect.poll(() => selected(page)).toEqual([]);
   await (
     await openMenu(page)
   )
@@ -283,10 +284,11 @@ test("Event Tab completion and shared table/drawer filtering never deselect hidd
   await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(3);
   await expect(
     drawer.getByRole("checkbox", { name: "Show r2", exact: true }),
-  ).toBeChecked();
+  ).not.toBeChecked();
   await expect(
     drawer.getByRole("checkbox", { name: "Show r3", exact: true }),
-  ).toBeChecked();
+  ).not.toBeChecked();
+  await drawer.getByRole("checkbox", { name: "Show r3", exact: true }).check();
   // Change the shared session from the drawer and navigate back to the real table.
   await addEvent(page, "metrics.loss", "missing");
   await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(1);
@@ -304,7 +306,7 @@ test("Event Tab completion and shared table/drawer filtering never deselect hidd
   await expect(
     (await openMenu(page)).getByLabel("Condition 1 operator", { exact: true }),
   ).toHaveValue("missing");
-  expect(await selected(page)).toEqual([id(2), id(3)].sort());
+  expect(await selected(page)).toEqual([id(3)]);
   const scans = calls.filter((c) => c.path === "/api/rx/run-filter");
   expect(scans.length).toBeGreaterThan(0);
   for (const call of scans) {
@@ -546,7 +548,7 @@ test("accuracy exists and a separately logged config clause share run-level AND/
   await expect(
     page.getByRole("checkbox", { name: "Select r1", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".selection-count")).toHaveText("1 selected");
+  await expect(page.locator(".selection-count")).toHaveText("0 selected");
   await root
     .getByLabel("Combine conditions", { exact: true })
     .selectOption("any");
@@ -556,7 +558,7 @@ test("accuracy exists and a separately logged config clause share run-level AND/
     { path: "metrics.accuracy", op: "exists", value: null },
     { path: "config.optimizer.lr", op: "eq", value: 0.001 },
   ]);
-  expect(await selected(page)).toEqual([id(2)]);
+  expect(await selected(page)).toEqual([]);
 });
 
 test("bounded requests automatically finish and refresh committed event evidence", async ({
@@ -593,7 +595,7 @@ test("bounded requests automatically finish and refresh committed event evidence
   await expect(
     page.getByRole("checkbox", { name: "Select r1", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".selection-count")).toHaveText("1 selected");
+  await expect(page.locator(".selection-count")).toHaveText("0 selected");
   expect(
     calls.filter((c) => c.path === "/api/rx/run-filter")[4].body.cursor,
   ).toBe("scan-page-4");
@@ -604,7 +606,7 @@ test("bounded requests automatically finish and refresh committed event evidence
   await expect(
     page.getByRole("checkbox", { name: "Select r1", exact: true }),
   ).toHaveCount(0);
-  expect(await selected(page)).toEqual([id(3)]);
+  expect(await selected(page)).toEqual([]);
   expect(
     calls.filter((c) => c.path === "/api/rx/run-filter").at(-1)!.body.cursor,
   ).toBeUndefined();
@@ -678,9 +680,10 @@ for (const failure of ["stale cursor", "cursorless replacement"] as const) {
     await expect(menu(page).locator(".run-filter-error")).toBeVisible();
     await menu(page).locator("summary").click();
     await expect(page.locator("tbody tr[data-run-id]")).toHaveCount(0);
-    expect(await selected(page)).toEqual([id(3)]);
+    expect(await selected(page)).toEqual([]);
     await page
-      .getByRole("button", { name: "View charts", exact: true })
+      .getByRole("navigation", { name: "Experiment views" })
+      .getByRole("button", { name: "Charts", exact: true })
       .click();
     if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
       await page.getByLabel("Expand run list", { exact: true }).click();
@@ -689,7 +692,7 @@ for (const failure of ["stale cursor", "cursorless replacement"] as const) {
     await drawer
       .getByRole("button", { name: "Select matching", exact: true })
       .click();
-    expect(await selected(page)).toEqual([id(3)]);
+    expect(await selected(page)).toEqual([]);
     expect(calls.filter((c) => c.path === "/api/rx/run-filter")).toHaveLength(
       5,
     );
@@ -891,7 +894,7 @@ for (const surface of ["table", "drawer"] as const) {
           2,
         ),
       );
-      expect(await selected(page)).toEqual([id(3)]);
+      expect(await selected(page)).toEqual([]);
     } finally {
       release();
     }

@@ -72,9 +72,33 @@ export class RunFilterSession {
     api?: Api,
     private readonly refreshScope?: () => void,
     private readonly onFilterChange?: (filter: RunFilter) => void,
+    private search = { query: "", status: "all" },
+    private readonly onSearchChange?: (search: {
+      query: string;
+      status: string;
+    }) => void,
   ) {
     this.current = structuredClone(filter);
     this.api = api;
+  }
+  get query() {
+    return this.search.query;
+  }
+  get status() {
+    return this.search.status;
+  }
+  get isNarrowed() {
+    return (
+      !!this.query.trim() ||
+      this.status !== "all" ||
+      !!activeConditions(this.current).length
+    );
+  }
+  setSearch(query: string, status: string) {
+    if (query === this.query && status === this.status) return;
+    this.search = { query, status };
+    this.onSearchChange?.(this.search);
+    this.emit();
   }
   get filter() {
     return this.current;
@@ -217,8 +241,21 @@ export class RunFilterSession {
       this.now,
     );
   }
+  /** Shared narrowing predicate; Selected-only is deliberately not included. */
+  selectionResult(run: Run): boolean | null {
+    const query = this.query.trim().toLowerCase();
+    if (
+      (this.status !== "all" && run.status !== this.status) ||
+      (query &&
+        !`${run.name} ${JSON.stringify(run.params)} ${JSON.stringify(run.tags)}`
+          .toLowerCase()
+          .includes(query))
+    )
+      return false;
+    return this.result(run);
+  }
   matches(run: Run) {
-    return this.result(run) === true;
+    return this.selectionResult(run) === true;
   }
   count(filter = this.current) {
     return this.runs.filter((r) => this.result(r, filter) === true).length;
@@ -333,7 +370,7 @@ export class RunFilterSession {
       if (version !== this.generation || abort.signal.aborted) return;
       // Api errors are untyped: conservatively revoke all Event evidence,
       // including cached false/absence proofs, before offering explicit retry.
-      // Native clauses and the views' plotted selections are untouched.
+      // Native clauses still apply; unresolved selections are withheld, not lost.
       clearTimeout(this.timer);
       this.proofs.clear();
       this.sourceGenerations.clear();

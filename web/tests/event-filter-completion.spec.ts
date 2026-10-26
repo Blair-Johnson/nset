@@ -204,7 +204,10 @@ async function addClause(
     await root.getByLabel(`Condition ${n} value`, { exact: true }).fill(value);
 }
 async function drawer(page: Page) {
-  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Experiment views" })
+    .getByRole("button", { name: "Charts", exact: true })
+    .click();
   if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
     await page.getByLabel("Expand run list", { exact: true }).click();
   return page.locator(".run-drawer");
@@ -334,9 +337,7 @@ for (const flow of ["table", "drawer"] as const) {
       ).toBeHidden();
       if (flow === "drawer") {
         expect(await compactGeometry(page)).toEqual(busyGeometry);
-        await expect(page.locator(".drawer-outside-count")).toContainText(
-          "1 outside filters",
-        );
+        await expect(page.locator(".drawer-outside-count")).toBeHidden();
         await page
           .getByRole("navigation", { name: "Experiment views" })
           .getByRole("button", { name: "Runs", exact: true })
@@ -345,7 +346,7 @@ for (const flow of ["table", "drawer"] as const) {
           page.getByRole("checkbox", { name: "Select r1007", exact: true }),
         ).toBeVisible();
       } else {
-        await expect(page.locator(".selection-count")).toHaveText("1 selected");
+        await expect(page.locator(".selection-count")).toHaveText("0 selected");
         await drawer(page);
         await expect(
           page.getByRole("checkbox", { name: "Show r1007", exact: true }),
@@ -360,7 +361,7 @@ for (const flow of ["table", "drawer"] as const) {
           JSON.parse(localStorage.getItem("nset.workspaces.v2")!).views[0]
             .selectedRunIds,
       );
-      expect(saved).toEqual([`${source}:${uid(1)}`]);
+      expect(saved).toEqual([]);
     } finally {
       pending.release();
     }

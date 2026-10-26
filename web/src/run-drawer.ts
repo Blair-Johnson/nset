@@ -77,6 +77,7 @@ export class RunDrawer {
   private readonly clearFilters = this.button("Clear filters", () => {
     this.state.query = this.search.value = "";
     this.state.status = this.status.value = "all";
+    this.session.setSearch("", "all");
     this.session.setFilter(emptyFilter());
     this.filter();
     if (!touchPrimary()) this.search.focus({ preventScroll: true });
@@ -115,7 +116,7 @@ export class RunDrawer {
   constructor(
     private readonly experimentId: string,
     private readonly state: RunDrawerState,
-    private readonly onSelection: (ids: string[]) => void,
+    private readonly onSelection: (ids: string[], clearPending?: boolean) => void,
     onTable: () => void,
     private readonly onDetails: (run: Run) => void,
     session?: RunFilterSession,
@@ -123,8 +124,13 @@ export class RunDrawer {
   ) {
     this.ownsSession = !session;
     this.session = session ?? new RunFilterSession(state.filter);
+    if (!session) this.session.setSearch(state.query, state.status);
+    state.query = this.session.query;
+    state.status = this.session.status;
     this.filterControl = new RunFilterControl(this.session, () => {
       this.state.filter = this.session.filter;
+      this.state.query = this.search.value = this.session.query;
+      this.state.status = this.status.value = this.session.status;
       this.filter();
     });
     this.state.filter = this.session.filter;
@@ -212,7 +218,7 @@ export class RunDrawer {
     this.search.value = state.query;
     this.search.oninput = () => {
       state.query = this.search.value;
-      this.filter();
+      this.session.setSearch(state.query, state.status);
     };
     this.status.setAttribute("aria-label", "Filter chart runs by status");
     for (const value of ["all", "running", "finished", "failed"]) {
@@ -227,7 +233,7 @@ export class RunDrawer {
     this.status.value = state.status;
     this.status.onchange = () => {
       state.status = this.status.value;
-      this.filter();
+      this.session.setSearch(state.query, state.status);
     };
     const actions = element("div", "run-drawer-actions");
     actions.append(
@@ -243,7 +249,7 @@ export class RunDrawer {
           ]),
         ]),
       ),
-      this.button("Clear selection", () => this.onSelection([])),
+      this.button("Clear selection", () => this.onSelection([], true)),
       this.clearFilters,
     );
     this.list.onscroll = () => {
@@ -293,18 +299,9 @@ export class RunDrawer {
     return button;
   }
   private matches() {
-    const query = this.state.query.trim().toLowerCase();
     return [...this.rows.values()]
       .map((row) => row.run)
-      .filter(
-        (run) =>
-          (this.state.status === "all" || run.status === this.state.status) &&
-          this.session.matches(run) &&
-          (!query ||
-            `${run.name} ${JSON.stringify(run.params)} ${JSON.stringify(run.tags)}`
-              .toLowerCase()
-              .includes(query)),
-      );
+      .filter((run) => this.session.matches(run));
   }
   private filter() {
     const matches = new Set(this.matches().map((run) => run.id));
@@ -409,6 +406,9 @@ export class RunDrawer {
       localStorage.setItem(
         preferenceKey(this.experimentId),
         JSON.stringify({
+          ...JSON.parse(
+            localStorage.getItem(preferenceKey(this.experimentId)) ?? "{}",
+          ),
           open: this.state.open,
           width: this.state.width,
           filter: this.session.filter,

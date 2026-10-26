@@ -205,14 +205,19 @@ export function runTable(
   catalog: Catalog,
   experiment: Experiment,
   selectedIds: string[],
-  onSelection: (ids: string[]) => boolean | void,
+  onSelection: (ids: string[], clearPending?: boolean) => boolean | void,
   onCharts: () => void,
   onDetails: (run: Run) => void,
   state = tableState(),
   session?: RunFilterSession,
+  getSelection?: () => string[],
+  hasPendingSelection?: () => boolean,
 ): HTMLElement & { destroy(): void } {
   const host = element("section", "browser-panel");
   const filterSession = session ?? new RunFilterSession();
+  if (!session) filterSession.setSearch(state.query, state.status);
+  state.query = filterSession.query;
+  state.status = filterSession.status;
   let destroyed = false;
   let renderedRows: Run[] = [];
   let renderedPending = false;
@@ -340,7 +345,7 @@ export function runTable(
     "Clear",
     () => {
       selection.clear();
-      changed();
+      changed(true);
     },
     "text-link",
   );
@@ -398,23 +403,17 @@ export function runTable(
   };
   window.addEventListener("resize", fit);
   const fitFrame = requestAnimationFrame(fit);
-  function changed() {
-    if (onSelection([...selection]) === false) selection = new Set(selectedIds);
-    else selectedIds = [...selection];
+  function changed(clearPending = false) {
+    if (onSelection([...selection], clearPending) === false) selection = new Set(selectedIds);
+    else {
+      selectedIds = getSelection?.() ?? [...selection];
+      selection = new Set(selectedIds);
+    }
     render();
   }
   function visible() {
-    const q = state.query.trim().toLowerCase();
     return sort(
-      runs.filter(
-        (r) =>
-          filterSession.matches(r) &&
-          (state.status === "all" || r.status === state.status) &&
-          (!q ||
-            `${r.name} ${JSON.stringify(r.params)} ${JSON.stringify(r.tags)}`
-              .toLowerCase()
-              .includes(q)),
-      ),
+      runs.filter((run) => filterSession.matches(run)),
       state,
     );
   }
@@ -443,7 +442,7 @@ export function runTable(
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
     );
     selected.textContent = `${selection.size} selected`;
-    clear.hidden = !selection.size;
+    clear.hidden = !selection.size && !hasPendingSelection?.();
     chartButton.disabled = !selection.size;
     head.replaceChildren();
     body.replaceChildren();
@@ -582,19 +581,30 @@ export function runTable(
   search.oninput = () => {
     state.query = search.value;
     state.page = 0;
-    render();
+    filterSession.setSearch(state.query, state.status);
   };
   status.onchange = () => {
     state.status = status.value;
     state.page = 0;
-    render();
+    filterSession.setSearch(state.query, state.status);
   };
   const filterControl = new RunFilterControl(filterSession, () => {
     if (destroyed) return;
+    state.query = search.value = filterSession.query;
+    state.status = status.value = filterSession.status;
+    const ids = getSelection?.() ?? [...selection];
+    const selectionChanged =
+      ids.length !== selection.size || ids.some((id) => !selection.has(id));
+    selectedIds = ids;
+    selection = new Set(ids);
+    clear.hidden = !selection.size && !hasPendingSelection?.();
+    selected.title = hasPendingSelection?.()
+      ? "Some selected runs await filter evidence and are not plotted. Clear cancels them too." : "";
     // Scan progress may change without changing any verified matches. Keep the
     // table (and keyboard focus) intact until its actual row set changes.
     const rows = visible();
     if (
+      selectionChanged ||
       filterSession.error !== renderedError ||
       filterSession.pending > 0 !== renderedPending ||
       rows.length !== renderedRows.length ||

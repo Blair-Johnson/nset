@@ -1,4 +1,10 @@
-import { loadRunFilter, saveRunFilter } from "./run-filter-state";
+import {
+  loadRunFilter,
+  saveRunFilter,
+  loadRunSearch,
+  saveRunSearch,
+} from "./run-filter-state";
+import { reconcileRunSelection } from "./run-selection";
 import { uuid } from "./uuid";
 import { appendRxCatalog } from "./records";
 import "./style.css";
@@ -70,8 +76,13 @@ function filterSessionFor(experimentId: string) {
       api,
       () => void connect(true),
       (filter) => saveRunFilter(experimentId, filter),
+      loadRunSearch(experimentId),
+      (search) => saveRunSearch(experimentId, search),
     );
     runFilterSessions.set(experimentId, session);
+    // Subscribe before list controls: they always observe the reconciled IDs.
+    const shared = session;
+    session.subscribe(() => reconcileSelections(experimentId, shared));
   }
   session.setRuns(
     catalog.runs.filter((run) => run.experiment_id === experimentId),
@@ -80,6 +91,35 @@ function filterSessionFor(experimentId: string) {
   );
   if (catalogRefreshing && !session.refreshing) session.invalidate();
   return session;
+}
+let selectionRenderQueued = false;
+function reconcileSelections(experimentId: string, session: RunFilterSession) {
+  let changed = false;
+  for (const workspace of library.views) {
+    if (
+      workspace.experimentId === experimentId &&
+      reconcileRunSelection(workspace, session)
+    ) {
+      workspace.updatedAt = Date.now();
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  try {
+    persist();
+  } catch (e) {
+    error(`Could not save filtered selection: ${message(e)}`);
+  }
+  // Do not rebuild a table or a filter input from inside its own input handler.
+  if (selectionRenderQueued) return;
+  selectionRenderQueued = true;
+  queueMicrotask(() => {
+    selectionRenderQueued = false;
+    const workspace = library.views.find(
+      (view) => view.id === currentWorkspaceId,
+    );
+    if (workspace) renderCharts(workspace);
+  });
 }
 function refreshRunFilterSessions() {
   for (const experimentId of runFilterSessions.keys())
@@ -233,6 +273,11 @@ function navigate(experimentId = "", view = "runs") {
 function openRun(run: Run) {
   navigate(run.experiment_id, `runs/${encodeURIComponent(run.id)}`);
 }
+function chartFollowsSelection(spec: ChartSpec): boolean {
+  return spec.records
+    ? !spec.records.runUids.length
+    : spec.source.mode === "selected";
+}
 function context(workspace: Workspace): CardContext {
   return { api, catalog, selectedRunIds: workspace.selectedRunIds, store };
 }
@@ -274,10 +319,13 @@ function change(
   const before = structuredClone(workspace);
   try {
     mutate();
+    const filters = runFilterSessions.get(workspace.experimentId);
+    if (filters) reconcileRunSelection(workspace, filters);
     workspace.updatedAt = Date.now();
     validateWorkspace(workspace);
     persist();
   } catch (e) {
+    delete workspace.pendingSelectedRunIds;
     Object.assign(workspace, before);
     renderCharts(workspace);
     const failure = new Error(
@@ -300,9 +348,12 @@ function locate(workspace: Workspace, id: string) {
   }
   return null;
 }
-function updateSelection(workspace: Workspace, ids: string[]) {
+function updateSelection(workspace: Workspace, ids: string[], clearPending = false) {
   const saved = change(workspace, () => {
     workspace.selectedRunIds = [...new Set(ids)];
+    // Only an explicit reset cancels intent whose evidence is still unresolved.
+    if (clearPending) delete workspace.pendingSelectedRunIds;
+    reconcileRunSelection(workspace, filterSessionFor(workspace.experimentId));
   });
   return saved;
 }
@@ -388,6 +439,8 @@ function renderPage() {
       return;
     }
     const workspace = workspaceFor(experiment.id);
+    const filters = filterSessionFor(experiment.id);
+    reconcileSelections(experiment.id, filters);
     if (route.view === "detail") {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
@@ -404,7 +457,7 @@ function renderPage() {
             signal: detailRequest.signal,
             onBack: () => navigate(experiment.id),
             onCharts: () => {
-              if (updateSelection(workspace, [run.id]))
+              if (updateSelection(workspace, [run.id], true))
                 navigate(experiment.id, "charts");
             },
             onTags: async (patch) => {
@@ -434,11 +487,13 @@ function renderPage() {
         catalog,
         experiment,
         workspace.selectedRunIds,
-        (ids) => updateSelection(workspace, ids),
+        (ids, clearPending) => updateSelection(workspace, ids, clearPending),
         () => navigate(experiment.id, "charts"),
         openRun,
         runStateFor(experiment.id),
-        filterSessionFor(experiment.id),
+        filters,
+        () => workspace.selectedRunIds,
+        () => !!workspace.pendingSelectedRunIds?.length,
       );
       cleanupRunTable = () => table.destroy();
       table
@@ -504,7 +559,7 @@ function renderPage() {
         runDrawer = new RunDrawer(
           experiment.id,
           drawerState,
-          (ids) => updateSelection(workspace, ids),
+          (ids, clearPending) => updateSelection(workspace, ids, clearPending),
           () => navigate(experiment.id),
           openRun,
           filterSessionFor(experiment.id),
@@ -1212,7 +1267,7 @@ function renderCharts(workspace: Workspace) {
       });
     };
     for (const [cardIndex, spec] of section.cards.entries()) {
-      const contextKey = `${catalogGeneration}:${spec.source.mode === "selected" ? workspace.selectedRunIds.join(",") : "explicit"}`;
+      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? workspace.selectedRunIds.join(",") : "explicit"}`;
       keep.add(spec.id);
       let entry = cards.get(spec.id);
       const serialized = JSON.stringify(spec);
@@ -1371,8 +1426,7 @@ function applyChartFilter(workspace: Workspace) {
           `${section.title} ${spec.title} ${keys.join(" ")}`
             .toLowerCase()
             .includes(query)) &&
-        (spec.source.mode === "explicit" ||
-          workspace.selectedRunIds.length > 0);
+        (!chartFollowsSelection(spec) || workspace.selectedRunIds.length > 0);
       entry.host.hidden = !match;
       entry.view.setActive(match && !section.collapsed);
       if (match) matches++;

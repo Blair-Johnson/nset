@@ -55,6 +55,34 @@ export function restoreRunFilter(value: unknown): RunFilter {
   return { combine: raw.combine, conditions };
 }
 
+export function loadRunSearch(id: string): { query: string; status: string } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(preferenceKey(id)) ?? "{}");
+    return {
+      query: typeof saved?.query === "string" ? saved.query : "",
+      status: ["all", "running", "finished", "failed"].includes(saved?.status)
+        ? saved.status
+        : "all",
+    };
+  } catch {
+    return { query: "", status: "all" };
+  }
+}
+export function saveRunSearch(
+  id: string,
+  search: { query: string; status: string },
+) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(preferenceKey(id)) ?? "{}");
+    localStorage.setItem(
+      preferenceKey(id),
+      JSON.stringify({ ...saved, ...search }),
+    );
+  } catch {
+    /* Preferences are optional. */
+  }
+}
+
 const preferenceKey = (id: string) => `nset.run-pane.${id}`;
 export function loadRunFilter(id: string): RunFilter {
   try {

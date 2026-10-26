@@ -81,6 +81,9 @@ async function fixture(page: Page) {
   await page.locator(".dashboard-cell canvas").first().waitFor();
   if (await page.getByLabel("Expand run list").isVisible())
     await page.getByLabel("Expand run list").click();
+  // Search is now shared with the table; clear it to browse the entire cohort.
+  await page.getByLabel("Find runs", { exact: true }).fill("");
+  await page.getByLabel("Find runs", { exact: true }).blur();
   await expect.poll(() => histories).toBe(12);
   return Object.assign(() => histories, { requests: () => requests });
 }
@@ -94,7 +97,7 @@ async function filters(page: Page) {
 async function capture(page: Page, info: TestInfo, name: string) {
   await page.screenshot({
     path: info.outputPath(`${name}.png`),
-    fullPage: true,
+    fullPage: false,
   });
   const geometry = await page.locator(".run-drawer").evaluate((drawer) => {
     const box = (node: Element) => {
@@ -155,100 +158,45 @@ const savedSelection = (page: Page) =>
   );
 
 for (const width of [1440, 390]) {
-  test(`selected cohort display filters preserve selection and plots at ${width}`, async ({
+  test(`narrowing updates selected cohort and clearing does not restore it at ${width}`, async ({
     page,
   }, info) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
     const histories = await fixture(page);
-    // Zoom before testing display-only controls, including the narrow overlay.
-    await page.getByLabel("Collapse run list").click();
-    await page
-      .getByRole("button", { name: "Zoom in", exact: true })
-      .first()
-      .click();
-    await page.getByLabel("Expand run list").click();
-    const canvas = await page
-      .locator(".dashboard-cell canvas")
-      .first()
-      .elementHandle();
     const check = await choice(page, 0).elementHandle();
-    const swatch = await drawer(page)
-      .locator('[data-run-swatch-id="run-0"] button')
-      .getAttribute("style");
-    const saved = await page.evaluate(() =>
-      localStorage.getItem("nset.workspaces.v2"),
-    );
     const before = histories();
-    const requestsBefore = histories.requests();
-    await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
     await filters(page);
-    await expect(drawer(page).locator(".drawer-outside-count")).toContainText(
-      "9 outside filters",
-    );
-    await expect(drawer(page).locator(".drawer-outside-count")).toHaveAttribute(
-      "aria-label",
-      "12 selected \u00b7 9 outside filters",
-    );
+    await expect(toggle(page)).toHaveText("Selected (3)");
+    await expect(drawer(page).locator(".drawer-outside-count")).toBeHidden();
+    expect((await savedSelection(page)).sort()).toEqual([
+      "run-0",
+      "run-10",
+      "run-20",
+    ]);
     await toggle(page).focus();
     await toggle(page).press("Space");
     await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
     await expect(visibleRows(page)).toHaveCount(3);
     await capture(page, info, `selected-filtered-${width}`);
     await page
-      .getByLabel("Filter chart runs by status")
-      .selectOption("running");
-    await expect(visibleRows(page)).toHaveCount(0);
-    await expect(drawer(page).locator(".drawer-outside-count")).toContainText(
-      "12 outside filters",
-    );
-    await expect(drawer(page).locator(".drawer-empty")).toContainText(
-      "No selected runs match",
-    );
-    await page
       .getByRole("button", { name: "Clear filters", exact: true })
       .click();
     await expect(page.getByLabel("Find runs", { exact: true })).toBeFocused();
-    await expect(page.getByLabel("Find runs", { exact: true })).toHaveValue("");
-    await expect(page.getByLabel("Filter chart runs by status")).toHaveValue(
-      "all",
-    );
-    await expect(visibleRows(page)).toHaveCount(12);
-    await expect(drawer(page).locator(".drawer-outside-count")).toBeHidden();
-    await expect(
-      page.getByRole("button", { name: "Clear filters", exact: true }),
-    ).toHaveCount(0);
+    await expect(visibleRows(page)).toHaveCount(3);
     await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
     await capture(page, info, `selected-cohort-${width}`);
-    expect((await savedSelection(page)).sort()).toEqual(
-      [...selectedIds].sort(),
-    );
-    expect(
-      await page.evaluate(() => localStorage.getItem("nset.workspaces.v2")),
-    ).toBe(saved);
-    expect(histories()).toBe(before);
-    expect(histories.requests()).toBe(requestsBefore);
-    expect(
-      await page
-        .locator(".dashboard-cell canvas")
-        .first()
-        .evaluate((node, old) => node === old, canvas),
-    ).toBe(true);
-    await expect(
-      page.getByRole("button", { name: "Previous view", exact: true }).first(),
-    ).toBeEnabled();
+    expect((await savedSelection(page)).sort()).toEqual([
+      "run-0",
+      "run-10",
+      "run-20",
+    ]);
     expect(
       await choice(page, 0).evaluate((node, old) => node === old, check),
     ).toBe(true);
-    expect(
-      await drawer(page)
-        .locator('[data-run-swatch-id="run-0"] button')
-        .getAttribute("style"),
-    ).toBe(swatch);
     await toggle(page).press("Enter");
     await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
     await expect(visibleRows(page)).toHaveCount(120);
-    expect(histories()).toBe(before);
-    expect(histories.requests()).toBe(requestsBefore);
+    expect(histories()).toBe(before); // Cached histories are reused, but chart scope changed.
   });
 }
 
@@ -310,22 +258,24 @@ test("selected-only storage failure keeps keyed checkbox, focus, counts and scro
   await expect(check).toBeChecked();
   await expect(check).toBeFocused();
   expect(await check.evaluate((node, old) => node === old, handle)).toBe(true);
-  await expect(toggle(page)).toHaveText("Selected (12)");
+  await expect(toggle(page)).toHaveText("Selected (3)");
   await expect(visibleRows(page)).toHaveCount(3);
-  await expect(drawer(page).locator(".drawer-outside-count")).toContainText(
-    "9 outside filters",
-  );
+  await expect(drawer(page).locator(".drawer-outside-count")).toBeHidden();
   await expect(page.locator("#global-error")).toContainText("Storage full");
   expect(
     await drawer(page)
       .locator(".run-drawer-list")
       .evaluate((node) => node.scrollTop),
   ).toBe(scroll);
-  expect((await savedSelection(page)).sort()).toEqual([...selectedIds].sort());
+  expect((await savedSelection(page)).sort()).toEqual([
+    "run-0",
+    "run-10",
+    "run-20",
+  ]);
   expect(histories()).toBe(before);
 });
 
-test("normal mode retains checkbox identity, Space and scroll; matching remains additive", async ({
+test("normal mode retains checkbox identity, Space and scroll; new matching selections exclude previously filtered runs", async ({
   page,
 }) => {
   await fixture(page);
@@ -350,16 +300,12 @@ test("normal mode retains checkbox identity, Space and scroll; matching remains 
     ).toBe(scroll);
   }
   await page.getByLabel("Find runs", { exact: true }).fill("Training 001");
-  await expect(drawer(page).locator(".drawer-outside-count")).toContainText(
-    "12 outside filters",
-  );
+  await expect(toggle(page)).toHaveText("Selected (0)");
   await page
     .getByRole("button", { name: "Select matching", exact: true })
     .click();
-  expect((await savedSelection(page)).sort()).toEqual(
-    [...selectedIds, "run-1"].sort(),
-  );
-  await expect(toggle(page)).toHaveText("Selected (13)");
+  expect((await savedSelection(page)).sort()).toEqual(["run-1"]);
+  await expect(toggle(page)).toHaveText("Selected (1)");
   await page
     .getByRole("button", { name: "Clear selection", exact: true })
     .click();
@@ -401,7 +347,7 @@ for (const width of [1440, 390]) {
 }
 
 for (const width of [1440, 390]) {
-  test(`inspect and remove hidden baseline in selected cohort at ${width}`, async ({
+  test(`inspect and remove retained baseline after narrowing at ${width}`, async ({
     page,
   }, info) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
@@ -411,27 +357,25 @@ for (const width of [1440, 390]) {
     await toggle(page).click();
     steps++;
     await expect(visibleRows(page)).toHaveCount(3);
-    await expect(drawer(page).locator(".drawer-outside-count")).toContainText(
-      "9 outside filters",
-    );
-    expect((await savedSelection(page)).sort()).toEqual(
-      [...selectedIds].sort(),
-    );
+    await expect(drawer(page).locator(".drawer-outside-count")).toBeHidden();
+    expect((await savedSelection(page)).sort()).toEqual([
+      "run-0",
+      "run-10",
+      "run-20",
+    ]);
     await page
       .getByRole("button", { name: "Clear filters", exact: true })
       .click();
     steps++;
     const inspectRows = await visibleRows(page).count();
-    expect(inspectRows).toBe(12);
-    await choice(page, 100).focus();
-    await choice(page, 100).press("Space");
+    expect(inspectRows).toBe(3);
+    await choice(page, 10).focus();
+    await choice(page, 10).press("Space");
     steps++;
-    await expect(choice(page, 90)).toBeFocused();
-    await expect(visibleRows(page)).toHaveCount(11);
-    await expect(toggle(page)).toHaveText("Selected (11)");
-    expect((await savedSelection(page)).sort()).toEqual(
-      selectedIds.filter((id) => id !== "run-100").sort(),
-    );
+    await expect(choice(page, 0)).toBeFocused();
+    await expect(visibleRows(page)).toHaveCount(2);
+    await expect(toggle(page)).toHaveText("Selected (2)");
+    expect((await savedSelection(page)).sort()).toEqual(["run-0", "run-20"]);
     await capture(page, info, `after-removal-${width}`);
     await writeFile(
       info.outputPath("workflow.json"),
@@ -441,7 +385,7 @@ for (const width of [1440, 390]) {
           width,
           steps,
           inspectRows,
-          remainingSelected: 11,
+          remainingSelected: 2,
           caveat:
             "Three deliberate control activations, excluding pointing/focus and scan time; not a human timing study.",
         },
@@ -456,7 +400,9 @@ for (const width of [1440, 390]) {
 test.describe("mobile drawer focus", () => {
   test.use({ hasTouch: true });
   for (const width of [390, 1024]) {
-    test(`opening and reopening never autofocuses search at ${width}`, async ({ page }) => {
+    test(`opening and reopening never autofocuses search at ${width}`, async ({
+      page,
+    }) => {
       await page.setViewportSize({ width, height: 900 });
       await fixture(page);
       const search = page.getByLabel("Find runs", { exact: true });
@@ -474,7 +420,9 @@ test.describe("mobile drawer focus", () => {
       await expect(close).toBeFocused();
       await expect(search).not.toBeFocused();
       await expect(search).toHaveValue("Baseline");
-      await page.getByRole("button", { name: "Clear filters", exact: true }).tap();
+      await page
+        .getByRole("button", { name: "Clear filters", exact: true })
+        .tap();
       await expect(search).not.toBeFocused();
       await search.tap();
       await expect(search).toBeFocused();

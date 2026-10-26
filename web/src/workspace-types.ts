@@ -72,6 +72,8 @@ export interface Workspace {
   name: string;
   experimentId: string;
   selectedRunIds: string[];
+  /** Selected intent withheld until Event/filter evidence resolves. Never plotted. */
+  pendingSelectedRunIds?: string[];
   sections: Section[];
   updatedAt: number;
 }

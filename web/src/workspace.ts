@@ -352,6 +352,7 @@ export function validateWorkspace(value: unknown): Workspace {
     "name",
     "experimentId",
     "selectedRunIds",
+    "pendingSelectedRunIds",
     "sections",
     "updatedAt",
   ]);
@@ -384,13 +385,18 @@ export function validateWorkspace(value: unknown): Workspace {
     "chart identity",
   );
   const selectedRunIds = array(v.selectedRunIds, 4096).map(id);
-  distinct(selectedRunIds, "selected run");
+  const pendingSelectedRunIds =
+    v.pendingSelectedRunIds === undefined
+      ? []
+      : array(v.pendingSelectedRunIds, 4096).map(id);
+  distinct([...selectedRunIds, ...pendingSelectedRunIds], "selected run");
   return {
     version: 2,
     id: id(v.id),
     name: text(v.name, "view name", 256),
     experimentId: id(v.experimentId),
     selectedRunIds,
+    ...(pendingSelectedRunIds.length ? { pendingSelectedRunIds } : {}),
     sections,
     updatedAt: v.updatedAt,
   };
