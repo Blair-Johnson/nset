@@ -3,6 +3,13 @@ import { uuid } from "./uuid";
 import { appendRxCatalog } from "./records";
 import "./style.css";
 import { Api, type Run } from "./api";
+import {
+  ServerWorkspace,
+  fetchServerView,
+  listServerViews,
+  referencedRunIds,
+  type ServerViewSummary,
+} from "./server-workspaces";
 import { element, message, isAbort } from "./utils";
 import { fetchCatalog, MetricStore } from "./catalog";
 import {
@@ -55,6 +62,217 @@ let request: AbortController | undefined;
 let connected = false;
 let catalogRefreshing = false;
 let currentWorkspaceId = "";
+let serverViews: ServerViewSummary[] = [];
+let serverWorkspace: ServerWorkspace | undefined;
+const serverWorkspaceObjects = new WeakSet<Workspace>();
+let serverLoad: AbortController | undefined;
+let serverLoadId = "";
+let viewGeneration = 0;
+let serverPoll: AbortController | undefined;
+let serverPollTimer: ReturnType<typeof setTimeout> | undefined;
+function stopServerPoll() {
+  clearTimeout(serverPollTimer);
+  serverPollTimer = undefined;
+  serverPoll?.abort();
+  serverPoll = undefined;
+}
+function disposeServerView() {
+  viewGeneration++;
+  serverLoad?.abort();
+  serverLoad = undefined;
+  serverLoadId = "";
+  serverWorkspace?.dispose();
+  serverWorkspace = undefined;
+  stopServerPoll();
+}
+async function refreshServerCatalog(workspace: Workspace, signal: AbortSignal) {
+  if (
+    catalog.experiments.some((e) => e.id === workspace.experimentId) &&
+    referencedRunIds(workspace).every((id) =>
+      catalog.runs.some((r) => r.id === id),
+    )
+  )
+    return;
+  const generation = catalogGeneration,
+    view = viewGeneration,
+    route = location.hash;
+  const next = await fetchCatalog(api, signal);
+  if (
+    signal.aborted ||
+    !connected ||
+    generation !== catalogGeneration ||
+    view !== viewGeneration ||
+    route !== location.hash
+  )
+    return;
+  catalog = next;
+  catalogGeneration++;
+  store.clear();
+  refreshRunFilterSessions();
+  if (catalog.rx?.error) error(catalog.rx.error);
+}
+function scheduleServerPoll() {
+  if (!connected || document.hidden || serverPoll || serverPollTimer) return;
+  serverPollTimer = setTimeout(() => {
+    serverPollTimer = undefined;
+    void pollServerViews();
+  }, 3000);
+}
+async function pollServerViews() {
+  if (!connected || document.hidden || serverPoll) return;
+  clearTimeout(serverPollTimer);
+  serverPollTimer = undefined;
+  const controller = (serverPoll = new AbortController());
+  const generation = viewGeneration,
+    active = serverWorkspace,
+    route = location.hash;
+  const valid = () =>
+    !controller.signal.aborted &&
+    connected &&
+    generation === viewGeneration &&
+    location.hash === route;
+  try {
+    const views = await listServerViews(api, controller.signal);
+    if (!valid()) return;
+    const changed = JSON.stringify(views) !== JSON.stringify(serverViews);
+    serverViews = views;
+    let adopted = false;
+    const previousCatalog = catalogGeneration;
+    const previousExperiment = active?.workspace.experimentId;
+    if (active) {
+      adopted = await active.poll(controller.signal, () => !activeEditor);
+      if (!valid()) return;
+      // Retry missing catalog references even after a transient catalog failure.
+      await refreshServerCatalog(active.workspace, controller.signal);
+      if (!valid()) return;
+    }
+    if ((adopted || previousCatalog !== catalogGeneration) && active) {
+      if (adopted) undo.delete(active.workspace.id);
+      if (previousExperiment !== active.workspace.experimentId) {
+        disposeCards();
+        renderPage();
+      } else renderCharts(active.workspace);
+    } else if (
+      changed &&
+      currentWorkspaceId &&
+      currentRoute().view === "charts"
+    ) {
+      const workspace =
+        active?.workspace ??
+        library.views.find((v) => v.id === currentWorkspaceId);
+      if (workspace) workspaceToolbar(workspace);
+    }
+  } catch (e) {
+    if (valid() && !isAbort(e)) {
+      if (active) renderCharts(active.workspace);
+      error(`Could not refresh server views: ${message(e)}`);
+    }
+  } finally {
+    if (serverPoll === controller) {
+      serverPoll = undefined;
+      scheduleServerPoll();
+    }
+  }
+}
+function loadServerRoute(id: string) {
+  if (serverLoadId === id) return;
+  serverLoad?.abort();
+  const controller = (serverLoad = new AbortController());
+  serverLoadId = id;
+  const generation = viewGeneration;
+  void (async () => {
+    try {
+      const latest = await fetchServerView(api, id, controller.signal);
+      if (
+        controller.signal.aborted ||
+        generation !== viewGeneration ||
+        !connected ||
+        currentRoute().serverId !== id
+      )
+        return;
+      if (!latest) throw new Error("Server did not return this view.");
+      const state = new ServerWorkspace(
+        api,
+        latest,
+        localStorage,
+        () =>
+          connected &&
+          generation === viewGeneration &&
+          currentRoute().serverId === id,
+      );
+      await refreshServerCatalog(state.workspace, controller.signal);
+      if (
+        controller.signal.aborted ||
+        generation !== viewGeneration ||
+        !connected ||
+        currentRoute().serverId !== id
+      ) {
+        state.dispose();
+        return;
+      }
+      serverWorkspace = state;
+      serverWorkspaceObjects.add(state.workspace);
+      renderPage();
+    } catch (e) {
+      if (
+        !controller.signal.aborted &&
+        generation === viewGeneration &&
+        currentRoute().serverId === id &&
+        !isAbort(e)
+      ) {
+        error(`Could not open server view: ${message(e)}`);
+        $("page").replaceChildren(
+          button("Retry server view", () => {
+            serverLoadId = "";
+            renderPage();
+          }),
+        );
+      }
+    } finally {
+      if (serverLoad === controller) serverLoad = undefined;
+    }
+  })();
+}
+async function serverAction(
+  state: ServerWorkspace,
+  operation: () => Promise<unknown>,
+) {
+  const generation = viewGeneration,
+    route = location.hash;
+  const previousExperiment = state.workspace.experimentId;
+  const valid = () =>
+    connected &&
+    generation === viewGeneration &&
+    state === serverWorkspace &&
+    route === location.hash;
+  try {
+    const result = operation();
+    workspaceToolbar(state.workspace);
+    await result;
+    if (!valid()) return;
+    error();
+    if (!state.dirty) undo.delete(state.workspace.id);
+    await refreshServerCatalog(state.workspace, new AbortController().signal);
+  } catch (e) {
+    if (valid() && !isAbort(e)) error(message(e));
+  } finally {
+    if (valid()) {
+      if (previousExperiment !== state.workspace.experimentId) {
+        disposeCards();
+        renderPage();
+      } else renderCharts(state.workspace);
+    }
+  }
+}
+function saveView(workspace: Workspace) {
+  if (serverWorkspace?.workspace === workspace) {
+    const state = serverWorkspace;
+    void serverAction(state, () => state.save());
+  } else {
+    markSaved(workspace);
+    workspaceToolbar(workspace);
+  }
+}
 let chartSearch = "";
 let activeEditor: { close: () => void } | undefined;
 const experimentState = tableState();
@@ -159,6 +377,7 @@ function baselineFor(workspace: Workspace): string {
   return baselines[workspace.id];
 }
 function isModified(workspace: Workspace) {
+  if (serverWorkspace?.workspace === workspace) return serverWorkspace.dirty;
   return baselineFor(workspace) !== layoutKey(workspace);
 }
 function markSaved(workspace: Workspace) {
@@ -211,7 +430,20 @@ function suspendDashboard() {
 }
 function currentRoute() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
+  const serverId =
+    parts[0] === "views" && parts[1] ? decodeURIComponent(parts[1]) : "";
+  if (serverId)
+    return {
+      serverId,
+      experimentId:
+        serverWorkspace?.workspace.id === serverId
+          ? serverWorkspace.workspace.experimentId
+          : "",
+      view: "charts",
+      runId: "",
+    };
   return {
+    serverId: "",
     experimentId:
       parts[0] === "experiments" && parts[1]
         ? decodeURIComponent(parts[1])
@@ -271,12 +503,20 @@ function change(
   strict = false,
   render = true,
 ): boolean {
+  if (
+    serverWorkspaceObjects.has(workspace) &&
+    serverWorkspace?.workspace !== workspace
+  ) {
+    if (strict) throw new Error("This server view is no longer active.");
+    return false;
+  }
   const before = structuredClone(workspace);
   try {
     mutate();
     workspace.updatedAt = Date.now();
     validateWorkspace(workspace);
-    persist();
+    if (serverWorkspace?.workspace === workspace) serverWorkspace.edited();
+    else persist();
   } catch (e) {
     Object.assign(workspace, before);
     renderCharts(workspace);
@@ -360,6 +600,14 @@ function renderPage() {
   activeEditor = undefined;
   if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
   const route = currentRoute();
+  scheduleServerPoll();
+  if (route.serverId && serverWorkspace?.workspace.id !== route.serverId) {
+    disposeCards();
+    pageHeader("", "");
+    $("page").replaceChildren(element("p", "muted", "Loading server view…"));
+    loadServerRoute(route.serverId);
+    return;
+  }
   for (const [id, session] of runFilterSessions) {
     session.setActive(false);
     if (id === route.experimentId && route.view !== "detail")
@@ -387,7 +635,9 @@ function renderPage() {
       );
       return;
     }
-    const workspace = workspaceFor(experiment.id);
+    const workspace = route.serverId
+      ? serverWorkspace!.workspace
+      : workspaceFor(experiment.id);
     if (route.view === "detail") {
       if (currentWorkspaceId && currentWorkspaceId !== workspace.id)
         disposeCards();
@@ -531,6 +781,7 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
     isNew: add,
     camera: add ? undefined : cards.get(card.id)?.view.camera(),
     onClose: () => {
+      activeEditor = undefined;
       const trigger = add
         ? document.querySelector<HTMLElement>(
             "details[data-menu=add] > summary",
@@ -545,7 +796,10 @@ function editCard(workspace: Workspace, card: ChartSpec, add = false) {
     api,
     store,
     onSave: (next, camera) => {
-      const current = library.views.find((v) => v.id === workspace.id);
+      const current =
+        serverWorkspace?.workspace === workspace
+          ? workspace
+          : library.views.find((v) => v.id === workspace.id);
       if (!current) throw new Error("This view is no longer available.");
       change(
         current,
@@ -679,10 +933,25 @@ function workspaceToolbar(workspace: Workspace) {
   const views = element("select");
   views.id = "view-select";
   views.setAttribute("aria-label", "Saved view");
-  for (const view of library.views.filter(
+  const shared = serverWorkspace?.workspace === workspace;
+  const availableViews = [
+    ...library.views.map((v) => ({ ...v, server: false })),
+    ...serverViews.map((v) => ({ ...v, server: true })),
+  ];
+  if (shared && !availableViews.some((v) => v.server && v.id === workspace.id))
+    availableViews.push({
+      ...workspace,
+      revision: serverWorkspace!.revision,
+      server: true,
+    });
+  for (const view of availableViews.filter(
     (v) => v.experimentId === workspace.experimentId,
   )) {
-    const o = element("option", "", view.name);
+    const name =
+      view.id === workspace.id && view.server === shared
+        ? workspace.name
+        : view.name;
+    const o = element("option", "", `${name}${view.server ? " · Server" : ""}`);
     o.value = view.id;
     views.append(o);
   }
@@ -690,12 +959,20 @@ function workspaceToolbar(workspace: Workspace) {
   views.onchange = () => {
     scrollPositions.set(workspace.id, window.scrollY);
     if (
+      serverViews.some((v) => v.id === views.value) ||
+      (shared && views.value === workspace.id)
+    ) {
+      location.hash = `/views/${encodeURIComponent(views.value)}`;
+      return;
+    }
+    if (
       !commitLibrary(() => {
         library.activeByExperiment[workspace.experimentId] = views.value;
       })
     )
       return;
-    renderPage();
+    if (shared) navigate(workspace.experimentId, "charts");
+    else renderPage();
     requestAnimationFrame(() =>
       window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
     );
@@ -749,26 +1026,43 @@ function workspaceToolbar(workspace: Workspace) {
         fn();
       }),
     );
-  action("Save changes", () => {
-    markSaved(workspace);
-    workspaceToolbar(workspace);
-  });
+  action("Save changes", () => saveView(workspace));
   action(
     "Save view as…",
     () =>
       void (async () => {
+        const generation = viewGeneration;
+        const state = shared ? serverWorkspace : undefined;
         const name = await ask(
           "Save view as",
           "View name",
           `${workspace.name} copy`,
         );
-        if (!name) return;
+        if (!name || generation !== viewGeneration || !connected) return;
         if (
           library.views.some(
             (v) => v.experimentId === workspace.experimentId && v.name === name,
           )
         ) {
           error("A view with that name already exists.");
+          return;
+        }
+        if (state) {
+          let copied = false;
+          await serverAction(state, () =>
+            state.saveAsLocal(name, (copy) => {
+              if (generation !== viewGeneration || state !== serverWorkspace)
+                return false;
+              copied = commitLibrary(() => {
+                library.views.push(copy);
+                library.activeByExperiment[copy.experimentId] = copy.id;
+              });
+              if (copied) markSaved(copy);
+              return copied;
+            }),
+          );
+          if (copied && generation === viewGeneration)
+            navigate(workspace.experimentId, "charts");
           return;
         }
         // The new view takes the current (possibly modified) layout; the
@@ -792,6 +1086,11 @@ function workspaceToolbar(workspace: Workspace) {
       })(),
   );
   action("Revert to saved", () => {
+    if (shared) {
+      const state = serverWorkspace!;
+      void serverAction(state, () => state.revert());
+      return;
+    }
     const saved = baselineFor(workspace);
     change(workspace, () => {
       workspace.sections = JSON.parse(saved);
@@ -800,7 +1099,7 @@ function workspaceToolbar(workspace: Workspace) {
   const modified = isModified(workspace);
   for (const b of menu.querySelectorAll<HTMLButtonElement>("button"))
     if (b.textContent === "Save changes" || b.textContent === "Revert to saved")
-      b.disabled = !modified;
+      b.disabled = !modified || (shared && serverWorkspace!.busy);
   action(
     "Rename view",
     () =>
@@ -863,7 +1162,10 @@ function workspaceToolbar(workspace: Workspace) {
         })
       )
         return;
-      if (currentRoute().experimentId === imported.experimentId) {
+      if (
+        !currentRoute().serverId &&
+        currentRoute().experimentId === imported.experimentId
+      ) {
         renderPage();
       } else navigate(imported.experimentId, "charts");
     } catch (e) {
@@ -876,30 +1178,33 @@ function workspaceToolbar(workspace: Workspace) {
   action("Add missing metric charts", () =>
     change(workspace, () => addMissingCharts(workspace, catalog)),
   );
-  action(
-    "Remove view",
-    () =>
-      void (async () => {
-        if (
-          !(await confirmRemoval(
-            "Remove view?",
-            `Remove “${workspace.name}”? Experiment data will not be deleted.`,
-          ))
-        )
-          return;
-        if (
-          commitLibrary(() => {
-            library.views = library.views.filter((v) => v.id !== workspace.id);
-            delete library.activeByExperiment[workspace.experimentId];
-            workspaceFor(workspace.experimentId);
-          })
-        ) {
-          delete baselines[workspace.id];
-          saveBaselines();
-          renderPage();
-        }
-      })(),
-  );
+  if (!shared)
+    action(
+      "Remove view",
+      () =>
+        void (async () => {
+          if (
+            !(await confirmRemoval(
+              "Remove view?",
+              `Remove “${workspace.name}”? Experiment data will not be deleted.`,
+            ))
+          )
+            return;
+          if (
+            commitLibrary(() => {
+              library.views = library.views.filter(
+                (v) => v.id !== workspace.id,
+              );
+              delete library.activeByExperiment[workspace.experimentId];
+              workspaceFor(workspace.experimentId);
+            })
+          ) {
+            delete baselines[workspace.id];
+            saveBaselines();
+            renderPage();
+          }
+        })(),
+    );
   more.append(menu, file);
   const undoButton = button("Undo", () => {
     const stack = undo.get(workspace.id);
@@ -923,7 +1228,11 @@ function workspaceToolbar(workspace: Workspace) {
     views.setAttribute("aria-description", description);
     viewControl.append(viewLabel, views);
   } else {
-    const name = element("span", "workspace-view-name", workspace.name);
+    const name = element(
+      "span",
+      "workspace-view-name",
+      `${workspace.name}${shared ? " · Server" : ""}`,
+    );
     name.title = workspace.name;
     name.setAttribute("aria-description", description);
     viewControl.append(viewLabel, name);
@@ -934,16 +1243,10 @@ function workspaceToolbar(workspace: Workspace) {
   marker.id = "view-modified";
   marker.dataset.viewId = workspace.id;
   marker.title =
-    "This view's layout differs from its saved version. Save, revert (⋯), or save as a new view.";
-  const saveNow = button(
-    "Save",
-    () => {
-      markSaved(workspace);
-      workspaceToolbar(workspace);
-    },
-    "text-link",
-  );
+    "This view differs from its saved version. Save, revert (⋯), or save as a new view.";
+  const saveNow = button("Save", () => saveView(workspace), "text-link");
   saveNow.setAttribute("aria-label", "Save view changes");
+  saveNow.disabled = shared && serverWorkspace!.busy;
   marker.append(element("span", "view-modified-dot", "Modified"), saveNow);
   marker.hidden = !isModified(workspace);
   viewControl.append(marker);
@@ -1410,6 +1713,7 @@ function applyChartFilter(workspace: Workspace) {
 }
 
 async function connect(refresh = false) {
+  stopServerPoll();
   catalogRefreshing = true;
   for (const session of runFilterSessions.values()) session.invalidate();
   const generation = ++catalogGeneration;
@@ -1437,9 +1741,13 @@ async function connect(refresh = false) {
     $<HTMLDialogElement>("login-dialog").close();
     $<HTMLButtonElement>("logout").disabled = false;
     if (refresh && currentRoute().view === "charts" && currentWorkspaceId) {
-      const workspace = workspaceFor(currentRoute().experimentId);
+      const workspace =
+        currentRoute().serverId && serverWorkspace
+          ? serverWorkspace.workspace
+          : workspaceFor(currentRoute().experimentId);
       renderCharts(workspace);
     } else renderPage();
+    void pollServerViews();
     if (catalog.rx?.error) error(catalog.rx.error);
   } catch (e) {
     if (isAbort(e) || generation !== catalogGeneration) return;
@@ -1457,6 +1765,7 @@ async function connect(refresh = false) {
     if (generation === catalogGeneration) {
       submit.disabled = false;
       $<HTMLButtonElement>("refresh").disabled = !connected;
+      scheduleServerPoll();
     }
   }
 }
@@ -1470,6 +1779,8 @@ $("login-form").onsubmit = (e) => {
 };
 $("refresh").onclick = () => void connect(true);
 $("logout").onclick = () => {
+  disposeServerView();
+  serverViews = [];
   detailRequest?.abort();
   detailRequest = undefined;
   catalogGeneration++;
@@ -1503,6 +1814,7 @@ window.addEventListener("nset:run-colors-changed", () => {
   for (const card of cards.values()) card.view.refreshColors();
 });
 window.addEventListener("hashchange", () => {
+  disposeServerView();
   try {
     renderPage();
   } catch (e) {
@@ -1531,7 +1843,12 @@ document.addEventListener(
   },
   true,
 );
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopServerPoll();
+  else if (connected) void pollServerViews();
+});
 window.addEventListener("beforeunload", () => {
+  disposeServerView();
   detailRequest?.abort();
   detailRequest = undefined;
   request?.abort();

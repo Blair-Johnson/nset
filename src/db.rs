@@ -17,7 +17,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
@@ -288,6 +288,30 @@ fn preflight_schema(connection: &Connection) -> Result<i64> {
             require_unique(connection, table, keys)?;
         }
     }
+    if version >= 4 {
+        require_table(
+            connection,
+            "views",
+            "id,name,experiment_id,revision,updated_at,workspace",
+            &["id"],
+            false,
+        )?;
+        require_unique(connection, "views", &["id"])?;
+    } else {
+        // CREATE TABLE shares its case-insensitive namespace with tables, views
+        // and indexes. Reject migration collisions before persistent PRAGMAs;
+        // rolling back the later DDL would not undo a journal-mode change.
+        let collision: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name = 'views' COLLATE NOCASE AND type IN ('table','view','index'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if collision {
+            return Err(ApiError::internal(
+                "schema migration destination views already exists",
+            ));
+        }
+    }
     Ok(version)
 }
 
@@ -332,6 +356,17 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
                 run_id TEXT NOT NULL REFERENCES runs(id), batch_id TEXT NOT NULL,
                 scheme TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32),
                 PRIMARY KEY(run_id,batch_id));",
+        )?;
+    }
+    if version < 4 {
+        // A view can refer to rx/synthetic sources: deliberately no experiment FK.
+        tx.execute_batch(
+            "CREATE TABLE views(
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL, experiment_id TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991),
+                updated_at INTEGER NOT NULL CHECK(updated_at BETWEEN 0 AND 9007199254740991),
+                workspace TEXT NOT NULL);",
         )?;
     }
     if version < SCHEMA_VERSION {
@@ -463,6 +498,91 @@ impl Database {
 
     fn reader(&self) -> &Actor {
         &self.readers[self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len()]
+    }
+    pub(crate) async fn create_view(
+        &self,
+        mut workspace: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        crate::views::validate_workspace(&workspace)?;
+        self.writer.call(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let count: i64 = tx.query_row("SELECT count(*) FROM views", [], |row| row.get(0))?;
+            if count >= crate::views::MAX_VIEWS {
+                return Err(ApiError(axum::http::StatusCode::CONFLICT, "saved view limit reached (128)"));
+            }
+            let id = format!("server:{}", Uuid::new_v4());
+            let time = now();
+            workspace["id"] = serde_json::json!(id);
+            workspace["updatedAt"] = serde_json::json!(time);
+            // Server-assigned metadata must not push a near-limit input past the client limits.
+            crate::views::validate_workspace(&workspace)?;
+            let raw = serde_json::to_string(&workspace).map_err(ApiError::internal)?;
+            tx.execute("INSERT INTO views(id,name,experiment_id,revision,updated_at,workspace) VALUES(?,?,?,1,?,?)",
+                params![id, workspace["name"].as_str().unwrap(), workspace["experimentId"].as_str().unwrap(), time, raw])?;
+            tx.commit()?;
+            Ok(serde_json::json!({"id": id, "revision": 1, "workspace": workspace}))
+        }).await
+    }
+
+    pub(crate) async fn views(&self) -> Result<Vec<serde_json::Value>> {
+        self.reader().call(|conn| {
+            // Admission bounds the entire collection; never silently hide rows with LIMIT.
+            Ok(conn.prepare("SELECT id,name,experiment_id,revision,updated_at FROM views ORDER BY updated_at DESC,id")?
+                .query_map([], |row| Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)?,
+                    "experimentId": row.get::<_, String>(2)?, "revision": row.get::<_, i64>(3)?,
+                    "updatedAt": row.get::<_, i64>(4)?
+                })))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        }).await
+    }
+
+    pub(crate) async fn view(
+        &self,
+        id: String,
+        revision: Option<i64>,
+    ) -> Result<Option<serde_json::Value>> {
+        self.reader().call(move |conn| {
+            // One SQLite snapshot, without fetching/deserializing the blob for unchanged polls.
+            let row: Option<(i64, Option<String>)> = conn.query_row(
+                "SELECT revision,CASE WHEN revision=? THEN NULL ELSE workspace END FROM views WHERE id=?",
+                params![revision, id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            let (revision, raw) = row.ok_or_else(ApiError::missing)?;
+            raw.map(|raw| {
+                let workspace: serde_json::Value = serde_json::from_str(&raw).map_err(ApiError::internal)?;
+                Ok(serde_json::json!({"id": id, "revision": revision, "workspace": workspace}))
+            }).transpose()
+        }).await
+    }
+
+    pub(crate) async fn update_view(
+        &self,
+        id: String,
+        revision: i64,
+        mut workspace: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        crate::views::validate_workspace(&workspace)?;
+        if workspace["id"].as_str() != Some(id.as_str()) {
+            return Err(ApiError::bad("workspace id must match view id"));
+        }
+        self.writer.call(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.query_row("SELECT revision FROM views WHERE id=?", [&id], |row| row.get(0)).optional()?.ok_or_else(ApiError::missing)?;
+            if current != revision || current >= MAX_SAFE {
+                return Err(ApiError(axum::http::StatusCode::CONFLICT, "view revision conflict"));
+            }
+            let time = now();
+            workspace["updatedAt"] = serde_json::json!(time);
+            crate::views::validate_workspace(&workspace)?;
+            let raw = serde_json::to_string(&workspace).map_err(ApiError::internal)?;
+            let next = current + 1;
+            let changed = tx.execute("UPDATE views SET name=?,experiment_id=?,revision=?,updated_at=?,workspace=? WHERE id=? AND revision=?",
+                params![workspace["name"].as_str().unwrap(), workspace["experimentId"].as_str().unwrap(), next, time, raw, id, revision])?;
+            if changed != 1 {
+                return Err(ApiError(axum::http::StatusCode::CONFLICT, "view revision conflict"));
+            }
+            tx.commit()?;
+            Ok(serde_json::json!({"id": id, "revision": next, "workspace": workspace}))
+        }).await
     }
     // Typed compatibility operations retain actor queue bounds and FULL/WAL durability.
     pub(crate) async fn compat_get(

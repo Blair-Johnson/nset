@@ -9,6 +9,8 @@ pub mod errors;
 pub mod ingest;
 pub mod models;
 pub mod rx;
+mod view_config;
+mod views;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
 #[derive(Clone)]
