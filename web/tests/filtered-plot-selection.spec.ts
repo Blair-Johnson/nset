@@ -543,3 +543,34 @@ test("the main table can explicitly clear pending-only selection", async ({ page
   await drawer(page).getByRole("button", { name: "Clear filters", exact: true }).click();
   await expectSelection(page, "rx", []);
 });
+
+for (const restorePending of [false, true]) {
+  test(`Undo ${restorePending ? "restores cleared pending intent" : "removes pending intent absent from its snapshot"}`, async ({ page }) => {
+    const state = await fixture(page, "rx");
+    if (!restorePending) {
+      await drawer(page).getByRole("button", { name: "Clear selection", exact: true }).click();
+      await drawer(page).getByRole("checkbox", { name: "Show r1", exact: true }).check();
+      await expectSelection(page, "rx", [1]);
+    }
+    state.mode = "hold";
+    try {
+      const menu = await presence(page, "event");
+      await expect.poll(() => state.scans).toBeGreaterThan(0);
+      await expectSelection(page, "rx", [], restorePending ? [1, 2, 3] : [1]);
+      await menu.locator("summary").click();
+      if (restorePending) {
+        await drawer(page).getByRole("button", { name: "Clear selection", exact: true }).click();
+        await expectSelection(page, "rx", []);
+      }
+      await page.getByRole("button", { name: "Undo", exact: true }).click();
+      await expectSelection(page, "rx", [], restorePending ? [1, 2, 3] : []);
+      state.release();
+      await expect(page.locator(".run-filter-control:visible")).toHaveAttribute("aria-busy", "false");
+      await expectSelection(page, "rx", restorePending ? [1, 2] : []);
+      await (await openFilter(page)).getByRole("button", { name: "Clear all", exact: true }).click();
+      await expectSelection(page, "rx", restorePending ? [1, 2] : []);
+    } finally {
+      state.release();
+    }
+  });
+}

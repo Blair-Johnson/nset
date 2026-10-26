@@ -961,7 +961,10 @@ function workspaceToolbar(workspace: Workspace) {
     const previous = stack?.at(-1);
     if (
       previous &&
-      change(workspace, () => Object.assign(workspace, previous), false, false)
+      change(workspace, () => {
+        delete workspace.pendingSelectedRunIds;
+        Object.assign(workspace, previous);
+      }, false, false)
     ) {
       stack!.splice(-2);
       renderCharts(workspace);
