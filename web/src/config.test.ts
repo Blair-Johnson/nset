@@ -694,3 +694,47 @@ test("all X axes round-trip in v1 configs without changing legacy smoothing", ()
   for (const axis of ["elapsed", "wall", "", null])
     assert.throws(() => validateConfig({ axis }), /axis/);
 });
+
+test("JSON safety validates each shared object once without expanding all paths", () => {
+  let shared: object = {};
+  for (let i = 0; i < 12; i++) shared = { left: shared, right: shared };
+  const inspect = Object.getOwnPropertyDescriptors;
+  let visits = 0;
+  Object.getOwnPropertyDescriptors = ((value: object) => {
+    visits++;
+    return inspect(value);
+  }) as typeof inspect;
+  try {
+    assertSafe(shared);
+  } finally {
+    Object.getOwnPropertyDescriptors = inspect;
+  }
+  assert.equal(visits, 13);
+  const invalid = { value: NaN };
+  assert.throws(() => assertSafe({ left: invalid, right: invalid }), /finite/);
+});
+
+test("deep merge reads the copied base, not inherited or hidden properties", () => {
+  const patch = { nested: { added: 2 } };
+  assert.deepEqual(deepMerge(Object.create({ nested: { keep: 1 } }), patch), patch);
+  const hidden = Object.defineProperty({}, "nested", { value: { keep: 1 } });
+  assert.deepEqual(deepMerge(hidden, patch), patch);
+  let reads = 0;
+  const base = {
+    get nested() {
+      reads++;
+      return { keep: reads };
+    },
+  };
+  assert.deepEqual(deepMerge(base, patch), { nested: { keep: 1, added: 2 } });
+  assert.equal(reads, 1);
+  let axisReads = 0;
+  const axes = Object.defineProperty([], "0", {
+    enumerable: true,
+    get() { axisReads++; return { label: "x", grid: { show: true } }; },
+  });
+  assert.deepEqual(deepMerge({ axes }, { axes: [{ grid: { stroke: "red" } }] }), {
+    axes: [{ label: "x", grid: { show: true, stroke: "red" } }],
+  });
+  assert.equal(axisReads, 1);
+});

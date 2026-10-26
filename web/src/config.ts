@@ -136,10 +136,12 @@ export function assertSafe(value: unknown, path = "$"): void {
   const stack: Frame[] = [{ value, path }];
   // Only ancestors count as cycles: repeated references in separate branches are JSON-safe.
   const ancestors = new WeakSet<object>();
+  const completed = new WeakSet<object>();
   while (stack.length) {
     const { value: v, path: p, exit } = stack.pop()!;
     if (exit) {
       ancestors.delete(v as object);
+      completed.add(v as object);
       continue;
     }
     if (
@@ -155,6 +157,7 @@ export function assertSafe(value: unknown, path = "$"): void {
       );
     if (ancestors.has(v))
       throw new Error(`${p}: cyclic JSON values are unsupported.`);
+    if (completed.has(v)) continue;
     const array = Array.isArray(v);
     const prototype = Object.getPrototypeOf(v);
     if (
@@ -365,11 +368,9 @@ export function deepMerge<T>(base: T, patch: unknown): T {
     pending.push({
       base: Array.isArray(b)
         ? key === "axes" && Array.isArray(a)
-          ? a
+          ? out
           : undefined
-        : a !== null && typeof a === "object" && !Array.isArray(a)
-          ? a
-          : undefined,
+        : out,
       patch: b,
       out,
     });
