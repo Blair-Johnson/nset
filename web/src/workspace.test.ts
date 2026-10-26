@@ -301,7 +301,124 @@ test("Reset chart restores default settings but keeps data, title, identity and 
   assert.deepEqual(reset.layout, card.layout);
   assert.equal(reset.outliers, "all");
   // XY keeps its join; everything else is a new chart's look.
-  assert.deepEqual(reset.config, { ...fresh.config, axis: "relative", height: 500 });
+  assert.deepEqual(reset.config, {
+    ...fresh.config,
+    axis: "relative",
+    height: 500,
+  });
   // The input is not mutated (Undo relies on the previous copy).
   assert.equal(card.config.style.width, 7);
+});
+
+test("large local workspaces and libraries preserve all counts, text and chart configs", () => {
+  const view = newWorkspace("e1", "view".repeat(2100), [], catalog());
+  view.id = "identity".repeat(1100);
+  view.selectedRunIds = Array.from({ length: 4097 }, (_, i) => `selected-${i}`);
+  view.pendingSelectedRunIds = Array.from(
+    { length: 4097 },
+    (_, i) => `pending-${i}`,
+  );
+  const largeCard = newChart(
+    "timeseries",
+    Array.from({ length: 513 }, (_, i) => `metric-${i}`),
+  );
+  largeCard.title = "chart".repeat(1800);
+  largeCard.source = {
+    mode: "selected",
+    keys: [
+      ...(largeCard.source.mode === "selected" ? largeCard.source.keys : []),
+      "metric".repeat(1800),
+    ],
+  };
+  largeCard.config.runs = Object.fromEntries(
+    Array.from({ length: 4097 }, (_, i) => [
+      seriesId({ kind: "metric", runId: `run-${i}`, key: "train/loss" }),
+      {
+        color: "#123456",
+        width: 2,
+        points: true,
+        pointSize: 5,
+        visible: true,
+        alpha: 0.75,
+      },
+    ]),
+  );
+  assert.ok(JSON.stringify(largeCard.config).length > 262144);
+  const explicit = newChart("timeseries", []);
+  explicit.source = {
+    mode: "explicit",
+    series: Array.from({ length: 4097 }, (_, i) => ({
+      kind: "metric",
+      runId: `run-${i}`,
+      key: "loss",
+    })),
+  };
+  view.sections = Array.from({ length: 129 }, (_, i) => ({
+    id: `section-${i}`,
+    title: "section".repeat(1300),
+    collapsed: true,
+    cards:
+      i < 2
+        ? Array.from({ length: 257 }, (_, j) => ({
+            ...newChart("timeseries", ["loss"]),
+            id: `card-${i}-${j}`,
+          }))
+        : [],
+  }));
+  view.sections[0].cards.push(largeCard, explicit);
+  assert.deepEqual(importWorkspace(exportWorkspace(view)), view);
+  const library: WorkspaceLibrary = {
+    version: 2,
+    views: [
+      view,
+      ...Array.from({ length: 128 }, (_, i) => ({
+        ...newWorkspace("e1", `view-${i}`, [], catalog()),
+        id: `view-${i}`,
+      })),
+    ],
+    activeByExperiment: { e1: view.id },
+  };
+  const target = storage();
+  saveLibrary(library, target);
+  assert.deepEqual(loadLibrary(target), library);
+  assert.throws(
+    () =>
+      validateWorkspace({
+        ...view,
+        selectedRunIds: [...view.selectedRunIds, view.selectedRunIds[0]],
+      }),
+    /Duplicate/,
+  );
+  assert.throws(
+    () =>
+      validateWorkspace({
+        ...view,
+        sections: [...view.sections, view.sections[0]],
+      }),
+    /Duplicate/,
+  );
+});
+
+test("quota exceptions propagate unchanged and leave the last saved library intact", () => {
+  const target = storage();
+  const library: WorkspaceLibrary = {
+    version: 2,
+    views: [newWorkspace("e1", "Saved", [], catalog())],
+    activeByExperiment: {},
+  };
+  saveLibrary(library, target);
+  const saved = target.getItem("nset.workspaces.v2");
+  const quota = new DOMException(
+    "Browser storage is full",
+    "QuotaExceededError",
+  );
+  target.setItem = () => {
+    throw quota;
+  };
+  assert.throws(
+    () => saveLibrary({ ...library, views: [] }, target),
+    (error) => error === quota,
+  );
+  assert.equal(target.getItem("nset.workspaces.v2"), saved);
+  assert.deepEqual(loadLibrary(target), library);
 });

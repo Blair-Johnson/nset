@@ -419,3 +419,18 @@ test("record-only adapter rejects time scope/operators and keeps supported recor
     "created_at",
   );
 });
+
+test("local filter restoration preserves arbitrary condition counts and text lengths", () => {
+  const filter = {
+    combine: "all" as const,
+    conditions: Array.from({ length: 65 }, (_, i) => ({
+      scope: "params" as const,
+      path: `key-${i}-${"x".repeat(8193)}`,
+      op: "eq" as const,
+      value: "value".repeat(2000),
+      missing: "default" as const,
+      fallback: "fallback".repeat(1200),
+    })),
+  };
+  assert.deepEqual(restoreRunFilter(filter), filter);
+});

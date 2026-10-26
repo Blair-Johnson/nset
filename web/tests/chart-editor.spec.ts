@@ -665,7 +665,7 @@ test("style presets and individual overrides stay synchronized without touching 
   await section(page, "Appearance");
   const defaults = dialog(page).locator(".ce-default-style");
   const observationsShown = () =>
-    page.evaluate(() => (window as any).__editor.rendered.chart.series[2].show);
+    page.evaluate(() => (window as any).__editor.rendered?.chart.series[2]?.show);
   await defaults
     .getByLabel("Curve style", { exact: true })
     .selectOption("none");

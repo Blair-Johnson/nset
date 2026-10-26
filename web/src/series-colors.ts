@@ -21,8 +21,8 @@ function preferences(storage = localStore()): Map<string, string> {
   try {
     const parsed: unknown = JSON.parse(storage.getItem(RUN_COLORS_KEY) ?? "{}");
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [id, value] of Object.entries(parsed).slice(0, 10000))
-        if (id.length > 0 && id.length <= 2048 && validColor(value))
+      for (const [id, value] of Object.entries(parsed))
+        if (id.length > 0 && validColor(value))
           colors.set(id, value.toLowerCase());
     }
   } catch {
@@ -61,17 +61,11 @@ export function setRunColor(
   color: string | null,
   storage = localStore(),
 ): boolean {
-  if (
-    !storage ||
-    !runId ||
-    runId.length > 2048 ||
-    (color !== null && !validColor(color))
-  )
+  if (!storage || !runId || (color !== null && !validColor(color)))
     return false;
   const next = new Map(preferences(storage));
   if (color === null) next.delete(runId);
   else next.set(runId, color.toLowerCase());
-  if (next.size > 10000) return false;
   try {
     storage.setItem(RUN_COLORS_KEY, JSON.stringify(Object.fromEntries(next)));
   } catch {

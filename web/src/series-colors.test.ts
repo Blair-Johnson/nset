@@ -103,3 +103,19 @@ test("display colors preserve explicit series styles without mutating saved conf
   config.palette = false;
   assert.equal(withRunColors(config, sources(), catalog), config);
 });
+
+test("local run colors retain more than 10000 overrides and long run identities", () => {
+  const initial = Object.fromEntries(
+    Array.from({ length: 10001 }, (_, i) => [`run-${i}`, "#123456"]),
+  );
+  const storage = store(JSON.stringify(initial));
+  assert.equal(runColor(catalog, "run-10000", storage), "#123456");
+  const longId = "run".repeat(3000);
+  assert.equal(setRunColor(longId, "#abcdef", storage), true);
+  const reloaded = store(storage.getItem(RUN_COLORS_KEY)!);
+  assert.equal(runColor(catalog, longId, reloaded), "#abcdef");
+  assert.equal(
+    Object.keys(JSON.parse(reloaded.getItem(RUN_COLORS_KEY)!)).length,
+    10002,
+  );
+});

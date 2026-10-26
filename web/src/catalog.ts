@@ -10,6 +10,40 @@ import type {
 } from "./workspace-types";
 import { seriesId } from "./workspace";
 
+// Preserve the existing network-response protections independently of local saved views.
+function assertCatalogEntry(value: unknown): void {
+  const limits = {
+    bytes: 262144,
+    nodes: 20000,
+    string: 8192,
+    array: 4096,
+    depth: 32,
+  };
+  const pending = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const { value: current, depth } = pending.pop()!;
+    if (++nodes > limits.nodes || depth > limits.depth)
+      throw new Error("Catalog entry exceeds JSON value/depth limits.");
+    if (typeof current === "string" && current.length > limits.string)
+      throw new Error("Catalog entry exceeds JSON string limit.");
+    if (current === null || typeof current !== "object") continue;
+    if (Array.isArray(current) && current.length > limits.array)
+      throw new Error("Catalog entry exceeds JSON array limit.");
+    const entries = Object.entries(current);
+    if (entries.length > limits.nodes)
+      throw new Error("Catalog entry exceeds JSON value limit.");
+    for (const [key, child] of entries) {
+      if (key.length > limits.string)
+        throw new Error("Catalog entry exceeds JSON key limit.");
+      pending.push({ value: child, depth: depth + 1 });
+    }
+  }
+  assertSafe(value);
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > limits.bytes)
+    throw new Error("Catalog entry exceeds JSON byte limit.");
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid catalog object.");
@@ -51,7 +85,7 @@ export async function fetchCatalog(
   )
     throw new Error("Unknown catalog field.");
   const experiments: Experiment[] = list(data.experiments).map((value) => {
-    assertSafe(value);
+    assertCatalogEntry(value);
     const e = record(value);
     return {
       id: text(e.id),
@@ -62,7 +96,7 @@ export async function fetchCatalog(
   distinct(experiments.map((e) => e.id));
   const experimentIds = new Set(experiments.map((e) => e.id));
   const runs: Run[] = list(data.runs).map((value) => {
-    assertSafe(value);
+    assertCatalogEntry(value);
     const r = record(value);
     if (!["running", "finished", "failed"].includes(r.status as string))
       throw new Error("Invalid run status.");
@@ -83,7 +117,7 @@ export async function fetchCatalog(
   distinct(runs.map((r) => r.id));
   const runIds = new Set(runs.map((r) => r.id));
   const series: CatalogSeries[] = list(data.series).map((value) => {
-    assertSafe(value);
+    assertCatalogEntry(value);
     const s = record(value);
     if (s.kind !== "metric" && s.kind !== "image")
       throw new Error("Unknown series kind.");
@@ -108,7 +142,9 @@ export async function fetchCatalog(
     series.map((s) => seriesId({ runId: s.run_id, key: s.key, kind: s.kind })),
   );
   const catalog = { experiments, runs, series };
-  return data.rx_enabled === true ? appendRxCatalog(api, catalog, signal) : catalog;
+  return data.rx_enabled === true
+    ? appendRxCatalog(api, catalog, signal)
+    : catalog;
 }
 
 const aborted = () => new DOMException("Aborted", "AbortError");
