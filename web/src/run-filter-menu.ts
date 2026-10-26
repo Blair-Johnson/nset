@@ -558,12 +558,23 @@ export class RunFilterMenu {
       scope.value = condition.scope;
       scope.disabled = !!this.options.scope;
       scope.onchange = () => {
+        const current = this.filter.conditions[index];
         update(
           {
             scope: scope.value as FilterCondition["scope"],
             path: scope.value === "time" ? "created_at" : "",
-            op: scope.value === "time" ? "last" : "eq",
-            value: scope.value === "time" ? "7" : "",
+            op:
+              scope.value === "time"
+                ? "last"
+                : current.scope === "time"
+                  ? "eq"
+                  : current.op,
+            value:
+              scope.value === "time"
+                ? "7"
+                : current.scope === "time"
+                  ? ""
+                  : current.value,
             unit: scope.value === "time" ? "days" : undefined,
             valueTo: undefined,
             precision: undefined,
