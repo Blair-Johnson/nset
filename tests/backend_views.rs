@@ -179,7 +179,7 @@ async fn create_read_list_save_cas_and_revision_polling() {
 }
 
 #[tokio::test]
-async fn authentication_write_admission_and_body_limits() {
+async fn authentication_and_write_admission_are_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let state = open(dir.path());
     let app = api::router(state.clone());
@@ -209,16 +209,6 @@ async fn authentication_write_admission_and_body_limits() {
         StatusCode::OK
     );
     drop(_held);
-    for method in ["POST", "PUT"] {
-        let url = if method == "POST" {
-            "/api/views"
-        } else {
-            "/api/views/server:x"
-        };
-        let (status, error) = raw(&app, method, url, vec![b' '; 2 * 1024 * 1024 + 1], true).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(error["error"].as_str().unwrap().contains("2 MiB"));
-    }
 }
 
 #[tokio::test]
@@ -241,7 +231,6 @@ async fn invalid_envelopes_workspaces_and_nested_configs_are_not_saved() {
     let cases = vec![
         ("/version", json!(1)),
         ("/name", json!("\u{feff}")),
-        ("/name", json!("😀".repeat(129))),
         ("/id", json!("constructor")),
         ("/experimentId", json!(false)),
         ("/updatedAt", json!(-1)),
@@ -334,18 +323,6 @@ async fn invalid_envelopes_workspaces_and_nested_configs_are_not_saved() {
             .0,
         StatusCode::BAD_REQUEST
     );
-    let mut large = workspace();
-    large["selectedRunIds"] = json!(
-        (0..40)
-            .map(|i| format!("{i}{}", "a".repeat(8000)))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        request(&app, "POST", "/api/views", json!({"workspace":large}))
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
     assert_eq!(
         request(&app, "GET", "/api/views", Value::Null).await.1,
         json!({"views":[]})
@@ -402,6 +379,22 @@ async fn records_xy_images_and_advanced_options_round_trip() {
         ("ys", json!([])),
         ("runUids", json!(["u", "u"])),
         ("sourceId", json!("native:x")),
+        ("sourceId", json!(format!("rx:{}", "x".repeat(126)))),
+        ("runUids", json!(["u".repeat(129)])),
+        ("x", json!("x".repeat(1025))),
+        ("x", json!(vec!["x"; 33].join("."))),
+        (
+            "ys",
+            json!((0..17).map(|i| format!("y{i}")).collect::<Vec<_>>()),
+        ),
+        (
+            "filters",
+            json!({"any":false,"conditions":vec![json!({"path":"x","op":"eq","value":1});17]}),
+        ),
+        (
+            "filters",
+            json!({"any":false,"conditions":[{"path":"x","op":"eq","value":"x".repeat(1024)}]}),
+        ),
         ("group", json!(false)),
         (
             "filters",
@@ -455,7 +448,7 @@ async fn records_xy_images_and_advanced_options_round_trip() {
 }
 
 #[tokio::test]
-async fn simultaneous_saves_have_one_winner_and_quota_never_hides_views() {
+async fn simultaneous_saves_have_one_winner_and_more_than_128_views_remain_visible() {
     let dir = tempfile::tempdir().unwrap();
     let app = api::router(open(dir.path()));
     let first = create(&app).await;
@@ -476,18 +469,12 @@ async fn simultaneous_saves_have_one_winner_and_quota_never_hides_views() {
         request(&app, "GET", &url, Value::Null).await.1["revision"],
         2
     );
-    for _ in 1..128 {
+    for _ in 1..130 {
         create(&app).await;
     }
-    assert_eq!(
-        request(&app, "POST", "/api/views", json!({"workspace":workspace()}))
-            .await
-            .0,
-        StatusCode::CONFLICT
-    );
     let (_, listed) = request(&app, "GET", "/api/views", Value::Null).await;
-    assert_eq!(listed["views"].as_array().unwrap().len(), 128);
-    // Updates continue to work at capacity.
+    assert_eq!(listed["views"].as_array().unwrap().len(), 130);
+    // Updates continue to work beyond the old quota.
     assert_eq!(
         request(
             &app,
@@ -498,6 +485,14 @@ async fn simultaneous_saves_have_one_winner_and_quota_never_hides_views() {
         .await
         .0,
         StatusCode::OK
+    );
+    drop(app);
+    let app = api::router(open(dir.path()));
+    let (_, listed) = request(&app, "GET", "/api/views", Value::Null).await;
+    assert_eq!(listed["views"].as_array().unwrap().len(), 130);
+    assert_eq!(
+        request(&app, "GET", &url, Value::Null).await.1["revision"],
+        3
     );
 }
 
@@ -601,7 +596,7 @@ fn migration_name_collisions_leave_older_databases_unchanged() {
 }
 
 #[tokio::test]
-async fn javascript_numeric_expansion_cannot_bypass_workspace_byte_limit() {
+async fn javascript_numeric_expansion_has_no_workspace_byte_limit() {
     let dir = tempfile::tempdir().unwrap();
     let app = api::router(open(dir.path()));
     let mut w = workspace();
@@ -617,16 +612,9 @@ async fn javascript_numeric_expansion_cannot_bypass_workspace_byte_limit() {
             .collect::<Vec<_>>()
     );
     assert!(serde_json::to_vec(&w).unwrap().len() < 262_144);
-    assert_eq!(
-        request(&app, "POST", "/api/views", json!({"workspace":w}))
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        request(&app, "GET", "/api/views", Value::Null).await.1,
-        json!({"views":[]})
-    );
+    let (status, saved) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["workspace"]["sections"], w["sections"]);
     let mut small = workspace();
     small["sections"][0]["cards"][0]["config"] =
         json!({"advanced":{"cursor":{"hover":{"skip":[1e20, -1e20, 1e-6, 5e-324]}}}});
@@ -664,4 +652,185 @@ async fn pending_run_selection_round_trips_and_is_validated() {
                 .is_client_error()
         );
     }
+}
+
+// Same closed-schema per-run style shape used by the frontend editor. This
+// crosses the former config byte/node/key budgets and the view HTTP body cap.
+fn large_style_workspace() -> Value {
+    let mut w = workspace();
+    let style = json!({"color":"#12abef","width":2,"dash":[2,3],
+        "markers":{"show":"auto","size":6,"width":1,"dash":[2,3]}});
+    let runs: serde_json::Map<String, Value> = (0..20_001)
+        .map(|i| {
+            (
+                format!("rx:run-{i:05}-0123456789abcdef0123456789abcdef"),
+                style.clone(),
+            )
+        })
+        .collect();
+    w["sections"][0]["cards"][0]["config"] = json!({"runs":runs});
+    assert!(
+        serde_json::to_vec(&w["sections"][0]["cards"][0]["config"])
+            .unwrap()
+            .len()
+            > 2 * 1024 * 1024
+    );
+    w
+}
+
+#[tokio::test]
+async fn large_per_run_styles_create_get_update_list_and_restart_without_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    let mut w = large_style_workspace();
+    let (status, first) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    w["id"] = first["id"].clone();
+    w["updatedAt"] = first["workspace"]["updatedAt"].clone();
+    assert_eq!(first["workspace"], w);
+    let url = format!("/api/views/{}", first["id"].as_str().unwrap());
+    assert_eq!(
+        request(&app, "GET", &url, Value::Null).await,
+        (StatusCode::OK, first.clone())
+    );
+
+    w["name"] = json!("Large edited view");
+    w["sections"][0]["cards"][0]["config"]["runs"]["rx:last"] = json!({"color":"red","width":3});
+    let (status, saved) = request(&app, "PUT", &url, json!({"revision":1,"workspace":w})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["revision"], 2);
+    w["updatedAt"] = saved["workspace"]["updatedAt"].clone();
+    assert_eq!(saved["workspace"], w);
+    assert_eq!(
+        request(&app, "PUT", &url, json!({"revision":1,"workspace":w}))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    for config in [
+        json!({"width":"wide"}),
+        json!({"unknown":true}),
+        json!({"markers":{"constructor":{}}}),
+    ] {
+        let mut invalid = w.clone();
+        invalid["sections"][0]["cards"][0]["config"]["runs"]["rx:last"] = config;
+        assert_eq!(
+            request(&app, "PUT", &url, json!({"revision":2,"workspace":invalid}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        request(&app, "GET", &format!("{url}?revision=2"), Value::Null)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    drop(app);
+    let app = api::router(open(dir.path()));
+    assert_eq!(
+        request(&app, "GET", &url, Value::Null).await,
+        (StatusCode::OK, saved.clone())
+    );
+    assert_eq!(
+        request(&app, "GET", "/api/views", Value::Null).await.1,
+        json!({"views":[{
+            "id":saved["id"],"name":w["name"],"experimentId":w["experimentId"],"revision":2,"updatedAt":w["updatedAt"]
+        }]})
+    );
+}
+
+#[tokio::test]
+async fn workspace_counts_text_and_config_arrays_are_not_quotas() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    let mut w = workspace();
+    let long = "\u{1f600}".repeat(8193);
+    w["id"] = json!(long);
+    w["name"] = json!(long);
+    w["experimentId"] = json!(long);
+    w["selectedRunIds"] = json!(
+        (0..4097)
+            .map(|i| format!("selected:{i}"))
+            .chain(std::iter::once(long.clone()))
+            .collect::<Vec<_>>()
+    );
+    w["pendingSelectedRunIds"] = json!(
+        (0..4097)
+            .map(|i| format!("pending:{i}"))
+            .collect::<Vec<_>>()
+    );
+    let template = w["sections"][0]["cards"][0].clone();
+    w["sections"] = json!((0..129).map(|section| {
+        let cards: Vec<Value> = if section < 2 {
+            (0..257).map(|card| {
+                let mut c = template.clone();
+                c["id"] = json!(format!("card:{section}:{card}"));
+                c
+            }).collect()
+        } else { vec![] };
+        json!({"id":format!("section:{section}"),"title":"Metrics","collapsed":false,"cards":cards})
+    }).collect::<Vec<_>>());
+    w["sections"][0]["id"] = json!(long);
+    w["sections"][0]["title"] = json!(long);
+    let card = &mut w["sections"][0]["cards"][0];
+    card["id"] = json!(long);
+    card["title"] = json!(long);
+    card["source"]["keys"] = json!(
+        (0..513)
+            .map(|i| format!("metric:{i}"))
+            .chain(std::iter::once(long.clone()))
+            .collect::<Vec<_>>()
+    );
+    card["x"] = json!({"mode":"key","key":long});
+    card["config"] = json!({"xLabel":long,"style":{"dash":vec![2;4097]},"runs":{long.clone():{"width":2}},
+        "advanced":{"axes":[{"splits":(0..4097).collect::<Vec<_>>(),"values":vec!["label";4097]}]}});
+    w["sections"][0]["cards"][1]["source"] = json!({"mode":"explicit","series":(0..4097).map(|i|
+        json!({"runId":format!("run:{i}"),"key":format!("metric:{i}"),"kind":"metric"})
+    ).chain(std::iter::once(json!({"runId":long,"key":long,"kind":"metric"}))).collect::<Vec<_>>()});
+    w["sections"][0]["cards"][2]["records"] = json!({"sourceId":"rx:external",
+        "runUids":(0..4097).map(|i|format!("uid:{i}")).collect::<Vec<_>>(),"x":"epoch","ys":["loss"],
+        "filters":{"any":false,"conditions":[]}});
+    let (status, saved) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    w["id"] = saved["id"].clone();
+    w["updatedAt"] = saved["workspace"]["updatedAt"].clone();
+    assert_eq!(saved["workspace"], w);
+    let url = format!("/api/views/{}", saved["id"].as_str().unwrap());
+    assert_eq!(request(&app, "GET", &url, Value::Null).await.1, saved);
+}
+
+#[tokio::test]
+async fn unlimited_body_extraction_applies_only_to_view_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    // Padding avoids a giant fixture while exceeding both the old 2 MiB view
+    // limit and the unchanged 32 MiB global limit, on create AND update.
+    let mut body = vec![b' '; 32 * 1024 * 1024 + 1];
+    body.extend(serde_json::to_vec(&json!({"workspace":workspace()})).unwrap());
+    assert_eq!(
+        raw(&app, "POST", "/api/experiments", body.clone(), true)
+            .await
+            .0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        raw(&app, "POST", "/api/rx/records", body.clone(), true)
+            .await
+            .0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let (status, saved) = raw(&app, "POST", "/api/views", body, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    let url = format!("/api/views/{}", saved["id"].as_str().unwrap());
+    let mut body = vec![b' '; 32 * 1024 * 1024 + 1];
+    body.extend(serde_json::to_vec(&json!({"revision":1,"workspace":saved["workspace"]})).unwrap());
+    let (status, updated) = raw(&app, "PUT", &url, body, true).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["revision"], 2);
+    assert_eq!(
+        updated["workspace"]["sections"],
+        saved["workspace"]["sections"]
+    );
 }

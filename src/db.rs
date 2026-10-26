@@ -506,15 +506,11 @@ impl Database {
         crate::views::validate_workspace(&workspace)?;
         self.writer.call(move |conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let count: i64 = tx.query_row("SELECT count(*) FROM views", [], |row| row.get(0))?;
-            if count >= crate::views::MAX_VIEWS {
-                return Err(ApiError(axum::http::StatusCode::CONFLICT, "saved view limit reached (128)"));
-            }
             let id = format!("server:{}", Uuid::new_v4());
             let time = now();
             workspace["id"] = serde_json::json!(id);
             workspace["updatedAt"] = serde_json::json!(time);
-            // Server-assigned metadata must not push a near-limit input past the client limits.
+            // Validate server-assigned metadata with the same workspace contract.
             crate::views::validate_workspace(&workspace)?;
             let raw = serde_json::to_string(&workspace).map_err(ApiError::internal)?;
             tx.execute("INSERT INTO views(id,name,experiment_id,revision,updated_at,workspace) VALUES(?,?,?,1,?,?)",
@@ -526,7 +522,7 @@ impl Database {
 
     pub(crate) async fn views(&self) -> Result<Vec<serde_json::Value>> {
         self.reader().call(|conn| {
-            // Admission bounds the entire collection; never silently hide rows with LIMIT.
+            // Return the entire saved-view collection; never silently hide rows with LIMIT.
             Ok(conn.prepare("SELECT id,name,experiment_id,revision,updated_at FROM views ORDER BY updated_at DESC,id")?
                 .query_map([], |row| Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)?,

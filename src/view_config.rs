@@ -1,7 +1,7 @@
 //! Validation of the closed, literal-only view configuration in web/src/config.ts.
 //!
-//! The caller must first enforce the global safe-JSON resource/key checks. Missing
-//! fields are valid client-default patches; validation never inserts defaults.
+//! The caller must first enforce safe-JSON finite-number/protected-key checks.
+//! Missing fields are valid client-default patches; validation never inserts defaults.
 //! Colors match the frontend's Node fallback (hex, named, numeric rgb/hsl).
 //! Browser-only CSS color formats are conservatively rejected.
 

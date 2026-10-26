@@ -15,9 +15,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
-pub(crate) const MAX_BODY: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_VIEWS: i64 = 128;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateView {
@@ -92,14 +89,12 @@ fn object<'a>(v: &'a Value, fields: &[&str]) -> Result<&'a Map<String, Value>> {
     require(o.keys().all(|key| fields.contains(&key.as_str())))?;
     Ok(o)
 }
-fn array(v: &Value, max: usize) -> Result<&Vec<Value>> {
-    let a = v.as_array().ok_or_else(invalid)?;
-    require(a.len() <= max)?;
-    Ok(a)
+fn array(v: &Value) -> Result<&Vec<Value>> {
+    v.as_array().ok_or_else(invalid)
 }
-fn text(v: &Value, max: usize) -> Result<&str> {
+fn text(v: &Value) -> Result<&str> {
     let s = v.as_str().ok_or_else(invalid)?;
-    require(!s.trim_matches(js_whitespace).is_empty() && s.encode_utf16().count() <= max)?;
+    require(!s.trim_matches(js_whitespace).is_empty())?;
     Ok(s)
 }
 // ECMAScript String.trim includes BOM, but excludes Unicode NEL.
@@ -110,7 +105,7 @@ fn protected(s: &str) -> bool {
     matches!(s, "__proto__" | "constructor" | "prototype")
 }
 fn identity(v: &Value) -> Result<&str> {
-    let s = text(v, 8192)?;
+    let s = text(v)?;
     require(!protected(s))?;
     Ok(s)
 }
@@ -121,10 +116,10 @@ fn distinct<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<()> {
     let mut seen = HashSet::new();
     require(values.into_iter().all(|s| seen.insert(s)))
 }
-fn strings(v: &Value, max: usize, ids: bool) -> Result<()> {
-    let values = array(v, max)?
+fn strings(v: &Value, ids: bool) -> Result<()> {
+    let values = array(v)?
         .iter()
-        .map(|v| if ids { identity(v) } else { text(v, 2048) })
+        .map(|v| if ids { identity(v) } else { text(v) })
         .collect::<Result<Vec<_>>>()?;
     distinct(values)
 }
@@ -133,49 +128,22 @@ pub(crate) fn safe_integer(v: &Value, min: i64) -> Result<i64> {
     require(n.is_finite() && n.fract() == 0.0 && n >= min as f64 && n <= MAX_SAFE as f64)?;
     Ok(n as i64)
 }
+// JSON has no accessors, prototypes, sparse arrays, or cycles. Retain the
+// frontend's protected-key and finite-number checks without resource budgets.
 fn safe_json(v: &Value) -> Result<()> {
-    fn visit(v: &Value, level: usize, count: &mut usize, number_bytes: &mut usize) -> Result<()> {
-        *count += 1;
-        require(level <= 32 && *count <= 20_000)?;
+    let mut pending = vec![v];
+    while let Some(v) = pending.pop() {
         match v {
-            Value::String(s) => require(s.encode_utf16().count() <= 8192)?,
-            Value::Number(n) => {
-                let f = n.as_f64().filter(|f| f.is_finite()).ok_or_else(invalid)?;
-                // JS expands exponents in [1e-6,1e21); Rust may retain them.
-                // A small margin covers shortest-decimal rounding differences.
-                if n.as_i64()
-                    .is_none_or(|n| n.unsigned_abs() > MAX_SAFE as u64)
-                {
-                    let encoded = n.to_string().len();
-                    let decimal = if (1e-6..1e21).contains(&f.abs()) {
-                        f.to_string().len()
-                    } else {
-                        encoded
-                    };
-                    let conservative = decimal.saturating_add(2).max(encoded);
-                    *number_bytes += conservative - encoded;
-                }
-            }
-            Value::Array(a) => {
-                require(a.len() <= 4096)?;
-                for v in a {
-                    visit(v, level + 1, count, number_bytes)?;
-                }
-            }
+            Value::Number(n) => require(n.as_f64().is_some_and(f64::is_finite))?,
+            Value::Array(a) => pending.extend(a),
             Value::Object(o) => {
-                require(o.len() <= 20_000)?;
-                for (key, v) in o {
-                    require(!protected(key) && key.encode_utf16().count() <= 8192)?;
-                    visit(v, level + 1, count, number_bytes)?;
-                }
+                require(o.keys().all(|key| !protected(key)))?;
+                pending.extend(o.values());
             }
             _ => {}
         }
-        Ok(())
     }
-    let mut number_bytes = 0;
-    visit(v, 0, &mut 0, &mut number_bytes)?;
-    require(serde_json::to_vec(v).map_err(ApiError::internal)?.len() + number_bytes <= 262_144)
+    Ok(())
 }
 
 pub(crate) fn validate_workspace(v: &Value) -> Result<()> {
@@ -196,30 +164,32 @@ pub(crate) fn validate_workspace(v: &Value) -> Result<()> {
     require(v["version"].as_f64() == Some(2.0))?;
     identity(&v["id"])?;
     identity(&v["experimentId"])?;
-    text(&v["name"], 256)?;
+    text(&v["name"])?;
     safe_integer(&v["updatedAt"], 0)?;
-    strings(&v["selectedRunIds"], 4096, true)?;
+    strings(&v["selectedRunIds"], true)?;
     if let Some(pending) = v.get("pendingSelectedRunIds") {
-        strings(pending, 4096, true)?;
-        let selected = array(&v["selectedRunIds"], 4096)?;
+        strings(pending, true)?;
+        let selected: HashSet<_> = array(&v["selectedRunIds"])?
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
         require(
-            array(pending, 4096)?
+            array(pending)?
                 .iter()
-                .all(|id| !selected.contains(id)),
+                .all(|id| !selected.contains(id.as_str().unwrap())),
         )?;
     }
-    let sections = array(&v["sections"], 128)?;
+    let sections = array(&v["sections"])?;
     let mut section_ids = HashSet::new();
     let mut card_ids = HashSet::new();
     for section in sections {
         object(section, &["id", "title", "collapsed", "cards"])?;
         require(section_ids.insert(identity(&section["id"])?))?;
-        text(&section["title"], 256)?;
+        text(&section["title"])?;
         require(section["collapsed"].is_boolean())?;
-        for card in array(&section["cards"], 256)? {
+        for card in array(&section["cards"])? {
             validate_chart(card)?;
             require(card_ids.insert(identity(&card["id"])?))?;
-            require(card_ids.len() <= 512)?;
         }
     }
     Ok(())
@@ -227,7 +197,7 @@ pub(crate) fn validate_workspace(v: &Value) -> Result<()> {
 fn series(v: &Value, kind: &str) -> Result<()> {
     object(v, &["runId", "key", "kind"])?;
     identity(&v["runId"])?;
-    text(&v["key"], 2048)?;
+    text(&v["key"])?;
     require(v["kind"].as_str() == Some(kind))
 }
 fn validate_chart(v: &Value) -> Result<()> {
@@ -238,7 +208,7 @@ fn validate_chart(v: &Value) -> Result<()> {
         ],
     )?;
     identity(&v["id"])?;
-    text(&v["title"], 256)?;
+    text(&v["title"])?;
     choice(&v["kind"], &["timeseries", "image"])?;
     choice(&v["outliers"], &["all", "robust"])?;
     choice(&v["size"], &["normal", "wide"])?;
@@ -246,12 +216,12 @@ fn validate_chart(v: &Value) -> Result<()> {
     match source["mode"].as_str() {
         Some("selected") => {
             object(source, &["mode", "keys"])?;
-            strings(&source["keys"], 512, false)?;
+            strings(&source["keys"], false)?;
         }
         Some("explicit") => {
             object(source, &["mode", "series"])?;
             let mut refs = HashSet::new();
-            for s in array(&source["series"], 4096)? {
+            for s in array(&source["series"])? {
                 series(
                     s,
                     if v["kind"] == "image" {
@@ -274,7 +244,7 @@ fn validate_chart(v: &Value) -> Result<()> {
         match x["mode"].as_str() {
             Some("key") => {
                 object(x, &["mode", "key"])?;
-                text(&x["key"], 2048)?;
+                text(&x["key"])?;
             }
             Some("series") => {
                 object(x, &["mode", "series"])?;
@@ -354,7 +324,7 @@ fn validate_records(v: &Value) -> Result<()> {
     let o = object(v, &["sourceId", "runUids", "x", "ys", "filters", "group"])?;
     let source = v["sourceId"].as_str().ok_or_else(invalid)?;
     require(source.starts_with("rx:") && source.encode_utf16().count() <= 128)?;
-    let uids = array(&v["runUids"], 4096)?
+    let uids = array(&v["runUids"])?
         .iter()
         .map(|v| {
             let s = v.as_str().ok_or_else(invalid)?;
@@ -364,8 +334,8 @@ fn validate_records(v: &Value) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     distinct(uids)?;
     record_path(&v["x"])?;
-    let ys = array(&v["ys"], 16)?;
-    require(!ys.is_empty())?;
+    let ys = array(&v["ys"])?;
+    require(!ys.is_empty() && ys.len() <= 16)?;
     for y in ys {
         record_path(y)?;
     }
@@ -379,7 +349,9 @@ fn validate_records(v: &Value) -> Result<()> {
     let filters = &v["filters"];
     object(filters, &["any", "conditions"])?;
     require(filters["any"].is_boolean())?;
-    for c in array(&filters["conditions"], 16)? {
+    let conditions = array(&filters["conditions"])?;
+    require(conditions.len() <= 16)?;
+    for c in conditions {
         let cobj = object(c, &["path", "op", "value"])?;
         record_path(&c["path"])?;
         choice(
@@ -407,17 +379,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn javascript_number_expansion_and_json_limits_are_bounded() {
+    fn safe_json_has_no_size_budgets_but_rejects_protected_keys() {
         let expanded = json!(vec![vec![1e20; 3000]; 4]);
         assert!(serde_json::to_vec(&expanded).unwrap().len() < 262_144);
-        assert!(safe_json(&expanded).is_err());
+        assert!(safe_json(&expanded).is_ok());
         assert!(safe_json(&json!([1e20, -1e20, 1e21, 1e-6, 1e-7, 5e-324, 0.0, -0.0])).is_ok());
-        assert!(safe_json(&json!(vec![0; 4097])).is_err());
+        assert!(safe_json(&json!(vec![0; 20_001])).is_ok());
         let mut nested = Value::Null;
         for _ in 0..33 {
             nested = json!([nested]);
         }
-        assert!(safe_json(&nested).is_err());
+        assert!(safe_json(&nested).is_ok());
+        assert!(safe_json(&json!({"long": "x".repeat(262_145)})).is_ok());
         assert!(safe_json(&json!({"prototype": 1})).is_err());
     }
 }
