@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -40,6 +41,131 @@ const UNAVAILABLE: &str = "rx source unavailable: cannot read a live SQLite snap
 fn unavailable(e: impl std::fmt::Display) -> ApiError {
     tracing::warn!(error=%e, "rx read-only source unavailable");
     ApiError(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE)
+}
+const UNSUPPORTED_FORMAT: &str = "rx source uses an unsupported storage format: expected a canonical SQLite database at <Git common dir>/rx/rx.sqlite (schema 8 or 9). Non-SQLite markers and filesystem stores are not supported; nset never converts or repairs rx storage.";
+const INVALID_SCHEMA: &str = "rx source has an incompatible schema: schema 8 or 9 must provide the required runs/events columns, types, and identity constraints; nset does not migrate databases.";
+fn source_sql_error(error: rusqlite::Error) -> ApiError {
+    tracing::warn!(%error, "rx read-only source validation failed");
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::NotADatabase) => {
+            ApiError(StatusCode::SERVICE_UNAVAILABLE, UNSUPPORTED_FORMAT)
+        }
+        Some(rusqlite::ErrorCode::DatabaseCorrupt) => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rx source SQLite database is corrupt; nset never repairs or opens it read-write",
+        ),
+        _ => unavailable(error),
+    }
+}
+fn invalid_schema(detail: impl std::fmt::Display) -> ApiError {
+    tracing::warn!(%detail, "rx incompatible schema");
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, INVALID_SCHEMA)
+}
+// Validate only the reader's contract, not unrelated producer tables or nullable
+// declarations: upstream upgrades can add columns without NOT NULL constraints.
+fn validate_schema(conn: &Connection) -> Result<()> {
+    for (table, required) in [
+        (
+            "runs",
+            &[
+                ("id", "INTEGER"),
+                ("run_uid", "TEXT"),
+                ("state", "TEXT"),
+                ("alias", "TEXT"),
+                ("config", "TEXT"),
+                ("created_at", "TEXT"),
+                ("started_at", "TEXT"),
+                ("finished_at", "TEXT"),
+                ("exit_code", "INTEGER"),
+                ("argv", "TEXT"),
+            ][..],
+        ),
+        (
+            "events",
+            &[
+                ("run_id", "INTEGER"),
+                ("seq", "INTEGER"),
+                ("received_at", "TEXT"),
+                ("data", "TEXT"),
+            ][..],
+        ),
+    ] {
+        let ordinary: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name=? AND type='table')",
+            [table], |r| r.get(0),
+        ).map_err(source_sql_error)?;
+        if !ordinary {
+            return Err(invalid_schema(format!("missing ordinary table {table}")));
+        }
+        let mut stmt = conn
+            .prepare("SELECT name,type,pk,hidden FROM pragma_table_xinfo(?, 'main')")
+            .map_err(source_sql_error)?;
+        let columns = stmt
+            .query_map([table], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ),
+                ))
+            })
+            .map_err(source_sql_error)?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(source_sql_error)?;
+        for (name, declaration) in required {
+            if !columns.get(*name).is_some_and(|(kind, _, hidden)| {
+                kind.eq_ignore_ascii_case(declaration) && *hidden == 0
+            }) {
+                return Err(invalid_schema(format!(
+                    "{table}.{name} must be {declaration}"
+                )));
+            }
+        }
+        if table == "runs"
+            && (columns["id"].1 != 1 || columns.values().filter(|(_, pk, _)| *pk != 0).count() != 1)
+        {
+            return Err(invalid_schema("runs.id must be the integer primary key"));
+        }
+    }
+    for (table, required) in [("runs", vec!["run_uid"]), ("events", vec!["run_id", "seq"])] {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM pragma_index_list(?, 'main') WHERE \"unique\"=1 AND partial=0",
+            )
+            .map_err(source_sql_error)?;
+        let indexes = stmt
+            .query_map([table], |r| r.get::<_, String>(0))
+            .map_err(source_sql_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(source_sql_error)?;
+        let mut found = false;
+        for index in indexes {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_index_info(?, 'main') ORDER BY seqno")
+                .map_err(source_sql_error)?;
+            let columns = stmt
+                .query_map([index], |r| r.get::<_, Option<String>>(0))
+                .map_err(source_sql_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(source_sql_error)?;
+            if columns
+                .iter()
+                .map(|name| name.as_deref())
+                .eq(required.iter().map(|name| Some(*name)))
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(invalid_schema(format!(
+                "{table} requires unique {required:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 #[derive(Clone)]
 pub struct Source {
@@ -106,6 +232,23 @@ impl Source {
         })
     }
     fn connection(&self) -> Result<Connection> {
+        let mut header = [0; 16];
+        let mut file = std::fs::File::open(&self.path).map_err(unavailable)?;
+        if let Err(error) = file.read_exact(&mut header) {
+            if error.kind() != std::io::ErrorKind::UnexpectedEof {
+                return Err(unavailable(error));
+            }
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                UNSUPPORTED_FORMAT,
+            ));
+        }
+        if &header != b"SQLite format 3\0" {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                UNSUPPORTED_FORMAT,
+            ));
+        }
         // The main database is strictly read-only. Ordinary SQLite WAL/SHM
         // reader coordination (including empty sidecars) is allowed, never a
         // writable database fallback or immutable live read.
@@ -125,16 +268,18 @@ impl Source {
         let deadline = Instant::now() + Duration::from_millis(750);
         conn.progress_handler(1000, Some(move || Instant::now() > deadline))
             .map_err(unavailable)?;
+        conn.execute_batch("BEGIN DEFERRED")
+            .map_err(source_sql_error)?;
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(unavailable)?;
-        if version != 8 {
+            .map_err(source_sql_error)?;
+        if !matches!(version, 8 | 9) {
             return Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "rx source uses an unsupported schema; this reader supports schema 8 and does not migrate databases",
+                "rx source uses an unsupported schema; this reader supports SQLite schemas 8 and 9 and does not migrate databases",
             ));
         }
-        conn.execute_batch("BEGIN DEFERRED").map_err(unavailable)?;
+        validate_schema(&conn)?;
         Ok(conn)
     }
     fn generation(&self) -> Result<String> {

@@ -23,6 +23,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_schema(None)
+    }
+    fn upstream(version: i64) -> Self {
+        Self::with_schema(Some(version))
+    }
+    fn with_schema(version: Option<i64>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         assert!(
@@ -36,7 +42,23 @@ impl Fixture {
         std::fs::create_dir_all(repo.join(".git/rx")).unwrap();
         let path = repo.join(".git/rx/rx.sqlite");
         let db = Connection::open(&path).unwrap();
-        db.execute_batch("PRAGMA user_version=8; CREATE TABLE runs(id INTEGER PRIMARY KEY,run_uid TEXT UNIQUE,state TEXT,alias TEXT,config TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,exit_code INTEGER,argv TEXT); CREATE TABLE events(run_id INTEGER,seq INTEGER,received_at TEXT,data TEXT,UNIQUE(run_id,seq)); INSERT INTO runs VALUES(859,'u859','succeeded',NULL,'summary','2026-10-12T00:00:00Z',NULL,NULL,0,'[]'); INSERT INTO events VALUES(859,5,'2026-10-12T00:00:00Z','{\"kind\":\"epoch\",\"epoch\":1,\"loss\":0.5}');").unwrap();
+        if let Some(version) = version {
+            db.execute_batch(match version {
+                8 => include_str!("fixtures/rx-schema-8.sql"),
+                9 => include_str!("fixtures/rx-schema-9.sql"),
+                _ => unreachable!(),
+            })
+            .unwrap();
+            db.execute_batch(r#"
+                INSERT INTO commands(id,argv) VALUES(1,'[]');
+                INSERT INTO runs(id,run_uid,state,command_id,argv,cwd_rel,config,created_at,exit_code)
+                VALUES(859,'u859','succeeded',1,'[]','.','summary','2026-10-12T00:00:00Z',0);
+                INSERT INTO events(run_id,seq,received_at,data)
+                VALUES(859,5,'2026-10-12T00:00:00Z','{"kind":"epoch","epoch":1,"loss":0.5}');
+            "#).unwrap();
+        } else {
+            db.execute_batch("PRAGMA user_version=8; CREATE TABLE runs(id INTEGER PRIMARY KEY,run_uid TEXT UNIQUE,state TEXT,alias TEXT,config TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,exit_code INTEGER,argv TEXT); CREATE TABLE events(run_id INTEGER,seq INTEGER,received_at TEXT,data TEXT,UNIQUE(run_id,seq)); INSERT INTO runs VALUES(859,'u859','succeeded',NULL,'summary','2026-10-12T00:00:00Z',NULL,NULL,0,'[]'); INSERT INTO events VALUES(859,5,'2026-10-12T00:00:00Z','{\"kind\":\"epoch\",\"epoch\":1,\"loss\":0.5}');").unwrap();
+        }
         drop(db);
         let source = Source::resolve(&repo).unwrap();
         let source_id = source.id.clone();
@@ -1814,4 +1836,280 @@ async fn record_plot_keeps_large_valid_events_with_unrelated_nonfinite_values() 
         f.request("POST", "/api/rx/plot", query, true).await.0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
+}
+
+#[tokio::test]
+async fn upstream_schema_8_and_9_read_all_routes_without_mutation() {
+    for version in [8, 9] {
+        let f = Fixture::upstream(version);
+        let before = std::fs::read(&f.path).unwrap();
+        let permissions = std::fs::metadata(&f.path).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&f.path, readonly).unwrap();
+        let (status, catalog) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+        assert_eq!(status, StatusCode::OK, "schema {version}: {catalog}");
+        assert_eq!(catalog["runs"][0]["run_uid"], "u859");
+        assert_eq!(catalog["runs"][0]["id"], "859");
+        for route in ["records", "fields", "plot"] {
+            let (status, result) = f
+                .request("POST", &format!("/api/rx/{route}"), f.query(), true)
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "schema {version}, {route}: {result}"
+            );
+            match route {
+                "records" => assert_eq!(
+                    result["records"][0]["raw"],
+                    r#"{"kind":"epoch","epoch":1,"loss":0.5}"#
+                ),
+                "fields" => assert!(field_paths(&result).contains(&"loss")),
+                "plot" => assert_eq!(result["traces"][0]["points"], json!([[1.0, 0.5, "5"]])),
+                _ => unreachable!(),
+            }
+        }
+        let q = run_filter_query(&f, json!([{"path":"loss","op":"eq","value":0.5}]));
+        let (status, result) = f.request("POST", "/api/rx/run-filter", q, true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["runs"][0]["conditions"], json!([true]));
+        assert_eq!(before, std::fs::read(&f.path).unwrap());
+        assert_eq!(
+            std::fs::read_dir(f.path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::set_permissions(&f.path, permissions).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn upstream_schemas_read_from_linked_worktrees() {
+    for version in [8, 9] {
+        let mut f = Fixture::upstream(version);
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&f.repo)
+                .args([
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let linked = f._dir.path().join("linked-upstream");
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&f.repo)
+                .args(["worktree", "add", "--detach", "-q"])
+                .arg(&linked)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = Source::resolve(&linked).unwrap();
+        assert_eq!(source.id, f.source_id);
+        let mut state = AppState::open(
+            &f._dir.path().join("linked-native"),
+            Token::new("test-secret").unwrap(),
+        )
+        .unwrap();
+        state.rx = Some(source);
+        f.app = api::router(state);
+        let before = std::fs::read(&f.path).unwrap();
+        let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+        assert_eq!(status, StatusCode::OK, "schema {version}: {result}");
+        assert_eq!(result["traces"][0]["points"], json!([[1.0, 0.5, "5"]]));
+        assert_eq!(before, std::fs::read(&f.path).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn unsupported_schema_versions_are_explicit_and_never_migrated() {
+    for version in [0, 7, 10, 99] {
+        let f = Fixture::upstream(9);
+        Connection::open(&f.path)
+            .unwrap()
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        let before = std::fs::read(&f.path).unwrap();
+        let (status, result) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("supports SQLite schemas 8 and 9"),
+            "{result}"
+        );
+        assert_eq!(before, std::fs::read(&f.path).unwrap());
+        assert_eq!(
+            f.request("GET", "/api/catalog", Value::Null, true).await.0,
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn claimed_supported_versions_require_reader_columns_types_and_keys() {
+    for version in [8, 9] {
+        for damage in [
+            "DROP TABLE events;",
+            "ALTER TABLE runs RENAME COLUMN state TO wrong_state;",
+            "ALTER TABLE events RENAME COLUMN data TO wrong_data;",
+            "DROP TABLE events; CREATE TABLE events(run_id INTEGER,seq INTEGER,received_at TEXT,data BLOB,UNIQUE(run_id,seq));",
+            "DROP TABLE events; CREATE TABLE events(run_id INTEGER,seq TEXT,received_at TEXT,data TEXT,UNIQUE(run_id,seq));",
+            "DROP TABLE events; CREATE TABLE events(run_id INTEGER,seq INTEGER,received_at TEXT,data TEXT);",
+            "DROP TABLE events; CREATE TABLE events(run_id INTEGER,seq INTEGER,received_at TEXT,data TEXT); CREATE UNIQUE INDEX fake_unique ON events(run_id,seq) WHERE seq>0;",
+            "ALTER TABLE runs RENAME TO old_runs; CREATE TABLE runs AS SELECT * FROM old_runs;",
+            "ALTER TABLE runs RENAME TO old_runs; CREATE VIEW runs AS SELECT * FROM old_runs;",
+            "ALTER TABLE runs RENAME TO old_runs; CREATE TABLE runs(id INTEGER PRIMARY KEY,run_uid TEXT,state TEXT,alias TEXT,config TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,exit_code INTEGER,argv TEXT);",
+        ] {
+            let f = Fixture::upstream(version);
+            Connection::open(&f.path)
+                .unwrap()
+                .execute_batch(damage)
+                .unwrap();
+            let before = std::fs::read(&f.path).unwrap();
+            for (method, route, body) in [
+                ("GET", "/api/rx/catalog", Value::Null),
+                ("POST", "/api/rx/plot", f.query()),
+            ] {
+                let (status, result) = f.request(method, route, body, true).await;
+                assert_eq!(
+                    status,
+                    if method == "GET" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    },
+                    "{damage}: {result}"
+                );
+                assert!(
+                    result["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("incompatible schema"),
+                    "{damage}: {result}"
+                );
+            }
+            assert_eq!(before, std::fs::read(&f.path).unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_sqlite_and_corrupt_sources_have_specific_errors_without_repair() {
+    for bytes in [
+        b"".as_slice(),
+        b"not a database",
+        b"{\"format\":\"filesystem-store\",\"version\":10}",
+    ] {
+        let f = Fixture::upstream(9);
+        std::fs::write(&f.path, bytes).unwrap();
+        let (status, result) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported storage format"),
+            "{result}"
+        );
+        assert_eq!(bytes, std::fs::read(&f.path).unwrap());
+    }
+    let f = Fixture::upstream(9);
+    let mut corrupt = std::fs::read(&f.path).unwrap();
+    corrupt[100] = 0xff; // Invalid SQLite schema B-tree page type; preserve the header.
+    std::fs::write(&f.path, &corrupt).unwrap();
+    let (status, result) = f.request("GET", "/api/rx/catalog", Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        result["error"].as_str().unwrap().contains("corrupt"),
+        "{result}"
+    );
+    assert_eq!(corrupt, std::fs::read(&f.path).unwrap());
+}
+
+#[tokio::test]
+async fn upstream_schemas_keep_uncommitted_events_invisible() {
+    for version in [8, 9] {
+        let f = Fixture::upstream(version);
+        let writer = Connection::open(&f.path).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE;")
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO events(run_id,seq,received_at,data) VALUES(859,6,'now',?)",
+                [r#"{"kind":"epoch","epoch":2,"loss":0.4}"#],
+            )
+            .unwrap();
+        let wal = PathBuf::from(format!("{}-wal", f.path.display()));
+        let before = std::fs::read(&f.path).unwrap();
+        let wal_before = std::fs::read(&wal).unwrap();
+        let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["traces"][0]["points"], json!([[1.0, 0.5, "5"]]));
+        assert_eq!(before, std::fs::read(&f.path).unwrap());
+        assert_eq!(wal_before, std::fs::read(&wal).unwrap());
+        writer.execute_batch("COMMIT").unwrap();
+        let (status, result) = f.request("POST", "/api/rx/plot", f.query(), true).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(
+            result["traces"][0]["points"],
+            json!([[1.0, 0.5, "5"], [2.0, 0.4, "6"]])
+        );
+    }
+}
+
+#[tokio::test]
+async fn upstream_schemas_keep_record_cursors_pinned_across_appends() {
+    for version in [8, 9] {
+        let f = Fixture::upstream(version);
+        let db = Connection::open(&f.path).unwrap();
+        let raw =
+            r#"{"kind":"epoch","epoch":0.25,"loss":0.4,"literal.key":["日本",9007199254740993]}"#;
+        db.execute(
+            "INSERT INTO events(run_id,seq,received_at,data) VALUES(859,9,'original',?)",
+            [raw],
+        )
+        .unwrap();
+        let mut q = f.query();
+        q["limit"] = json!(1);
+        let (status, first) = f.request("POST", "/api/rx/records", q.clone(), true).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["records"][0]["seq"], "5");
+        assert!(first["next_cursor"].is_string());
+        db.execute(
+            "INSERT INTO events(run_id,seq,received_at,data) VALUES(859,12,'later',?)",
+            [raw],
+        )
+        .unwrap();
+        q["cursor"] = first["next_cursor"].clone();
+        let (status, second) = f.request("POST", "/api/rx/records", q.clone(), true).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["records"][0]["seq"], "9");
+        assert_eq!(second["records"][0]["run_uid"], "u859");
+        assert_eq!(second["records"][0]["received_at"], "original");
+        assert_eq!(second["records"][0]["raw"], raw);
+        if second["next_cursor"].is_string() {
+            q["cursor"] = second["next_cursor"].clone();
+            let (status, last) = f.request("POST", "/api/rx/records", q, true).await;
+            assert_eq!(status, StatusCode::OK, "{last}");
+            assert_eq!(last["records"], json!([]));
+            assert!(last["next_cursor"].is_null());
+        }
+        let (_, fresh) = f.request("POST", "/api/rx/records", f.query(), true).await;
+        assert_eq!(fresh["records"].as_array().unwrap().len(), 3);
+    }
 }
