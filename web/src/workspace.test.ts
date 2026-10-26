@@ -9,6 +9,7 @@ import {
   newChart,
   newWorkspace,
   resetChart,
+  reorderSections,
   resolveSources,
   saveLibrary,
   seriesId,
@@ -421,4 +422,30 @@ test("quota exceptions propagate unchanged and leave the last saved library inta
   );
   assert.equal(target.getItem("nset.workspaces.v2"), saved);
   assert.deepEqual(loadLibrary(target), library);
+});
+
+test("section reorder preserves identities, collapse states and intervening filtered sections", () => {
+  const sections = ["first", "hidden", "last"].map((id, i) => ({
+    id,
+    title: id,
+    collapsed: i === 1,
+    cards: [newChart("timeseries", ["loss"], id)],
+  }));
+  const before = JSON.stringify(sections);
+  const top = reorderSections(sections, "last", "first");
+  assert.deepEqual(
+    top.map((s) => s.id),
+    ["last", "first", "hidden"],
+  );
+  assert.equal(top[0], sections[2]);
+  assert.equal(top[1].cards[0], sections[0].cards[0]);
+  assert.equal(top[2].collapsed, true);
+  assert.equal(JSON.stringify(sections), before);
+  const bottom = reorderSections(top, "last", "hidden", true);
+  assert.deepEqual(bottom, sections);
+  assert.equal(reorderSections(sections, "first", "first"), sections);
+  assert.equal(reorderSections(sections, "first", "hidden"), sections);
+  assert.equal(reorderSections(sections, "last", "hidden", true), sections);
+  assert.equal(reorderSections(sections, "missing", "first"), sections);
+  assert.equal(reorderSections(sections, "first", "missing"), sections);
 });

@@ -13,7 +13,7 @@ const order = (page: Page, id = "first") =>
 const saved = (page: Page) =>
   page.evaluate(() => localStorage.getItem("nset.workspaces.v2"));
 
-async function fixture(page: Page, empty = false) {
+async function fixture(page: Page, empty = false, extraSection = false) {
   let histories = 0;
   await page.setViewportSize({ width: 1440, height: 1300 });
   await page.route("**/api/**", (route) => {
@@ -68,42 +68,55 @@ async function fixture(page: Page, empty = false) {
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
   await page.goto("/");
-  await page.evaluate(async (empty) => {
-    const { newChart, saveLibrary } = await import("/src/workspace.ts");
-    const make = (id: string) => ({
-      ...newChart("timeseries", ["loss"], `Plot ${id}`),
-      id,
-      layout: { width: 500, height: 280 },
-    });
-    saveLibrary({
-      version: 2,
-      activeByExperiment: { layout: "layout-view" },
-      views: [
-        {
-          version: 2,
-          id: "layout-view",
-          experimentId: "layout",
-          name: "Layout view",
-          selectedRunIds: ["run"],
-          updatedAt: 0,
-          sections: [
-            {
-              id: "first",
-              title: "Training",
-              collapsed: false,
-              cards: ["a", "b", "c", "d"].map(make),
-            },
-            {
-              id: "second",
-              title: "Validation",
-              collapsed: false,
-              cards: empty ? [] : ["e", "f"].map(make),
-            },
-          ],
-        },
-      ],
-    });
-  }, empty);
+  await page.evaluate(
+    async ({ empty, extraSection }) => {
+      const { newChart, saveLibrary } = await import("/src/workspace.ts");
+      const make = (id: string) => ({
+        ...newChart("timeseries", ["loss"], `Plot ${id}`),
+        id,
+        layout: { width: 500, height: 280 },
+      });
+      saveLibrary({
+        version: 2,
+        activeByExperiment: { layout: "layout-view" },
+        views: [
+          {
+            version: 2,
+            id: "layout-view",
+            experimentId: "layout",
+            name: "Layout view",
+            selectedRunIds: ["run"],
+            updatedAt: 0,
+            sections: [
+              {
+                id: "first",
+                title: "Training",
+                collapsed: false,
+                cards: ["a", "b", "c", "d"].map(make),
+              },
+              {
+                id: "second",
+                title: "Validation",
+                collapsed: false,
+                cards: empty ? [] : ["e", "f"].map(make),
+              },
+              ...(extraSection
+                ? [
+                    {
+                      id: "third",
+                      title: "Training archive",
+                      collapsed: true,
+                      cards: ["g"].map(make),
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ],
+      });
+    },
+    { empty, extraSection },
+  );
   await page.reload();
   await page.evaluate(async () => {
     const { ChartCard } = await import("/src/cards.ts");
@@ -462,7 +475,7 @@ test("section bands group controls near names, bound menus at 390px, and isolate
   );
   await capture(page, info, "narrow-section-actions");
   await section(page, "second")
-    .getByRole("button", { name: "Move section up", exact: true })
+    .getByRole("button", { name: "Move to top", exact: true })
     .focus();
   await page.keyboard.press("Enter");
   expect(
@@ -531,4 +544,315 @@ test("only titles initiate reorder and keyboard Move up/down remains available",
     .focus();
   await page.keyboard.press("Enter");
   expect(await order(page)).toEqual(["a", "b", "c", "d"]);
+});
+
+const sectionOrder = (page: Page) =>
+  page
+    .locator("#dashboard > .chart-section")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => (node as HTMLElement).dataset.sectionId),
+    );
+const sectionState = async (page: Page) =>
+  JSON.parse((await saved(page))!).views[0].sections.map((s: any) => ({
+    id: s.id,
+    collapsed: s.collapsed,
+  }));
+async function beginSectionDrag(
+  page: Page,
+  id: string,
+  part = ".section-toggle",
+) {
+  const handle = section(page, id).locator(part);
+  await handle.scrollIntoViewIfNeeded();
+  const r = (await handle.boundingBox())!;
+  const x = r.x + r.width * (part === ".section-heading" ? 0.85 : 0.5);
+  const y = r.y + r.height / 2;
+  await handle.evaluate((node) =>
+    node.addEventListener(
+      "pointerdown",
+      (event) => {
+        (window as any).reorderTest.sectionPointer = (
+          event as PointerEvent
+        ).pointerId;
+      },
+      { once: true },
+    ),
+  );
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 2, y + 1);
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await page.mouse.move(x + 12, y + 1, { steps: 4 });
+  await expect(page.locator("#dashboard")).toHaveClass(/section-dragging/);
+  for (const grid of await page.locator("#dashboard .chart-grid").all())
+    await expect(grid).toBeHidden();
+}
+async function hoverSection(page: Page, id: string, after: boolean) {
+  const r = (await section(page, id)
+    .locator(".section-heading")
+    .boundingBox())!;
+  await page.mouse.move(
+    r.x + r.width / 2,
+    r.y + r.height * (after ? 0.75 : 0.25),
+    { steps: 8 },
+  );
+  await expect(page.locator(".section-drop-indicator")).toBeVisible();
+}
+async function moveSectionByPointer(
+  page: Page,
+  id: string,
+  target: string,
+  after: boolean,
+  part?: string,
+) {
+  await beginSectionDrag(page, id, part);
+  await hoverSection(page, target, after);
+  await page.mouse.up();
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await expect(page.locator(".section-drop-indicator")).toHaveCount(0);
+}
+async function expectMixedSections(page: Page) {
+  await expect(section(page, "first").locator(".chart-grid")).toBeVisible();
+  await expect(section(page, "second").locator(".chart-grid")).toBeVisible();
+  await expect(section(page, "third").locator(".chart-grid")).toBeHidden();
+  await expect(
+    section(page, "first").locator(".section-toggle"),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    section(page, "third").locator(".section-toggle"),
+  ).toHaveAttribute("aria-expanded", "false");
+}
+
+test("section title drag folds only the preview and restores mixed collapse states and chart state", async ({
+  page,
+}) => {
+  const histories = await fixture(page, false, true);
+  const loads = histories();
+  const before = await saved(page);
+  await beginSectionDrag(page, "first");
+  expect(await saved(page)).toBe(before);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+  await hoverSection(page, "third", true);
+  await page.mouse.up();
+  await expect(page.locator(".section-drop-indicator")).toHaveCount(0);
+  expect(await sectionOrder(page)).toEqual(["second", "third", "first"]);
+  await expectMixedSections(page);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  expect(histories()).toBe(loads);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(1);
+  expect(await sectionState(page)).toEqual([
+    { id: "second", collapsed: false },
+    { id: "third", collapsed: true },
+    { id: "first", collapsed: false },
+  ]);
+  // The full bar and the count are handles too, including a collapsed source.
+  await moveSectionByPointer(
+    page,
+    "third",
+    "second",
+    false,
+    ".section-heading",
+  );
+  await moveSectionByPointer(page, "first", "third", false, ".section-count");
+  expect(await sectionOrder(page)).toEqual(["first", "third", "second"]);
+  await expectMixedSections(page);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  await page.reload();
+  await expect
+    .poll(() => sectionOrder(page))
+    .toEqual(["first", "third", "second"]);
+  await expectMixedSections(page);
+});
+
+test("section Escape, pointercancel, lost capture, blur, outside and no-op drops restore without writes", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  const before = await saved(page);
+  for (const reason of [
+    "Escape",
+    "pointercancel",
+    "lostcapture",
+    "blur",
+    "outside",
+    "noop",
+  ]) {
+    await beginSectionDrag(page, "first");
+    await hoverSection(
+      page,
+      reason === "noop" ? "first" : "third",
+      reason !== "noop",
+    );
+    if (reason === "Escape") await page.keyboard.press("Escape");
+    else if (reason === "outside") await page.mouse.move(10, 10, { steps: 4 });
+    else if (reason !== "noop")
+      await page.evaluate((reason) => {
+        const pointerId = (window as any).reorderTest.sectionPointer;
+        if (reason === "blur") window.dispatchEvent(new Event("blur"));
+        else if (reason === "pointercancel")
+          window.dispatchEvent(
+            new PointerEvent("pointercancel", { pointerId }),
+          );
+        else
+          document
+            .querySelector<HTMLElement>(
+              '[data-section-id="first"] .section-heading',
+            )!
+            .releasePointerCapture(pointerId);
+      }, reason);
+    await page.mouse.up();
+    await expect(page.locator("#dashboard")).not.toHaveClass(
+      /section-dragging/,
+    );
+    await expect(page.locator(".section-drop-indicator")).toHaveCount(0);
+    await expectMixedSections(page);
+    expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
+    expect(await saved(page)).toBe(before);
+  }
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  await moveSectionByPointer(page, "first", "third", true);
+  expect(await sectionOrder(page)).toEqual(["second", "third", "first"]);
+});
+
+test("section save failure restores order and fold state, then a fresh drag succeeds", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  const before = await saved(page);
+  await page.evaluate(() => {
+    (window as any).reorderTest.failSave = true;
+  });
+  await moveSectionByPointer(page, "first", "third", true);
+  await expect(page.locator("#global-error")).toContainText(
+    "fixture storage failure",
+  );
+  expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
+  expect(await saved(page)).toBe(before);
+  await expectMixedSections(page);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  await page.evaluate(() => {
+    (window as any).reorderTest.failSave = false;
+  });
+  await moveSectionByPointer(page, "first", "third", true);
+  expect(await sectionOrder(page)).toEqual(["second", "third", "first"]);
+  await expectMixedSections(page);
+  await expect(page.locator("#global-error")).toBeHidden();
+});
+
+test("section dragging respects chart filters and retains filtered-out sections", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  await page.getByRole("searchbox", { name: "Search charts" }).fill("Training");
+  await expect(section(page, "second")).toBeHidden();
+  await moveSectionByPointer(page, "first", "third", true);
+  expect(await sectionOrder(page)).toEqual(["second", "third", "first"]);
+  await expect(section(page, "second")).toBeHidden();
+  await page.getByRole("searchbox", { name: "Search charts" }).fill("");
+  await expectMixedSections(page);
+  expect((await sectionState(page)).map((s: any) => s.id)).toEqual([
+    "second",
+    "third",
+    "first",
+  ]);
+});
+
+test("section action controls do not initiate drags, and ordinary title clicks still toggle", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  const first = section(page, "first");
+  // A sub-threshold movement must remain an ordinary toggle click.
+  const title = (await first.locator(".section-toggle").boundingBox())!;
+  await page.mouse.move(title.x + 25, title.y + title.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(title.x + 27, title.y + title.height / 2 + 1);
+  await page.mouse.up();
+  await expect(first.locator(".chart-grid")).toBeHidden();
+  await first.locator(".section-toggle").click();
+  await expectMixedSections(page);
+  const before = await saved(page);
+  const summary = first.locator(".section-menu > summary");
+  const menuHandle = (await summary.boundingBox())!;
+  await page.mouse.move(menuHandle.x + 6, menuHandle.y + menuHandle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(
+    menuHandle.x + 18,
+    menuHandle.y + menuHandle.height / 2,
+    { steps: 4 },
+  );
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await page.mouse.up();
+  await expect(first.locator(".section-menu")).toHaveAttribute("open", "");
+  expect(await saved(page)).toBe(before);
+  const action = first.getByRole("button", {
+    name: "Move to bottom",
+    exact: true,
+  });
+  const r = (await action.boundingBox())!;
+  await page.mouse.move(r.x + 30, r.y + r.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(r.x + 42, r.y + r.height / 2, { steps: 4 });
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await expect(section(page, "second").locator(".chart-grid")).toBeVisible();
+  await page.mouse.up();
+  expect(await sectionOrder(page)).toEqual(["second", "third", "first"]);
+  await expectMixedSections(page);
+});
+
+test("keyboard section Move to top/bottom controls persist full order without changing folds", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  for (const [label, expected] of [
+    ["Move to top", ["third", "first", "second"]],
+    ["Move to bottom", ["first", "second", "third"]],
+  ] as const) {
+    const source = section(page, "third");
+    await source.locator(".section-menu > summary").focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      source.getByRole("button", { name: "Move section up", exact: true }),
+    ).toHaveCount(0);
+    await source.getByRole("button", { name: label, exact: true }).focus();
+    await page.keyboard.press("Enter");
+    expect(await sectionOrder(page)).toEqual(expected);
+    await expectMixedSections(page);
+    await expect(source.locator(".section-menu > summary")).toBeFocused();
+    await page.reload();
+    await expect.poll(() => sectionOrder(page)).toEqual(expected);
+    await expectMixedSections(page);
+  }
+});
+
+test("filter updates and navigation cancel an active section drag without saving temporary folds", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  const before = await saved(page);
+  await beginSectionDrag(page, "first");
+  await page.locator("#chart-search").evaluate((input) => {
+    (input as HTMLInputElement).value = "Training";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await page.mouse.up();
+  await page.getByRole("searchbox", { name: "Search charts" }).fill("");
+  await expectMixedSections(page);
+  const hash = await page.evaluate(() => location.hash);
+  await beginSectionDrag(page, "first");
+  await page.evaluate(() => {
+    location.hash = "#/experiments";
+  });
+  await expect(page.locator("#dashboard")).toHaveCount(0);
+  await expect(page.locator(".section-drop-indicator")).toHaveCount(0);
+  await page.mouse.up();
+  await page.evaluate((hash) => {
+    location.hash = hash;
+  }, hash);
+  await expectMixedSections(page);
+  expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
+  expect(await saved(page)).toBe(before);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
 });

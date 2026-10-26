@@ -713,9 +713,7 @@ test("Pause during retry backoff cancels the pending retry without skipping", as
   expect(await page.evaluate(() => (window as any).stability.retryFired)).toBe(
     0,
   );
-  await expect(
-    page.getByRole("status", { includeHidden: true }),
-  ).not.toContainText(/skipp|Frame unavailable/i);
+  await expect(page.getByRole("status", { includeHidden: true })).toBeEmpty();
   expect(errors).toEqual([]);
 });
 
@@ -876,9 +874,42 @@ test("seek, deactivate, source switch, and destroy cancel an in-flight automatic
         ).toHaveAttribute("aria-pressed", "false");
         await expect(
           page.getByRole("status", { includeHidden: true }),
-        ).not.toContainText(/skipp|Frame unavailable/i);
+        ).toBeEmpty();
       }
       expect(errors).toEqual([]);
     });
   }
 });
+
+for (const compact of [true, false]) {
+  test(`image hover stays quiet and manual pause has no overlay (${compact ? "compact" : "full"})`, async ({
+    page,
+  }) => {
+    await fixture(page, compact);
+    await recoverySetup(page);
+    const play = page.getByRole("button", { name: "Play image timeline" });
+    const canvas = page.locator(".image-canvas");
+    await expect(play).not.toHaveAttribute("title");
+    await expect(canvas).not.toHaveAttribute("title");
+    await expect(canvas).toHaveAttribute(
+      "aria-label",
+      "Native resolution image viewport",
+    );
+    await page.evaluate(() => {
+      (window as any).stability.delayDecode = true;
+    });
+    await play.click();
+    await queued(page, "pendingDecode");
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    await expect(play).not.toHaveAttribute("title");
+    await canvas.hover();
+    await play.click();
+    await expect(play).toHaveAttribute("aria-pressed", "false");
+    await expect(play).not.toHaveAttribute("title");
+    await expect(page.getByRole("status", { includeHidden: true })).toBeEmpty();
+    await release(page, "pendingDecode");
+    await painted(page);
+    await expect(page.locator(".frame-info")).toHaveAttribute("data-step", "0");
+    await expect(page.getByRole("status", { includeHidden: true })).toBeEmpty();
+  });
+}

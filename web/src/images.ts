@@ -106,7 +106,6 @@ export class ImagePanel {
       extrasSummary.replaceChildren(plotIcon("more"));
       extrasSummary.classList.add("card-image-icon");
       this.play.classList.add("card-image-icon");
-      this.play.title = "Play";
       this.play.replaceChildren(plotIcon("play"));
     }
     timeline.append(previous, this.play, next);
@@ -193,8 +192,6 @@ export class ImagePanel {
     );
     const canvas = element("div", "image-canvas");
     canvas.dataset.role = "image-viewer";
-    canvas.title =
-      "Drag to zoom to a region · right-drag or Space+drag to pan · Ctrl+scroll to zoom · double-click to fit";
     canvas.setAttribute("aria-label", "Native resolution image viewport");
     canvas.tabIndex = 0;
     this.slider.type = "range";
@@ -796,7 +793,6 @@ export class ImagePanel {
     const index = this.index;
     retry.onclick = () => void this.show(index);
     const detail = element("span", "", text);
-    detail.title = text;
     this.status.replaceChildren(detail, retry);
   }
   private async showFrame(
@@ -993,12 +989,10 @@ export class ImagePanel {
       this.requests.next();
       this.frameAbort?.abort();
       this.prefetchAbort?.abort();
-      if (this.requested !== this.displayed)
-        this.status.textContent = "Playback paused.";
+      if (this.requested !== this.displayed) this.status.textContent = "";
     }
     if (this.compact) {
       this.play.replaceChildren(plotIcon("play"));
-      this.play.title = "Play";
     } else this.play.textContent = "Play";
     this.play.setAttribute("aria-pressed", "false");
   }
@@ -1023,7 +1017,6 @@ export class ImagePanel {
         : "";
     if (this.compact) {
       this.play.replaceChildren(plotIcon("pause"));
-      this.play.title = "Pause";
     } else this.play.textContent = "Pause";
     this.play.setAttribute("aria-pressed", "true");
     const schedule = (retry = false) => {

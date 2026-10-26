@@ -1,0 +1,32 @@
+.section-heading,
+.section-heading .section-toggle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.dashboard.section-dragging {
+  overflow-anchor: none;
+}
+.dashboard.section-dragging > .chart-section {
+  scroll-margin-top: 48px;
+}
+.dashboard.section-dragging > .chart-section > .chart-grid,
+.dashboard.section-dragging > .dashboard-empty {
+  display: none;
+}
+.dashboard.section-dragging .section-heading,
+.dashboard.section-dragging .section-toggle {
+  cursor: grabbing;
+}
+.dashboard.section-dragging .section-drag-source > .section-heading {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.section-drop-indicator {
+  position: fixed;
+  z-index: 1000;
+  height: 3px;
+  pointer-events: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--surface);
+}

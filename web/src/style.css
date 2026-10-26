@@ -299,8 +299,7 @@ h3 {
   padding: 6px 9px;
 }
 #main {
-  max-width: 1800px;
-  margin: auto;
+  min-width: 0;
   padding: 6px 14px 40px;
 }
 .breadcrumb {

@@ -8,6 +8,8 @@ import { reconcileRunSelection } from "./run-selection";
 import { uuid } from "./uuid";
 import { appendRxCatalog } from "./records";
 import "./style.css";
+import "./section-drag.css";
+import { SectionDrag } from "./section-drag";
 import { Api, type Run } from "./api";
 import {
   ServerWorkspace,
@@ -22,6 +24,7 @@ import {
   defaultSections,
   newChart,
   resetChart,
+  reorderSections,
   newWorkspace,
   loadLibrary,
   saveLibrary,
@@ -154,7 +157,10 @@ async function pollServerViews() {
     }
     if ((adopted || previousCatalog !== catalogGeneration) && active) {
       if (adopted) undo.delete(active.workspace.id);
-      reconcileSelections(active.workspace.experimentId, filterSessionFor(active.workspace.experimentId));
+      reconcileSelections(
+        active.workspace.experimentId,
+        filterSessionFor(active.workspace.experimentId),
+      );
       if (previousExperiment !== active.workspace.experimentId) {
         disposeCards();
         renderPage();
@@ -264,7 +270,10 @@ async function serverAction(
     if (valid() && !isAbort(e)) error(message(e));
   } finally {
     if (valid()) {
-      reconcileSelections(state.workspace.experimentId, filterSessionFor(state.workspace.experimentId));
+      reconcileSelections(
+        state.workspace.experimentId,
+        filterSessionFor(state.workspace.experimentId),
+      );
       if (previousExperiment !== state.workspace.experimentId) {
         disposeCards();
         renderPage();
@@ -381,6 +390,7 @@ const cards = new Map<
   { view: ChartCard; host: HTMLElement; spec: string; context: string }
 >();
 const sectionNodes = new Map<string, HTMLElement>();
+const sectionDrag = new SectionDrag();
 const scrollPositions = new Map<string, number>();
 let previousRoute = "";
 let suspendedDashboard: DocumentFragment | undefined;
@@ -465,6 +475,7 @@ function commitLibrary(mutate: () => void): boolean {
   }
 }
 function disposeCards() {
+  sectionDrag.cancel();
   runDrawer?.destroy();
   runDrawer = undefined;
   for (const card of cards.values()) card.view.destroy();
@@ -475,6 +486,7 @@ function disposeCards() {
   suspendedFocus = undefined;
 }
 function suspendDashboard() {
+  sectionDrag.cancel();
   if (!currentWorkspaceId || suspendedDashboard) return;
   suspendedFocus = $("page").contains(document.activeElement)
     ? (document.activeElement as HTMLElement)
@@ -603,7 +615,11 @@ function locate(workspace: Workspace, id: string) {
   }
   return null;
 }
-function updateSelection(workspace: Workspace, ids: string[], clearPending = false) {
+function updateSelection(
+  workspace: Workspace,
+  ids: string[],
+  clearPending = false,
+) {
   const saved = change(workspace, () => {
     workspace.selectedRunIds = [...new Set(ids)];
     // Only an explicit reset cancels intent whose evidence is still unresolved.
@@ -658,6 +674,7 @@ function viewSwitch(experimentId: string, view: "runs" | "charts" | null) {
 }
 let detailRequest: AbortController | undefined;
 function renderPage() {
+  sectionDrag.cancel();
   detailRequest?.abort();
   detailRequest = undefined;
   if (!connected) return;
@@ -1279,10 +1296,15 @@ function workspaceToolbar(workspace: Workspace) {
     const previous = stack?.at(-1);
     if (
       previous &&
-      change(workspace, () => {
-        delete workspace.pendingSelectedRunIds;
-        Object.assign(workspace, previous);
-      }, false, false)
+      change(
+        workspace,
+        () => {
+          delete workspace.pendingSelectedRunIds;
+          Object.assign(workspace, previous);
+        },
+        false,
+        false,
+      )
     ) {
       stack!.splice(-2);
       renderCharts(workspace);
@@ -1436,9 +1458,24 @@ function sectionDropSlot(grid: HTMLElement, x: number, y: number) {
   };
 }
 
+function moveSection(
+  workspace: Workspace,
+  id: string,
+  targetId: string,
+  after: boolean,
+) {
+  if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
+    return;
+  const next = reorderSections(workspace.sections, id, targetId, after);
+  if (next !== workspace.sections)
+    change(workspace, () => {
+      workspace.sections = next;
+    });
+}
 function renderCharts(workspace: Workspace) {
   if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
     return;
+  sectionDrag.cancel();
   const focused = document.activeElement;
   const focusedSection = focused?.closest<HTMLElement>(".chart-section");
   const focusedHeader = focused?.closest(".section-heading");
@@ -1499,21 +1536,15 @@ function renderCharts(workspace: Workspace) {
             if (title) change(workspace, () => (section.title = title));
           })(),
       ),
-      button("Move section up", () => {
-        const index = workspace.sections.indexOf(section);
-        if (index > 0)
-          change(workspace, () => {
-            workspace.sections.splice(index, 1);
-            workspace.sections.splice(index - 1, 0, section);
-          });
+      button("Move to top", () => {
+        summary.focus({ preventScroll: true });
+        menu.open = false;
+        moveSection(workspace, section.id, workspace.sections[0].id, false);
       }),
-      button("Move section down", () => {
-        const index = workspace.sections.indexOf(section);
-        if (index < workspace.sections.length - 1)
-          change(workspace, () => {
-            workspace.sections.splice(index, 1);
-            workspace.sections.splice(index + 1, 0, section);
-          });
+      button("Move to bottom", () => {
+        summary.focus({ preventScroll: true });
+        menu.open = false;
+        moveSection(workspace, section.id, workspace.sections.at(-1)!.id, true);
       }),
       button(
         "Remove section",
@@ -1674,6 +1705,7 @@ function renderCharts(workspace: Workspace) {
             )
           )
             return;
+          sectionDrag.cancel();
           clearCardDrag();
           draggedCard = { id: spec.id, workspaceId: workspace.id };
           e.dataTransfer?.setData("application/x-nset-card", spec.id);
@@ -1720,6 +1752,9 @@ function renderCharts(workspace: Workspace) {
       sectionNodes.delete(id);
     }
   applyChartFilter(workspace);
+  sectionDrag.bind(dashboard, (id, targetId, after) =>
+    moveSection(workspace, id, targetId, after),
+  );
   if (focusedHeader && focusedSection?.dataset.sectionId)
     sectionNodes
       .get(focusedSection.dataset.sectionId)
@@ -1729,6 +1764,7 @@ function renderCharts(workspace: Workspace) {
       ?.focus({ preventScroll: true });
 }
 function applyChartFilter(workspace: Workspace) {
+  sectionDrag.cancel();
   const query = chartSearch.trim().toLowerCase();
   let visible = 0;
   for (const section of workspace.sections) {

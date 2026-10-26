@@ -250,6 +250,21 @@ export function defaultSections(catalog: Catalog, runIds: string[]): Section[] {
         : compare(a.title, b.title),
   );
 }
+/** Move one section relative to another without cloning cards or losing hidden sections. */
+export function reorderSections(
+  sections: Section[],
+  id: string,
+  targetId: string,
+  after = false,
+): Section[] {
+  const source = sections.find((section) => section.id === id);
+  if (!source || id === targetId || !sections.some((s) => s.id === targetId))
+    return sections;
+  const next = sections.filter((section) => section !== source);
+  const index = next.findIndex((section) => section.id === targetId);
+  next.splice(index + Number(after), 0, source);
+  return next.every((section, i) => section === sections[i]) ? sections : next;
+}
 export function newWorkspace(
   experimentId: string,
   name: string,

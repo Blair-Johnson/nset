@@ -70,6 +70,8 @@ export class RunDrawer {
   readonly backdrop = element("div", "run-drawer-backdrop");
   readonly toggle = element("button", "run-pane-toggle");
   private readonly list = element("div", "run-drawer-list");
+  private readonly searchTools = element("div", "run-drawer-search");
+  private readonly actions = element("div", "run-drawer-actions");
   private readonly search = element("input");
   private readonly status = element("select");
   private readonly count = element("button", "drawer-selection-count");
@@ -100,6 +102,7 @@ export class RunDrawer {
   private previousFocus?: HTMLElement;
   private drag?: { pointerId: number; startX: number; width: number };
   private readonly observer = new ResizeObserver(() => this.measure());
+  private readonly toolbarObserver = new MutationObserver(() => this.measure());
   private readonly onViewport = () => {
     if (this.narrow.matches) this.setOpen(false, false, false);
     else this.setOpen(this.state.open, false, false);
@@ -116,7 +119,10 @@ export class RunDrawer {
   constructor(
     private readonly experimentId: string,
     private readonly state: RunDrawerState,
-    private readonly onSelection: (ids: string[], clearPending?: boolean) => void,
+    private readonly onSelection: (
+      ids: string[],
+      clearPending?: boolean,
+    ) => void,
     onTable: () => void,
     private readonly onDetails: (run: Run) => void,
     session?: RunFilterSession,
@@ -146,7 +152,8 @@ export class RunDrawer {
     this.divider.setAttribute("aria-controls", this.root.id);
     this.divider.title = "Drag to resize run list, or use arrow keys";
     this.divider.onkeydown = (event) => {
-      if (event.target !== this.divider || !state.open) return;
+      if (event.target !== this.divider || !state.open || this.narrow.matches)
+        return;
       const step = event.shiftKey ? 50 : 10;
       const width =
         event.key === "ArrowLeft"
@@ -203,7 +210,7 @@ export class RunDrawer {
     this.outside.setAttribute("role", "status");
     this.count.setAttribute("aria-describedby", this.outside.id);
     heading.append(element("strong", "", "Runs"), this.count, this.outside);
-    const searchTools = element("div", "run-drawer-search");
+    const searchTools = this.searchTools;
     this.clearFilters.className = "drawer-clear-filters";
     this.clearFilters.title =
       "Clear text, status and structured filters; keep Selected mode";
@@ -235,7 +242,7 @@ export class RunDrawer {
       state.status = this.status.value;
       this.session.setSearch(state.query, state.status);
     };
-    const actions = element("div", "run-drawer-actions");
+    const actions = this.actions;
     actions.append(
       this.button("Select matching", () =>
         this.onSelection([
@@ -351,15 +358,70 @@ export class RunDrawer {
           .find(([, row]) => !row.root.hidden);
       (next?.[1].check ?? this.count).focus({ preventScroll: true });
     }
+    this.measure();
   }
   /** Called after mounting; charts and list nodes never move during resizing. */
   mount() {
     if (this.pane.parentElement) this.observer.observe(this.pane.parentElement);
+    for (const row of [this.searchTools, this.actions]) {
+      this.observer.observe(row);
+      this.toolbarObserver.observe(row, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["hidden", "class", "style"],
+      });
+    }
     this.measure();
     this.restoreScroll();
   }
+  private minWidth() {
+    if (this.root.hidden) return MIN_WIDTH;
+    const px = (value: string) => Number.parseFloat(value) || 0;
+    const horizontalInsets = (style: CSSStyleDeclaration) =>
+      px(style.paddingLeft) +
+      px(style.paddingRight) +
+      px(style.borderLeftWidth) +
+      px(style.borderRightWidth);
+    const rowWidth = (row: HTMLElement, controls: Element[]) => {
+      const visible = controls.filter(
+        (control) => control.getClientRects().length,
+      );
+      const style = getComputedStyle(row);
+      return (
+        horizontalInsets(style) +
+        Math.max(0, visible.length - 1) * px(style.columnGap) +
+        visible.reduce((width, control) => {
+          // Observe intrinsic control changes too (fonts, labels and filter UI).
+          this.observer.observe(control);
+          const controlStyle = getComputedStyle(control);
+          return (
+            width +
+            (control === this.search
+              ? px(controlStyle.minWidth)
+              : control.getBoundingClientRect().width)
+          );
+        }, 0)
+      );
+    };
+    return Math.max(
+      MIN_WIDTH,
+      Math.ceil(
+        horizontalInsets(getComputedStyle(this.root)) +
+          Math.max(
+            rowWidth(this.searchTools, [
+              this.search,
+              this.filterControl.root,
+              this.status,
+            ]),
+            rowWidth(this.actions, [...this.actions.children]),
+          ),
+      ),
+    );
+  }
   private maxWidth() {
-    if (this.narrow.matches) return 600;
+    if (this.narrow.matches) return Math.min(600, Math.max(0, innerWidth - 40));
     return Math.max(
       MIN_WIDTH,
       Math.min(600, (this.pane.parentElement?.clientWidth ?? 1020) - 420),
@@ -378,10 +440,13 @@ export class RunDrawer {
     this.resize(this.state.width);
   }
   private resize(width: number) {
-    this.state.width = Math.max(MIN_WIDTH, Math.min(this.maxWidth(), width));
+    const max = this.maxWidth();
+    // A constrained viewport wins over the single-line minimum; CSS wraps rows.
+    const min = Math.min(max, this.minWidth());
+    this.state.width = Math.max(min, Math.min(max, width));
     this.pane.style.setProperty("--run-pane-width", `${this.state.width}px`);
-    this.divider.setAttribute("aria-valuemin", String(MIN_WIDTH));
-    this.divider.setAttribute("aria-valuemax", String(this.maxWidth()));
+    this.divider.setAttribute("aria-valuemin", String(min));
+    this.divider.setAttribute("aria-valuemax", String(max));
     this.divider.setAttribute(
       "aria-valuenow",
       String(Math.round(this.state.width)),
@@ -548,6 +613,7 @@ export class RunDrawer {
     if (this.ownsSession) this.session.destroy();
     this.finishResize(true);
     this.observer.disconnect();
+    this.toolbarObserver.disconnect();
     this.narrow.removeEventListener("change", this.onViewport);
     window.removeEventListener("resize", this.onGeometry);
     window.removeEventListener("scroll", this.onGeometry);

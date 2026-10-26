@@ -191,12 +191,37 @@ test("60-run drawer retains checkbox identity, focus, filter, scroll and open st
     "true",
   );
   await drawer.getByLabel("Find runs", { exact: true }).fill("second");
+  // Filtering narrows the accepted cohort; run 0 is not retained off-filter.
+  await expect(drawer.locator(".drawer-selection-count")).toHaveText(
+    "Selected (1)",
+  );
+  await expect(choice).toBeChecked();
   await drawer
     .getByRole("button", { name: "Select matching", exact: true })
     .click();
   await expect(drawer.locator(".drawer-selection-count")).toHaveText(
-    "Selected (31)",
+    "Selected (30)",
   );
+  await expect
+    .poll(() =>
+      drawer
+        .locator("input[type=checkbox]:checked")
+        .evaluateAll((checks) =>
+          checks
+            .map(
+              (check) =>
+                (check.closest(".run-drawer-row") as HTMLElement).dataset
+                  .runId!,
+            )
+            .sort(),
+        ),
+    )
+    .toEqual(
+      runs
+        .filter((run) => run.params.group === "second")
+        .map((run) => run.id)
+        .sort(),
+    );
   await expect(drawer.locator(".run-drawer-row:visible")).toHaveCount(30);
   const filter = await drawer
     .getByLabel("Find runs", { exact: true })
@@ -740,7 +765,44 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
   });
   await separator.focus();
   await separator.press("Home");
-  await expect(separator).toHaveAttribute("aria-valuenow", "250");
+  const minimum = Number(await separator.getAttribute("aria-valuemin"));
+  expect(minimum).toBeGreaterThanOrEqual(250);
+  expect(minimum).toBeLessThanOrEqual(
+    Number(await separator.getAttribute("aria-valuemax")),
+  );
+  await expect(separator).toHaveAttribute("aria-valuenow", String(minimum));
+  expect((await drawer.boundingBox())!.width).toBeCloseTo(minimum, 0);
+  const minimumLayout = await drawer.evaluate((root) => {
+    const box = root.getBoundingClientRect();
+    const style = getComputedStyle(root);
+    return {
+      left: box.left + parseFloat(style.paddingLeft),
+      right: box.right - parseFloat(style.paddingRight),
+      rows: [
+        ".run-drawer-search > input, .run-drawer-search .run-filter-control, .run-drawer-search > select",
+        ".run-drawer-actions > button",
+      ].map((selector) =>
+        [...root.querySelectorAll(selector)]
+          .filter((control) => control.getClientRects().length)
+          .map((control) => {
+            const { left, right, top } = control.getBoundingClientRect();
+            return { left, right, top };
+          }),
+      ),
+      searchWidth: root
+        .querySelector('input[type="search"]')!
+        .getBoundingClientRect().width,
+    };
+  });
+  expect(minimumLayout.searchWidth).toBeGreaterThanOrEqual(100);
+  for (const controls of minimumLayout.rows) {
+    expect(controls.length).toBeGreaterThanOrEqual(2);
+    for (const control of controls) {
+      expect(control.left).toBeGreaterThanOrEqual(minimumLayout.left - 1);
+      expect(control.right).toBeLessThanOrEqual(minimumLayout.right + 1);
+      expect(Math.abs(control.top - controls[0].top)).toBeLessThanOrEqual(1);
+    }
+  }
   await separator.press("End");
   await expect(separator).toHaveAttribute("aria-valuenow", "600");
   await separator.press("ArrowRight");
@@ -767,7 +829,63 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
   await separator.dispatchEvent("pointercancel");
   await page.mouse.up();
   await expect(separator).toHaveAttribute("aria-valuenow", "400");
+  // Resizing and cancelling gestures must preserve the original 60-run plot.
+  expect(
+    await page.evaluate(
+      (old) => (window as any).__drawerPlot.chart === old,
+      plot,
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(() => {
+      const p = (window as any).__drawerPlot;
+      return {
+        min: p.chart.scales.x.min,
+        max: p.chart.scales.x.max,
+        pins: p.pins,
+      };
+    }),
+  ).toEqual(before);
+  expect(histories()).toBe(requests);
+
   await drawer.getByLabel("Find runs", { exact: true }).fill("second");
+  await expect(drawer.locator(".drawer-selection-count")).toHaveText(
+    "Selected (30)",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).__drawerPlot.analyzed
+          .map((series: any) => series.run.id)
+          .sort(),
+      ),
+    )
+    .toEqual(
+      runs
+        .filter((run) => run.params.group === "second")
+        .map((run) => JSON.stringify(["metric", run.id, "train/loss"]))
+        .sort(),
+    );
+  // Filtering can reload histories evicted from the bounded cache.
+  const filteredRequests = histories();
+  // Narrowing changes plot data. Test collapse preservation against this new plot,
+  // not the superseded 60-run instance; give it a nontrivial camera and pins too.
+  await page
+    .getByRole("button", { name: "Zoom in", exact: true })
+    .first()
+    .click();
+  const filteredPlot = await page.evaluateHandle(
+    () => (window as any).__drawerPlot.chart,
+  );
+  const filteredBefore = await page.evaluate(() => {
+    const p = (window as any).__drawerPlot;
+    p.setPins({ a: 0.5, b: 1.5 });
+    return {
+      min: p.chart.scales.x.min,
+      max: p.chart.scales.x.max,
+      pins: p.pins,
+    };
+  });
   const choice = drawer.getByRole("checkbox", {
     name: `Show ${runs[58].name}`,
     exact: true,
@@ -836,7 +954,7 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
   expect(
     await page.evaluate(
       (old) => (window as any).__drawerPlot.chart === old,
-      plot,
+      filteredPlot,
     ),
   ).toBe(true);
   expect(
@@ -848,8 +966,8 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
         pins: p.pins,
       };
     }),
-  ).toEqual(before);
-  expect(histories()).toBe(requests);
+  ).toEqual(filteredBefore);
+  expect(histories()).toBe(filteredRequests);
   await expect(
     page.getByRole("button", { name: "Previous view", exact: true }).first(),
   ).toBeEnabled();
@@ -861,7 +979,30 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
   await page
     .getByRole("button", { name: "Expand run list", exact: true })
     .click();
-  await expect(drawer.locator("input[type=checkbox]:checked")).toHaveCount(60);
+  await expect(drawer.getByLabel("Find runs", { exact: true })).toHaveValue(
+    "second",
+  );
+  await expect(drawer.locator("input[type=checkbox]:checked")).toHaveCount(30);
+  await expect
+    .poll(() =>
+      drawer
+        .locator("input[type=checkbox]:checked")
+        .evaluateAll((checks) =>
+          checks
+            .map(
+              (check) =>
+                (check.closest(".run-drawer-row") as HTMLElement).dataset
+                  .runId!,
+            )
+            .sort(),
+        ),
+    )
+    .toEqual(
+      runs
+        .filter((run) => run.params.group === "second")
+        .map((run) => run.id)
+        .sort(),
+    );
   expect((await drawer.boundingBox())!.width).toBe(400);
   await page.reload();
   await expect(drawer).toBeVisible();

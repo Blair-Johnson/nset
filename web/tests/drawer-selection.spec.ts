@@ -429,3 +429,220 @@ test.describe("mobile drawer focus", () => {
     });
   }
 });
+
+async function expectToolbarFits(page: Page, singleLine = true) {
+  await expect
+    .poll(() =>
+      drawer(page).evaluate((root, singleLine) => {
+        const bounds = root.getBoundingClientRect();
+        const style = getComputedStyle(root);
+        const left = bounds.left + parseFloat(style.paddingLeft);
+        const right = bounds.right - parseFloat(style.paddingRight);
+        const problems: string[] = [];
+        for (const selector of [
+          ".run-drawer-search > input, .run-drawer-search .run-filter-control, .run-drawer-search > select",
+          ".run-drawer-actions > button",
+        ]) {
+          const controls = [
+            ...root.querySelectorAll<HTMLElement>(selector),
+          ].filter((control) => control.getClientRects().length);
+          const firstTop = controls[0]?.getBoundingClientRect().top ?? 0;
+          for (const control of controls) {
+            const box = control.getBoundingClientRect();
+            const name =
+              control.getAttribute("aria-label") || control.textContent;
+            if (box.left < left - 1 || box.right > right + 1)
+              problems.push(`${name} exceeds drawer padding`);
+            if (control.scrollWidth > control.clientWidth + 1)
+              problems.push(`${name} clips its content`);
+            if (singleLine && Math.abs(box.top - firstTop) > 1)
+              problems.push(`${name} unexpectedly wraps`);
+          }
+        }
+        if (document.documentElement.scrollWidth > innerWidth)
+          problems.push("document overflows horizontally");
+        return problems;
+      }, singleLine),
+    )
+    .toEqual([]);
+}
+
+async function dragDrawerToMinimum(page: Page) {
+  const divider = page.getByRole("separator", { name: "Resize run list" });
+  const box = (await divider.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(0, box.y + 20, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => {
+      const minimum = Number(await divider.getAttribute("aria-valuemin"));
+      return Math.abs((await drawer(page).boundingBox())!.width - minimum);
+    })
+    .toBeLessThanOrEqual(1);
+}
+
+test("wide workspace fills the viewport with an open or collapsed drawer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2560, height: 1100 });
+  await fixture(page);
+  for (const width of [2560, 3440]) {
+    await page.setViewportSize({ width, height: 1100 });
+    for (const open of [true, false]) {
+      if (!open)
+        await page.getByLabel("Collapse run list", { exact: true }).click();
+      await expect
+        .poll(() =>
+          page.locator(".workspace-layout").evaluate((layout) => {
+            const main = document.querySelector("#main")!;
+            const style = getComputedStyle(main);
+            const box = layout.getBoundingClientRect();
+            const dashboard = layout
+              .querySelector(".dashboard")!
+              .getBoundingClientRect();
+            return {
+              mainFillsViewport:
+                Math.abs(
+                  main.getBoundingClientRect().width -
+                    document.documentElement.clientWidth,
+                ) <= 1,
+              leftGutter: Math.round(box.left),
+              expectedLeftGutter: Math.round(parseFloat(style.paddingLeft)),
+              rightGap: Math.round(
+                document.documentElement.clientWidth - box.right,
+              ),
+              expectedRightGap: Math.round(parseFloat(style.paddingRight)),
+              dashboardAtRightEdge: Math.abs(dashboard.right - box.right) <= 1,
+              noOverflow: document.documentElement.scrollWidth <= innerWidth,
+            };
+          }),
+        )
+        .toMatchObject({
+          mainFillsViewport: true,
+          leftGutter: 14,
+          expectedLeftGutter: 14,
+          rightGap: 14,
+          expectedRightGap: 14,
+          dashboardAtRightEdge: true,
+          noOverflow: true,
+        });
+    }
+    await page.getByLabel("Expand run list", { exact: true }).click();
+  }
+});
+
+test("drawer drag minimum fits both toolbar rows and follows filter visibility", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await fixture(page);
+  const divider = page.getByRole("separator", { name: "Resize run list" });
+  await dragDrawerToMinimum(page);
+  await expectToolbarFits(page);
+  const unfilteredMinimum = Number(await divider.getAttribute("aria-valuemin"));
+
+  await filters(page);
+  await expect(toggle(page)).toHaveText("Selected (3)");
+  await expect
+    .poll(async () => Number(await divider.getAttribute("aria-valuemin")))
+    .toBeGreaterThan(unfilteredMinimum);
+  await expectToolbarFits(page);
+  await divider.press("End");
+  await expect(divider).toHaveAttribute("aria-valuenow", "600");
+  await dragDrawerToMinimum(page);
+  await expectToolbarFits(page);
+  await toggle(page).click();
+  await drawer(page)
+    .getByRole("button", { name: "Clear selection", exact: true })
+    .click();
+  await expect(toggle(page)).toHaveText("Selected (0)");
+  await expectToolbarFits(page);
+
+  await drawer(page)
+    .getByRole("button", { name: "Clear filters", exact: true })
+    .click();
+  await expect(drawer(page).locator(".drawer-clear-filters")).toBeHidden();
+  await expect(divider).toHaveAttribute(
+    "aria-valuemin",
+    String(unfilteredMinimum),
+  );
+  await divider.press("Home");
+  await expect(divider).toHaveAttribute(
+    "aria-valuenow",
+    String(unfilteredMinimum),
+  );
+  await expectToolbarFits(page);
+});
+
+test("drawer minimum tracks action labels and counts while narrow viewports remain bounded", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await fixture(page);
+  await filters(page);
+  const divider = page.getByRole("separator", { name: "Resize run list" });
+  const minimum = () => divider.getAttribute("aria-valuemin").then(Number);
+  const originalMinimum = await minimum();
+  // Exercise intrinsic sizing, rather than baking today's three labels into a constant.
+  await drawer(page)
+    .locator(".run-drawer-actions")
+    .evaluate((actions) => {
+      actions.querySelector("button")!.textContent =
+        "Select matching runs (120)";
+      const extra = document.createElement("button");
+      extra.type = "button";
+      extra.textContent = "Invert (120)";
+      extra.dataset.testAction = "true";
+      actions.append(extra);
+    });
+  await expect.poll(minimum).toBeGreaterThan(originalMinimum);
+  await dragDrawerToMinimum(page);
+  await expectToolbarFits(page);
+  const expandedMinimum = await minimum();
+  await drawer(page)
+    .locator("[data-test-action]")
+    .evaluate((button) => {
+      (button as HTMLElement).hidden = true;
+    });
+  await expect.poll(minimum).toBeLessThan(expandedMinimum);
+  await divider.press("Home");
+  await expectToolbarFits(page);
+  await drawer(page)
+    .locator("[data-test-action]")
+    .evaluate((button) => {
+      (button as HTMLElement).hidden = false;
+    });
+  await expect.poll(minimum).toBe(expandedMinimum);
+
+  for (const width of [780, 320, 390, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    if (await page.getByLabel("Expand run list", { exact: true }).isVisible())
+      await page.getByLabel("Expand run list", { exact: true }).click();
+    await expectToolbarFits(page, width === 1440);
+    const max = Number(await divider.getAttribute("aria-valuemax"));
+    expect(await minimum()).toBeLessThanOrEqual(max);
+    expect((await drawer(page).boundingBox())!.width).toBeLessThanOrEqual(
+      max + 1,
+    );
+    if (width <= 760) {
+      await expect(divider).toHaveAttribute("aria-disabled", "true");
+      await expect(divider).toHaveAttribute("tabindex", "-1");
+      await expect(page.locator(".run-pane")).toHaveAttribute(
+        "aria-modal",
+        "true",
+      );
+      expect(max).toBeLessThanOrEqual(width - 40);
+      await toggle(page).press("Escape");
+      await expect(drawer(page)).toBeHidden();
+    } else {
+      await expect(divider).toHaveAttribute("aria-disabled", "false");
+      await divider.press("End");
+      await expectToolbarFits(page, width === 1440);
+      const layoutWidth = (await page
+        .locator(".workspace-layout")
+        .boundingBox())!.width;
+      expect(max).toBeLessThanOrEqual(Math.min(600, layoutWidth - 420));
+    }
+  }
+});
