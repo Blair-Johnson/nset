@@ -421,3 +421,36 @@ test("filtering a shared view updates its draft selection and preserves it on re
   await expect(page.locator("#view-modified")).toBeHidden();
   expect(server.workspace.selectedRunIds).toEqual(["r1"]);
 });
+
+test("large shared view configuration survives filtering, publishing and reload", async ({ page, context }, testInfo) => {
+  const server = mockServer();
+  const sections = structuredClone(server.workspace.sections);
+  const styles = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [
+    JSON.stringify(["metric", `run-${i}`, "train/loss"]),
+    { color: "#123456", width: 2, points: true, pointSize: 5, visible: true, alpha: 0.75 },
+  ]));
+  sections[0].cards[0].config.runs = styles;
+  const configBytes = Buffer.byteLength(JSON.stringify(sections[0].cards[0].config));
+  expect(configBytes).toBeGreaterThan(262144);
+  server.update({ sections, selectedRunIds: ["r1", "r2"] });
+  await server.install(context);
+  await open(page);
+  await page.getByLabel("Find runs", { exact: true }).fill("r1");
+  await expect(page.locator("#view-modified")).toBeVisible();
+  await expect(page.locator("#global-error")).toBeHidden();
+  await page.reload();
+  await expect(page.locator("#view-modified")).toBeVisible();
+  await page.getByLabel("Save view changes", { exact: true }).click();
+  await expect(page.locator("#view-modified")).toBeHidden();
+  expect(server.workspace.selectedRunIds).toEqual(["r1"]);
+  expect(server.workspace.sections[0].cards[0].config.runs).toEqual(styles);
+  await page.reload();
+  await expect(page.locator('[data-card-id="stable-chart"]')).toBeVisible();
+  await expect(page.locator("#view-modified")).toBeHidden();
+  await expect(page.locator("#global-error")).toBeHidden();
+  expect(await page.evaluate((key) => localStorage.getItem(key), draftKey)).toBeNull();
+  await testInfo.attach("large-shared-view", {
+    body: JSON.stringify({ configBytes, styles: Object.keys(styles).length, writes: server.writes.length }),
+    contentType: "application/json",
+  });
+});

@@ -16,6 +16,8 @@ async function fixture(page: Page) {
   let histories = 0;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/views")
+      return route.fulfill({ json: { views: [] } });
     if (url.pathname === "/api/catalog")
       return route.fulfill({
         json: {
