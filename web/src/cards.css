@@ -479,7 +479,8 @@
   top: var(--legend-top, 43px);
   right: var(--legend-right, 15px);
   box-sizing: border-box;
-  width: min(290px, var(--legend-width, calc(100% - 45px)));
+  width: max-content;
+  max-width: min(330px, var(--legend-width, calc(100% - 45px)));
   height: auto;
   max-height: min(112px, var(--legend-height, 112px));
   overflow: auto;
@@ -499,11 +500,11 @@
 }
 .card-hover-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, max-content) auto;
   gap: 8px;
   font-variant-numeric: tabular-nums;
 }
-.card-hover-row span {
+.card-hover-row > .card-series-identity {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -571,11 +572,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.card-legend-coordinate {
-  font-size: 11px;
-  padding-bottom: 3px;
-  color: var(--text);
 }
 .card-legend:focus-visible {
   outline: 2px solid var(--accent);
@@ -763,4 +759,52 @@
   margin-left: auto;
   padding: 2px 8px;
   font-size: 12px;
+}
+
+/* Shared native identity: names/metrics stay inline, samples match trace dashes. */
+.card-series-identity {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 5px;
+  vertical-align: middle;
+}
+.card-series-identity .card-legend-swatch {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 8px;
+  border-radius: 0;
+  background: none;
+}
+.card-series-label {
+  display: inline-grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, max-content);
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-series-label .card-legend-key {
+  opacity: 0.8;
+}
+.card-legend-item {
+  grid-template-columns: minmax(0, max-content) auto;
+  min-width: 0;
+}
+.card-hover-value {
+  color: var(--text);
+  white-space: nowrap;
+  text-align: right;
+}
+.card-value-table .card-series-identity {
+  max-width: 100%;
+}
+.card-crossings summary .card-series-identity {
+  max-width: 65%;
+}
+.card-details-button[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
 }

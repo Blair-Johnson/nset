@@ -250,9 +250,9 @@ test("collapsed aligned legend and bounded hover use shared display colors witho
   await expect(page.getByRole("listitem")).toHaveCount(4);
   expect(
     await page
-      .locator(".card-legend-swatch")
+      .locator(".card-legend-swatch line")
       .evaluateAll((nodes) =>
-        nodes.map((node) => getComputedStyle(node).backgroundColor),
+        nodes.map((node) => getComputedStyle(node).stroke),
       ),
   ).toEqual([
     "rgb(96, 165, 250)",
@@ -261,10 +261,10 @@ test("collapsed aligned legend and bounded hover use shared display colors witho
     "rgb(192, 132, 252)",
   ]);
   await moveCrossingPointer(page, 2, 2);
-  await expect(page.locator(".card-hover-row")).toHaveCount(2);
+  await expect(page.locator(".card-hover-row")).toHaveCount(4);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
-  await expect(page.locator(".card-hover")).not.toContainText("train/loss");
-  await expect(page.locator(".card-hover")).not.toContainText("eval/loss");
+  await expect(page.locator(".card-hover")).toContainText("train/loss");
+  await expect(page.locator(".card-hover")).toContainText("eval/loss");
   await expect(page.locator(".card-legend-value")).toHaveCount(4);
   const dimensions = await page.locator(".card-hover").evaluate((node) => ({
     width: node.clientWidth,
@@ -698,8 +698,10 @@ test("sixty-run legends and hover readouts stay bounded without widening the car
   await expect(page.locator(".card-hover-row")).toHaveCount(4);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
   await page.mouse.move(0, 0);
-  await expect(page.locator(".card-legend-coordinate")).toHaveText("At step 2");
-  await expect(page.locator(".card-legend-value").last()).toHaveText("2");
+  await expect(page.locator(".card-legend-coordinate")).toHaveCount(0);
+  await expect(page.locator(".card-legend-value")).toHaveText(
+    Array(60).fill(""),
+  );
   await page.locator(".card-legend").focus();
   await page.keyboard.press("End");
   await expect
@@ -814,24 +816,36 @@ test("cursor pairs return to zoom and existing horizontal/vertical pins drag dir
   expect(after.pins).toEqual(pins);
 });
 
-test("threshold clear action also removes every cursor without changing the camera", async ({ page }) => {
+test("threshold clear action also removes every cursor without changing the camera", async ({
+  page,
+}) => {
   await fixture(page);
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await page.evaluate(() => {
     const c = (window as any).geometry.card;
-    for (const [pin, value] of Object.entries({ a: 1, b: 5, yA: 0.3, yB: 1.7, threshold: 1 }))
+    for (const [pin, value] of Object.entries({
+      a: 1,
+      b: 5,
+      yA: 0.3,
+      yB: 1.7,
+      threshold: 1,
+    }))
       c.setPin(pin, value);
     c.mode = "threshold";
     c.configure();
   });
   const before = await snapshot(page);
   await page.getByText("Edit positions", { exact: true }).click();
-  await page.getByRole("button", { name: "Clear cursors", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Clear cursors", exact: true })
+    .click();
   expect(await snapshot(page)).toEqual({
     ...before,
     pins: { a: null, b: null, threshold: null, yA: null, yB: null },
   });
-  expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe("zoom");
+  expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe(
+    "zoom",
+  );
   await expect(page.locator(".card-inspection")).toBeHidden();
   await expect(page.locator(".card-crossings")).toHaveCount(0);
 });
@@ -839,27 +853,40 @@ for (const touch of [false, true]) {
   test.describe(`cursor toolbar ${touch ? "touch" : "mouse"}`, () => {
     test.use({
       hasTouch: touch,
-      viewport: touch ? { width: 390, height: 844 } : { width: 1500, height: 1100 },
+      viewport: touch
+        ? { width: 390, height: 844 }
+        : { width: 1500, height: 1100 },
     });
 
     for (const armedAxis of ["x", "y"] as const) {
-      test(`Clear Cursors removes both pairs while ${armedAxis} is armed and preserves zoom`, async ({ page }) => {
+      test(`Clear Cursors removes both pairs while ${armedAxis} is armed and preserves zoom`, async ({
+        page,
+      }) => {
         await fixture(page);
-        const axisButton = (axis: "x" | "y") => page.getByRole("button", {
-          name: axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
-          exact: true,
-        });
+        const axisButton = (axis: "x" | "y") =>
+          page.getByRole("button", {
+            name:
+              axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
+            exact: true,
+          });
         const activate = async (axis: "x" | "y") => {
           if (touch) await axisButton(axis).tap();
           else await axisButton(axis).click();
         };
-        const point = async (x: number, y: number) => page.evaluate(async ({ x, y }) => {
-          await new Promise(requestAnimationFrame);
-          await new Promise(requestAnimationFrame);
-          const u = (window as any).geometry.card.plot.chart;
-          const rect = u.over.getBoundingClientRect();
-          return { x: rect.left + u.valToPos(x, "x"), y: rect.top + u.valToPos(y, "y") };
-        }, { x, y });
+        const point = async (x: number, y: number) =>
+          page.evaluate(
+            async ({ x, y }) => {
+              await new Promise(requestAnimationFrame);
+              await new Promise(requestAnimationFrame);
+              const u = (window as any).geometry.card.plot.chart;
+              const rect = u.over.getBoundingClientRect();
+              return {
+                x: rect.left + u.valToPos(x, "x"),
+                y: rect.top + u.valToPos(y, "y"),
+              };
+            },
+            { x, y },
+          );
         const place = async (x: number, y: number) => {
           const p = await point(x, y);
           if (touch) await page.touchscreen.tap(p.x, p.y);
@@ -872,33 +899,54 @@ for (const touch of [false, true]) {
         await place(3, 0.3);
         await place(3, 1.7);
         // A threshold left by another inspection mode must not survive either.
-        await page.evaluate(() => (window as any).geometry.card.setPin("threshold", 1));
+        await page.evaluate(() =>
+          (window as any).geometry.card.setPin("threshold", 1),
+        );
         const zoom = page.getByRole("button", { name: "Zoom in", exact: true });
         if (touch) await zoom.tap();
         else await zoom.click();
         await activate(armedAxis);
-        await expect(axisButton(armedAxis)).toHaveAttribute("aria-pressed", "true");
+        await expect(axisButton(armedAxis)).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        );
         const before = await snapshot(page);
         for (const pin of ["a", "b", "yA", "yB", "threshold"])
           expect(before.pins[pin]).not.toBeNull();
         expect(before.history).toBe(true);
         await expect(page.locator(".card-position-group")).toHaveCount(2);
         await page.getByText("Edit positions", { exact: true }).click();
-        const clear = page.getByRole("button", { name: "Clear cursors", exact: true });
+        const clear = page.getByRole("button", {
+          name: "Clear cursors",
+          exact: true,
+        });
         await expect(clear).toHaveCount(1);
         await expect(clear).toHaveText("Clear Cursors");
-        await expect(page.getByRole("button", { name: "Hide cursor details" })).toHaveCount(0);
+        await expect(
+          page.getByRole("button", { name: "Hide cursor details" }),
+        ).toHaveCount(0);
         if (touch) await clear.tap();
         else await clear.click();
 
         const empty = { a: null, b: null, threshold: null, yA: null, yB: null };
         expect(await snapshot(page)).toEqual({ ...before, pins: empty });
-        expect(await page.evaluate(() => (window as any).geometry.card.plot.pins)).toEqual(empty);
-        expect(await page.evaluate(() => (window as any).geometry.card.mode)).toBe("zoom");
+        expect(
+          await page.evaluate(() => (window as any).geometry.card.plot.pins),
+        ).toEqual(empty);
+        expect(
+          await page.evaluate(() => (window as any).geometry.card.mode),
+        ).toBe("zoom");
         for (const axis of ["x", "y"] as const)
-          await expect(axisButton(axis)).toHaveAttribute("aria-pressed", "false");
+          await expect(axisButton(axis)).toHaveAttribute(
+            "aria-pressed",
+            "false",
+          );
         await expect(page.locator(".card-inspection")).toBeHidden();
-        await expect(page.locator(".card-position-readout, .card-crossings, .card-value-table")).toHaveCount(0);
+        await expect(
+          page.locator(
+            ".card-position-readout, .card-crossings, .card-value-table",
+          ),
+        ).toHaveCount(0);
         await place(3, 0.9); // Ordinary clicks/taps cannot recreate cleared pins.
         expect(await snapshot(page)).toEqual({ ...before, pins: empty });
         if (!touch) {
@@ -918,33 +966,50 @@ for (const touch of [false, true]) {
         expect((await snapshot(page)).loads).toBe(before.loads);
       });
     }
-    test("active axis toggles off, other axis switches, and pins/camera survive", async ({ page }) => {
+    test("active axis toggles off, other axis switches, and pins/camera survive", async ({
+      page,
+    }) => {
       await fixture(page);
-      const button = (axis: "x" | "y") => page.getByRole("button", {
-        name: axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
-        exact: true,
-      });
+      const button = (axis: "x" | "y") =>
+        page.getByRole("button", {
+          name: axis === "x" ? "Add vertical cursor" : "Add horizontal cursor",
+          exact: true,
+        });
       const activate = async (axis: "x" | "y") => {
         if (touch) await button(axis).tap();
         else await button(axis).click();
       };
-      const point = async (x: number, y: number) => page.evaluate(async ({ x, y }) => {
-        await new Promise(requestAnimationFrame);
-        await new Promise(requestAnimationFrame);
-        const u = (window as any).geometry.card.plot.chart;
-        const rect = u.over.getBoundingClientRect();
-        return { x: rect.left + u.valToPos(x, "x"), y: rect.top + u.valToPos(y, "y") };
-      }, { x, y });
+      const point = async (x: number, y: number) =>
+        page.evaluate(
+          async ({ x, y }) => {
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+            const u = (window as any).geometry.card.plot.chart;
+            const rect = u.over.getBoundingClientRect();
+            return {
+              x: rect.left + u.valToPos(x, "x"),
+              y: rect.top + u.valToPos(y, "y"),
+            };
+          },
+          { x, y },
+        );
       const place = async (x: number, y: number) => {
         const p = await point(x, y);
         if (touch) await page.touchscreen.tap(p.x, p.y);
         else await page.mouse.click(p.x, p.y);
       };
       const mode = async (axis: "x" | "y" | null) => {
-        await expect(button("x")).toHaveAttribute("aria-pressed", String(axis === "x"));
-        await expect(button("y")).toHaveAttribute("aria-pressed", String(axis === "y"));
-        expect(await page.evaluate(() => (window as any).geometry.card.mode))
-          .toBe(axis ? "inspect" : "zoom");
+        await expect(button("x")).toHaveAttribute(
+          "aria-pressed",
+          String(axis === "x"),
+        );
+        await expect(button("y")).toHaveAttribute(
+          "aria-pressed",
+          String(axis === "y"),
+        );
+        expect(
+          await page.evaluate(() => (window as any).geometry.card.mode),
+        ).toBe(axis ? "inspect" : "zoom");
       };
 
       // Place both real pairs, then zoom so toggling cannot silently reset the camera.
@@ -985,14 +1050,16 @@ for (const touch of [false, true]) {
       expect(await snapshot(page)).toEqual(before);
 
       if (!touch) {
-        const start = await point(2, 0.7), end = await point(4, 1.3);
+        const start = await point(2, 0.7),
+          end = await point(4, 1.3);
         await page.mouse.move(start.x, start.y);
         await page.mouse.down();
         await page.mouse.move(end.x, end.y, { steps: 8 });
         await page.mouse.up();
         const after = await snapshot(page);
-        expect(after.viewport.x[1] - after.viewport.x[0])
-          .toBeLessThan(before.viewport.x[1] - before.viewport.x[0]);
+        expect(after.viewport.x[1] - after.viewport.x[0]).toBeLessThan(
+          before.viewport.x[1] - before.viewport.x[0],
+        );
         expect(after.pins).toEqual(before.pins);
         await mode(null);
       }
@@ -1172,171 +1239,326 @@ async function crossingFixture(
   options: { xy?: boolean; config?: Record<string, unknown> } = {},
 ) {
   await fixture(page);
-  await page.evaluate(({ traces, options }) => {
-    const s = (window as any).geometry;
-    const runs = [...new Map(traces.map((trace) => [trace.id, {
-      ...s.context.catalog.runs[0],
-      id: trace.id,
-      name: trace.name ?? `Run ${trace.id}`,
-      created_at: 0,
-    }])).values()];
-    const keys = [...new Set(traces.map((trace) => trace.key ?? "train/loss"))];
-    const series = traces.map((trace) => ({
-      ...s.context.catalog.series[0],
-      run_id: trace.id,
-      key: trace.key ?? "train/loss",
-      count: trace.points.length,
-    }));
-    if (options.xy) for (const run of runs) series.push({
-      ...s.context.catalog.series[0], run_id: run.id, key: "coordinates",
-      count: traces.find((trace) => trace.id === run.id)!.points.length,
-    });
-    s.card.setSpec({
-      ...s.card.spec,
-      source: { mode: "selected", keys },
-      ...(options.xy ? { x: { mode: "key", key: "coordinates" } } : {}),
-      config: {
-        ...s.card.spec.config,
-        xMin: 0, xMax: 100, yMin: 0, yMax: 150,
-        ...options.config,
-        style: { ...s.card.spec.config.style, ...(options.config?.style as object ?? {}) },
-      },
-    });
-    s.context = {
-      ...s.context,
-      catalog: { ...s.context.catalog, runs, series },
-      selectedRunIds: runs.map((run) => run.id),
-      store: {
-        clear() {},
-        async load(ref: any) {
-          const xChannel = options.xy && ref.key === "coordinates";
-          const trace = traces.find((trace) => trace.id === ref.runId &&
-            (xChannel || (trace.key ?? "train/loss") === ref.key));
-          return (trace?.points ?? []).map(([x, y], index) => ({
-            seq: index + 1,
-            step: options.xy ? index : x,
-            timestamp: options.xy ? index : x,
-            value: xChannel ? x : y,
-          }));
+  await page.evaluate(
+    ({ traces, options }) => {
+      const s = (window as any).geometry;
+      const runs = [
+        ...new Map(
+          traces.map((trace) => [
+            trace.id,
+            {
+              ...s.context.catalog.runs[0],
+              id: trace.id,
+              name: trace.name ?? `Run ${trace.id}`,
+              created_at: 0,
+            },
+          ]),
+        ).values(),
+      ];
+      const keys = [
+        ...new Set(traces.map((trace) => trace.key ?? "train/loss")),
+      ];
+      const series = traces.map((trace) => ({
+        ...s.context.catalog.series[0],
+        run_id: trace.id,
+        key: trace.key ?? "train/loss",
+        count: trace.points.length,
+      }));
+      if (options.xy)
+        for (const run of runs)
+          series.push({
+            ...s.context.catalog.series[0],
+            run_id: run.id,
+            key: "coordinates",
+            count: traces.find((trace) => trace.id === run.id)!.points.length,
+          });
+      s.card.setSpec({
+        ...s.card.spec,
+        source: { mode: "selected", keys },
+        ...(options.xy ? { x: { mode: "key", key: "coordinates" } } : {}),
+        config: {
+          ...s.card.spec.config,
+          xMin: 0,
+          xMax: 100,
+          yMin: 0,
+          yMax: 150,
+          ...options.config,
+          style: {
+            ...s.card.spec.config.style,
+            ...((options.config?.style as object) ?? {}),
+          },
         },
-      },
-    };
-    s.card.setContext(s.context);
-  }, { traces, options });
-  await expect.poll(() => page.evaluate(
-    () => (window as any).geometry.card.data.length,
-  )).toBe(traces.length);
+      });
+      s.context = {
+        ...s.context,
+        catalog: { ...s.context.catalog, runs, series },
+        selectedRunIds: runs.map((run) => run.id),
+        store: {
+          clear() {},
+          async load(ref: any) {
+            const xChannel = options.xy && ref.key === "coordinates";
+            const trace = traces.find(
+              (trace) =>
+                trace.id === ref.runId &&
+                (xChannel || (trace.key ?? "train/loss") === ref.key),
+            );
+            return (trace?.points ?? []).map(([x, y], index) => ({
+              seq: index + 1,
+              step: options.xy ? index : x,
+              timestamp: options.xy ? index : x,
+              value: xChannel ? x : y,
+            }));
+          },
+        },
+      };
+      s.card.setContext(s.context);
+    },
+    { traces, options },
+  );
+  await expect
+    .poll(() => page.evaluate(() => (window as any).geometry.card.data.length))
+    .toBe(traces.length);
   await expect(page.locator(".card-status")).toHaveText("");
 }
 
 async function moveCrossingPointer(page: Page, x: number, y: number) {
-  const point = await page.evaluate(async ({ x, y }) => {
-    await new Promise(requestAnimationFrame);
-    await new Promise(requestAnimationFrame);
-    const u = (window as any).geometry.card.plot.chart;
-    const rect = u.over.getBoundingClientRect();
-    return { x: rect.left + u.valToPos(x, "x"), y: rect.top + u.valToPos(y, "y") };
-  }, { x, y });
+  const point = await page.evaluate(
+    async ({ x, y }) => {
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      const u = (window as any).geometry.card.plot.chart;
+      const rect = u.over.getBoundingClientRect();
+      return {
+        x: rect.left + u.valToPos(x, "x"),
+        y: rect.top + u.valToPos(y, "y"),
+      };
+    },
+    { x, y },
+  );
   await page.mouse.move(point.x, point.y);
 }
 
-const hoverNames = (page: Page) => page.locator(".card-hover-row > span:first-child");
-const hoverValues = (page: Page) => page.locator(".card-hover-row > span:last-child");
+const hoverNames = (page: Page) =>
+  page.locator(".card-hover-row > span:first-child");
+const hoverValues = (page: Page) =>
+  page.locator(".card-hover-row > span:last-child");
 const rankedTraces = (): HoverTrace[] => [
   ...Array.from({ length: 6 }, (_, i) => ({
     id: String(i),
-    points: [[0, i * 10], [100, 100 + i * 10]] as [number, number][],
+    points: [
+      [0, i * 10],
+      [100, 100 + i * 10],
+    ] as [number, number][],
   })),
   { id: "empty", name: "No measurements", points: [] },
-  { id: "remote", name: "Outside crossing", points: [[0, 200], [20, 220]] },
+  {
+    id: "remote",
+    name: "Outside crossing",
+    points: [
+      [0, 200],
+      [20, 220],
+    ],
+  },
 ];
 
-test("vertical popup ranks four distinct runs by pointer Y at unchanged X and stays compact", async ({ page }, info) => {
+test("vertical popup ranks four distinct runs by pointer Y at unchanged X and stays compact", async ({
+  page,
+}, info) => {
   await crossingFixture(page, rankedTraces());
   await moveCrossingPointer(page, 50, 52);
-  await expect(hoverNames(page)).toHaveText(["Run 0", "Run 1", "Run 2", "Run 3"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 0",
+    "Run 1",
+    "Run 2",
+    "Run 3",
+  ]);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
   await expect(page.locator(".card-legend")).toBeHidden();
-  await expect(page.locator(".card-hover")).not.toContainText(/train\/loss|No measurements|Outside crossing|—/);
+  await expect(page.locator(".card-hover")).not.toContainText(
+    /train\/loss|No measurements|Outside crossing|—/,
+  );
   const before = await snapshot(page);
   await moveCrossingPointer(page, 50, 98);
-  await expect(hoverNames(page)).toHaveText(["Run 5", "Run 4", "Run 3", "Run 2"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 5",
+    "Run 4",
+    "Run 3",
+    "Run 2",
+  ]);
   expect((await snapshot(page)).pins).toEqual(before.pins);
   expect((await snapshot(page)).viewport).toEqual(before.viewport);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await moveCrossingPointer(page, 50, 98);
-  await expect(hoverNames(page)).toHaveText(["Run 5", "Run 4", "Run 3", "Run 2"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 5",
+    "Run 4",
+    "Run 3",
+    "Run 2",
+  ]);
   const bounds = await page.locator(".card-hover").evaluate((node) => ({
-    width: node.clientWidth, height: node.clientHeight,
-    scrollWidth: node.scrollWidth, scrollHeight: node.scrollHeight,
+    width: node.clientWidth,
+    height: node.clientHeight,
+    scrollWidth: node.scrollWidth,
+    scrollHeight: node.scrollHeight,
   }));
   expect(bounds.width).toBeLessThanOrEqual(330);
   expect(bounds.height).toBeLessThanOrEqual(125);
   expect(bounds.scrollWidth).toBe(bounds.width);
   expect(bounds.scrollHeight).toBe(bounds.height);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    390,
+  );
   await info.attach("nearest-crossing-compact", {
-    body: await page.locator(".chart-card").screenshot({ path: info.outputPath("nearest-crossing-compact.png") }),
+    body: await page
+      .locator(".chart-card")
+      .screenshot({ path: info.outputPath("nearest-crossing-compact.png") }),
     contentType: "image/png",
   });
 });
 
-test("C and toolbar orientation rank horizontal crossings by pointer X at unchanged Y", async ({ page }) => {
+test("C and toolbar orientation rank horizontal crossings by pointer X at unchanged Y", async ({
+  page,
+}) => {
   await crossingFixture(page, rankedTraces());
   await moveCrossingPointer(page, 27, 75);
   await page.keyboard.press("c");
-  await expect(page.locator(".uplot")).toHaveAttribute("data-cursor-placement", "vertical");
+  await expect(page.locator(".uplot")).toHaveAttribute(
+    "data-cursor-placement",
+    "vertical",
+  );
   await page.keyboard.press("c");
-  await expect(page.locator(".uplot")).toHaveAttribute("data-cursor-placement", "horizontal");
+  await expect(page.locator(".uplot")).toHaveAttribute(
+    "data-cursor-placement",
+    "horizontal",
+  );
   await moveCrossingPointer(page, 27, 75);
-  await expect(hoverNames(page)).toHaveText(["Run 5", "Run 4", "Run 3", "Run 2"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 5",
+    "Run 4",
+    "Run 3",
+    "Run 2",
+  ]);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
   await moveCrossingPointer(page, 73, 75);
-  await expect(hoverNames(page)).toHaveText(["Run 0", "Run 1", "Run 2", "Run 3"]);
-  await expect(page.locator(".card-hover")).not.toContainText(/train\/loss|No measurements|Outside crossing|—/);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 0",
+    "Run 1",
+    "Run 2",
+    "Run 3",
+  ]);
+  await expect(page.locator(".card-hover")).not.toContainText(
+    /train\/loss|No measurements|Outside crossing|—/,
+  );
   const before = await snapshot(page);
-  await page.getByRole("button", { name: "Add vertical cursor", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add vertical cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 50, 98);
-  await expect(hoverNames(page)).toHaveText(["Run 5", "Run 4", "Run 3", "Run 2"]);
-  await page.getByRole("button", { name: "Add horizontal cursor", exact: true }).click();
+  await expect(hoverNames(page)).toHaveText([
+    "Run 5",
+    "Run 4",
+    "Run 3",
+    "Run 2",
+  ]);
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 73, 75);
-  await expect(hoverNames(page)).toHaveText(["Run 0", "Run 1", "Run 2", "Run 3"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 0",
+    "Run 1",
+    "Run 2",
+    "Run 3",
+  ]);
   expect((await snapshot(page)).pins).toEqual(before.pins);
   expect((await snapshot(page)).viewport).toEqual(before.viewport);
 });
 
-test("multi-metric popup groups by underlying run ID, not name, and selects nearest Y on each side", async ({ page }) => {
+test("multi-metric popup ranks four separate series and disambiguates duplicate run names with full IDs", async ({
+  page,
+}) => {
   await crossingFixture(page, [
     ...[20, 40, 60, 80].map((value, index) => ({
-      id: "aggregate", name: "Shared run name", key: `metric/${index}`,
-      points: [[0, value], [100, value]] as [number, number][],
+      id: "aggregate",
+      name: "Shared run name",
+      key: `metric/${index}`,
+      points: [
+        [0, value],
+        [100, value],
+      ] as [number, number][],
     })),
-    { id: "other", name: "Shared run name", key: "metric/0", points: [[0, 50], [100, 50]] },
-    { id: "third", name: "Third run", key: "metric/0", points: [[0, 110], [100, 110]] },
+    {
+      id: "other",
+      name: "Shared run name",
+      key: "metric/0",
+      points: [
+        [0, 50],
+        [100, 50],
+      ],
+    },
+    {
+      id: "third",
+      name: "Third run",
+      key: "metric/0",
+      points: [
+        [0, 110],
+        [100, 110],
+      ],
+    },
   ]);
   await moveCrossingPointer(page, 50, 56);
-  await expect(hoverNames(page)).toHaveText(["Shared run name", "Shared run name", "Third run"]);
-  await expect(hoverValues(page)).toHaveText(["(40, 60)", "50", "110"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Shared run name (aggregate) · metric/2",
+    "Shared run name (other) · metric/0",
+    "Shared run name (aggregate) · metric/1",
+    "Shared run name (aggregate) · metric/3",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["60", "50", "40", "80"]);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
-  await expect(page.locator(".card-hover")).not.toContainText("metric/");
   await moveCrossingPointer(page, 50, 90);
-  await expect(hoverNames(page)).toHaveText(["Shared run name", "Third run", "Shared run name"]);
-  await expect(hoverValues(page)).toHaveText(["80", "110", "50"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Shared run name (aggregate) · metric/3",
+    "Third run · metric/0",
+    "Shared run name (aggregate) · metric/2",
+    "Shared run name (other) · metric/0",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["80", "110", "60", "50"]);
   await moveCrossingPointer(page, 50, 10);
-  await expect(hoverValues(page)).toHaveText(["20", "50", "110"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Shared run name (aggregate) · metric/0",
+    "Shared run name (aggregate) · metric/1",
+    "Shared run name (other) · metric/0",
+    "Shared run name (aggregate) · metric/2",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["20", "40", "50", "60"]);
 });
 
-test("horizontal popup selects nearest X on each side, orders the tuple numerically and emits one-side once", async ({ page }) => {
-  await crossingFixture(page, [{
-    id: "wave", name: "Oscillating run",
-    points: [[0, 0], [20, 100], [40, 0], [60, 100], [80, 0]],
-  }]);
-  await page.getByRole("button", { name: "Add horizontal cursor", exact: true }).click();
+test("horizontal popup selects nearest X on each side, orders the tuple numerically and emits one-side once", async ({
+  page,
+}) => {
+  await crossingFixture(page, [
+    {
+      id: "wave",
+      name: "Oscillating run",
+      points: [
+        [0, 0],
+        [20, 100],
+        [40, 0],
+        [60, 100],
+        [80, 0],
+      ],
+    },
+  ]);
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 44, 50);
   await expect(hoverNames(page)).toHaveText(["Oscillating run"]);
   await expect(hoverValues(page)).toHaveText(/^\([\d.]+, [\d.]+\)$/);
-  const values = (await hoverValues(page).innerText()).match(/[\d.]+/g)!.map(Number);
+  const values = (await hoverValues(page).innerText())
+    .match(/[\d.]+/g)!
+    .map(Number);
   expect(values[0]).toBeCloseTo(30, 0);
   expect(values[1]).toBeCloseTo(50, 0);
   await moveCrossingPointer(page, 5, 50);
@@ -1347,30 +1569,69 @@ test("horizontal popup selects nearest X on each side, orders the tuple numerica
   expect(Number(await hoverValues(page).innerText())).toBeCloseTo(70, 0);
 });
 
-test("repeated-X XY loop uses both vertical branches and horizontal values use the X formatter", async ({ page }) => {
-  await crossingFixture(page, [{
-    id: "loop", name: "Loop run",
-    points: [[10, 20], [10, 80], [30, 80], [30, 20], [10, 20]],
-  }], { xy: true, config: { xFormat: "fixed-2", yFormat: "number" } });
+test("repeated-X XY loop uses both vertical branches and horizontal values use the X formatter", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [
+      {
+        id: "loop",
+        name: "Loop run",
+        points: [
+          [10, 20],
+          [10, 80],
+          [30, 80],
+          [30, 20],
+          [10, 20],
+        ],
+      },
+    ],
+    { xy: true, config: { xFormat: "fixed-2", yFormat: "number" } },
+  );
   await moveCrossingPointer(page, 20, 45);
   await expect(hoverNames(page)).toHaveText(["Loop run"]);
   await expect(hoverValues(page)).toHaveText(["(20, 80)"]);
   await moveCrossingPointer(page, 20, 100);
   await expect(hoverValues(page)).toHaveText(["80"]);
-  await page.getByRole("button", { name: "Add horizontal cursor", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 20, 45);
   await expect(hoverValues(page)).toHaveText(["(10.00, 30.00)"]);
   await moveCrossingPointer(page, 5, 45);
   await expect(hoverValues(page)).toHaveText(["10.00"]);
 });
 
-
-test("popup uses log pixel distance and redraw removes offscreen crossings without pointer movement", async ({ page }) => {
-  await crossingFixture(page, [2, 1000, 0.1, 10000, 0.01].map((y, i) => ({
-    id: String(i), points: [[1, y], [100, y]] as [number, number][],
-  })), { config: { xMin: 1, yMin: 0.01, yMax: 10000, yScale: "log", yFormat: "scientific" } });
+test("popup uses log pixel distance and redraw removes offscreen crossings without pointer movement", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [2, 1000, 0.1, 10000, 0.01].map((y, i) => ({
+      id: String(i),
+      points: [
+        [1, y],
+        [100, y],
+      ] as [number, number][],
+    })),
+    {
+      config: {
+        xMin: 1,
+        yMin: 0.01,
+        yMax: 10000,
+        yScale: "log",
+        yFormat: "scientific",
+      },
+    },
+  );
   await moveCrossingPointer(page, 50, 100);
-  await expect(hoverNames(page)).toHaveText(["Run 1", "Run 0", "Run 3", "Run 2"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 1",
+    "Run 0",
+    "Run 3",
+    "Run 2",
+  ]);
   await expect(hoverValues(page).first()).toHaveText(/1(?:\.0+)?e\+?3/);
   await page.evaluate(() => {
     const card = (window as any).geometry.card;
@@ -1381,27 +1642,53 @@ test("popup uses log pixel distance and redraw removes offscreen crossings witho
   await expect(page.locator(".card-legend-item")).toHaveCount(5); // Global, not viewport eligibility.
 });
 
-test("folded legend removes empty, log-excluded and no-line series but keeps valid marker-only data", async ({ page }) => {
-  await crossingFixture(page, [
-    { id: "visible", points: [[1, 2], [100, 2]] },
-    { id: "empty", points: [] },
-    { id: "log-excluded", points: [[1, -2], [100, -1]] },
-  ], { config: { xMin: 1, yMin: 1, yMax: 10, yScale: "log" } });
+test("folded legend removes empty, log-excluded and no-line series but keeps valid marker-only data", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [
+      {
+        id: "visible",
+        points: [
+          [1, 2],
+          [100, 2],
+        ],
+      },
+      { id: "empty", points: [] },
+      {
+        id: "log-excluded",
+        points: [
+          [1, -2],
+          [100, -1],
+        ],
+      },
+    ],
+    { config: { xMin: 1, yMin: 1, yMax: 10, yScale: "log" } },
+  );
   await page.getByText("Show legend", { exact: true }).click();
   await expect(page.locator(".card-legend-item")).toHaveCount(1);
   await expect(page.locator(".card-legend-name")).toHaveText("Run visible");
   await page.evaluate(() => {
     const card = (window as any).geometry.card;
-    card.setSpec({ ...card.spec, config: { ...card.spec.config,
-      style: { ...card.spec.config.style, width: 0, fill: 0, points: false },
-    } });
+    card.setSpec({
+      ...card.spec,
+      config: {
+        ...card.spec.config,
+        style: { ...card.spec.config.style, width: 0, fill: 0, points: false },
+      },
+    });
   });
   await expect(page.locator(".card-legend-item")).toHaveCount(0);
   await page.evaluate(() => {
     const card = (window as any).geometry.card;
-    card.setSpec({ ...card.spec, config: { ...card.spec.config,
-      style: { ...card.spec.config.style, points: true },
-    } });
+    card.setSpec({
+      ...card.spec,
+      config: {
+        ...card.spec.config,
+        style: { ...card.spec.config.style, points: true },
+      },
+    });
   });
   await expect(page.locator(".card-legend-item")).toHaveCount(1);
   await moveCrossingPointer(page, 50, 2);
@@ -1410,58 +1697,139 @@ test("folded legend removes empty, log-excluded and no-line series but keeps val
   await expect(hoverNames(page)).toHaveText(["Run visible"]);
 });
 
-test("record paired groups aggregate by run identity and keep repeated-X branches without metric suffixes", async ({ page }) => {
+test("record paired groups retain separate semantic identities and repeated-X neighbors", async ({
+  page,
+}) => {
   await fixture(page);
   await page.evaluate(() => {
     const s = (window as any).geometry;
     const runs = ["a", "b", "empty"].map((id) => ({
-      ...s.context.catalog.runs[0], id, name: id === "empty" ? "Missing pair" : `Alias ${id}`,
+      ...s.context.catalog.runs[0],
+      id,
+      name: id === "empty" ? "Missing pair" : `Alias ${id}`,
       rx: { sourceId: "rx:test", uid: id },
     }));
     s.context = {
-      ...s.context, catalog: { ...s.context.catalog, runs }, selectedRunIds: runs.map((r) => r.id),
-      api: { async post() { return {
-        diagnostics: { scanned: 10, matched: 10, partial: false, reasons: [] },
-        traces: [
-          { run_uid: "a", y: "metrics.loss", group: 1, group_label: "1", points: [[10, 20], [30, 20], [30, 80], [10, 80], [10, 20]] },
-          { run_uid: "a", y: "metrics.loss", group: "1", group_label: "1", points: [[10, 5], [30, 5]] },
-          { run_uid: "a", y: "metrics.other", group: null, points: [[10, 100], [30, 100]] },
-          { run_uid: "b", y: "metrics.loss", group: null, points: [[10, 45], [30, 45]] },
-        ],
-      }; } },
+      ...s.context,
+      catalog: { ...s.context.catalog, runs },
+      selectedRunIds: runs.map((r) => r.id),
+      api: {
+        async post() {
+          return {
+            diagnostics: {
+              scanned: 10,
+              matched: 10,
+              partial: false,
+              reasons: [],
+            },
+            traces: [
+              {
+                run_uid: "a",
+                y: "metrics.loss",
+                group: 1,
+                group_label: "1",
+                points: [
+                  [10, 20],
+                  [30, 20],
+                  [30, 80],
+                  [10, 80],
+                  [10, 20],
+                ],
+              },
+              {
+                run_uid: "a",
+                y: "metrics.loss",
+                group: "1",
+                group_label: "1",
+                points: [
+                  [10, 5],
+                  [30, 5],
+                ],
+              },
+              {
+                run_uid: "a",
+                y: "metrics.other",
+                group: null,
+                points: [
+                  [10, 100],
+                  [30, 100],
+                ],
+              },
+              {
+                run_uid: "b",
+                y: "metrics.loss",
+                group: null,
+                points: [
+                  [10, 45],
+                  [30, 45],
+                ],
+              },
+            ],
+          };
+        },
+      },
     };
     s.card.setContext(s.context);
-    s.card.setSpec({ ...s.card.spec,
-      records: { sourceId: "rx:test", runUids: [], x: "epoch", ys: ["metrics.loss", "metrics.other"], group: "phase", filters: { any: false, conditions: [] } },
+    s.card.setSpec({
+      ...s.card.spec,
+      records: {
+        sourceId: "rx:test",
+        runUids: [],
+        x: "epoch",
+        ys: ["metrics.loss", "metrics.other"],
+        group: "phase",
+        filters: { any: false, conditions: [] },
+      },
       config: { ...s.card.spec.config, xMin: 0, xMax: 40, yMin: 0, yMax: 120 },
     });
   });
-  await expect.poll(() => page.evaluate(() => (window as any).geometry.card.data.length)).toBe(4);
+  await expect
+    .poll(() => page.evaluate(() => (window as any).geometry.card.data.length))
+    .toBe(4);
   await moveCrossingPointer(page, 20, 50);
-  await expect(hoverNames(page)).toHaveText(["Alias b", "Alias a"]);
-  await expect(hoverValues(page)).toHaveText(["45", "(20, 80)"]);
-  await expect(page.locator(".card-hover")).not.toContainText(/metrics|phase|Missing pair/);
+  await expect(hoverNames(page)).toHaveText([
+    "Alias b · metrics.loss",
+    'Alias a · metrics.loss (["rx:test","a","metrics.loss",1])',
+    'Alias a · metrics.loss (["rx:test","a","metrics.loss","1"])',
+    "Alias a · metrics.other",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["45", "(20, 80)", "5", "100"]);
+  await expect(page.locator(".card-hover")).not.toContainText("Missing pair");
   await page.getByText("Show legend", { exact: true }).click();
   await expect(page.locator(".card-legend-item")).toHaveCount(4);
-  await page.getByRole("button", { name: "Add horizontal cursor", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 20, 50);
-  await expect(hoverNames(page)).toHaveText(["Alias a"]);
+  await expect(hoverNames(page)).toHaveText([
+    'Alias a · metrics.loss (["rx:test","a","metrics.loss",1])',
+  ]);
   await expect(hoverValues(page)).toHaveText(["(10, 30)"]);
 });
 
-test("moving axis ticks show both mouse coordinates, suppress overlapping labels and restore them on leave", async ({ page }, info) => {
-  await crossingFixture(page, rankedTraces(), { config: { xFormat: "fixed-2", yFormat: "scientific" } });
+test("moving axis ticks show both mouse coordinates, suppress overlapping labels and restore them on leave", async ({
+  page,
+}, info) => {
+  await crossingFixture(page, rankedTraces(), {
+    config: { xFormat: "fixed-2", yFormat: "scientific" },
+  });
   await moveCrossingPointer(page, 50, 75);
-  const xTick = page.locator(".mouse-axis-tick-x"), yTick = page.locator(".mouse-axis-tick-y");
+  const xTick = page.locator(".mouse-axis-tick-x"),
+    yTick = page.locator(".mouse-axis-tick-y");
   await expect(xTick).toBeVisible();
   await expect(yTick).toBeVisible();
   await expect(xTick).toHaveText("50.00");
   await expect(yTick).toHaveText(/7\.500e\+?1/);
-  expect(await xTick.evaluate((node) => getComputedStyle(node).pointerEvents)).toBe("none");
-  const read = () => page.evaluate(() => {
-    const u = (window as any).geometry.card.plot.chart;
-    return [0, 1].map((i) => u.axes[i].values(u, i === 0 ? [25, 50, 75] : [25, 75, 125], i, 50, 25));
-  });
+  expect(
+    await xTick.evaluate((node) => getComputedStyle(node).pointerEvents),
+  ).toBe("none");
+  const read = () =>
+    page.evaluate(() => {
+      const u = (window as any).geometry.card.plot.chart;
+      return [0, 1].map((i) =>
+        u.axes[i].values(u, i === 0 ? [25, 50, 75] : [25, 75, 125], i, 50, 25),
+      );
+    });
   const covered = await read();
   expect(covered[0][1]).toBe("");
   expect(covered[1][1]).toBe("");
@@ -1474,7 +1842,10 @@ test("moving axis ticks show both mouse coordinates, suppress overlapping labels
   expect(moved[0][1]).not.toBe("");
   expect(moved[1][1]).not.toBe("");
   await info.attach("moving-axis-ticks", {
-    body: await page.locator(".chart-card").screenshot({ path: info.outputPath("moving-axis-ticks.png") }), contentType: "image/png",
+    body: await page
+      .locator(".chart-card")
+      .screenshot({ path: info.outputPath("moving-axis-ticks.png") }),
+    contentType: "image/png",
   });
   await page.mouse.move(0, 0);
   await expect(xTick).toBeHidden();
@@ -1484,28 +1855,61 @@ test("moving axis ticks show both mouse coordinates, suppress overlapping labels
   expect(restored[1].every((value: string) => value !== "")).toBe(true);
 });
 
-test("horizontal repeated-X traces rank by reversed logarithmic X distance and keep X formatting", async ({ page }) => {
-  await crossingFixture(page, [2, 1000, 0.1, 10000, 0.01].map((x, i) => ({
-    id: String(i), points: [[x, 0], [x, 100]] as [number, number][],
-  })), { xy: true, config: {
-    xMin: 0.01, xMax: 10000, xScale: "log", xFormat: "scientific", yFormat: "fixed-2",
-    advanced: { scales: { x: { dir: -1 }, y: { dir: -1 } } },
-  } });
-  await page.getByRole("button", { name: "Add horizontal cursor", exact: true }).click();
+test("horizontal repeated-X traces rank by reversed logarithmic X distance and keep X formatting", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [2, 1000, 0.1, 10000, 0.01].map((x, i) => ({
+      id: String(i),
+      points: [
+        [x, 0],
+        [x, 100],
+      ] as [number, number][],
+    })),
+    {
+      xy: true,
+      config: {
+        xMin: 0.01,
+        xMax: 10000,
+        xScale: "log",
+        xFormat: "scientific",
+        yFormat: "fixed-2",
+        advanced: { scales: { x: { dir: -1 }, y: { dir: -1 } } },
+      },
+    },
+  );
+  await page
+    .getByRole("button", { name: "Add horizontal cursor", exact: true })
+    .click();
   await moveCrossingPointer(page, 100, 50);
-  await expect(hoverNames(page)).toHaveText(["Run 1", "Run 0", "Run 3", "Run 2"]);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 1",
+    "Run 0",
+    "Run 3",
+    "Run 2",
+  ]);
   await expect(hoverValues(page).first()).toHaveText(/1(?:\.0+)?e\+?3/);
-  await expect(page.locator(".mouse-axis-tick-x")).toHaveText(/1(?:\.0+)?e\+?2/);
+  await expect(page.locator(".mouse-axis-tick-x")).toHaveText(
+    /1(?:\.0+)?e\+?2/,
+  );
   await expect(page.locator(".mouse-axis-tick-y")).toHaveText("50.00");
-  await page.evaluate(() => (window as any).geometry.card.plot.showView({ x: [1, 200], y: [0, 150] }));
+  await page.evaluate(() =>
+    (window as any).geometry.card.plot.showView({ x: [1, 200], y: [0, 150] }),
+  );
   await expect(hoverNames(page)).toHaveText(["Run 0"]);
 });
 
-test("stationary mouse readouts recompute against the live plot rectangle after resize", async ({ page }) => {
-  await crossingFixture(page, rankedTraces(), { config: { xFormat: "fixed-2", yFormat: "fixed-2" } });
+test("stationary mouse readouts recompute against the live plot rectangle after resize", async ({
+  page,
+}) => {
+  await crossingFixture(page, rankedTraces(), {
+    config: { xFormat: "fixed-2", yFormat: "fixed-2" },
+  });
   await moveCrossingPointer(page, 50, 52);
   const client = await page.evaluate(() => {
-    const u = (window as any).geometry.card.plot.chart, r = u.over.getBoundingClientRect();
+    const u = (window as any).geometry.card.plot.chart,
+      r = u.over.getBoundingClientRect();
     return [r.left + u.valToPos(50, "x"), r.top + u.valToPos(52, "y")];
   });
   await page.evaluate(() => {
@@ -1514,57 +1918,121 @@ test("stationary mouse readouts recompute against the live plot rectangle after 
   });
   await expect(page.locator(".mouse-axis-tick-x")).not.toHaveText("50.00");
   const expected = await page.evaluate(([x, y]) => {
-    const u = (window as any).geometry.card.plot.chart, r = u.over.getBoundingClientRect();
-    return [u.posToVal(x - r.left, "x").toFixed(2), u.posToVal(y - r.top, "y").toFixed(2)];
+    const u = (window as any).geometry.card.plot.chart,
+      r = u.over.getBoundingClientRect();
+    return [
+      u.posToVal(x - r.left, "x").toFixed(2),
+      u.posToVal(y - r.top, "y").toFixed(2),
+    ];
   }, client);
   await expect(page.locator(".mouse-axis-tick-x")).toHaveText(expected[0]);
   await expect(page.locator(".mouse-axis-tick-y")).toHaveText(expected[1]);
   await expect(hoverNames(page)).toHaveCount(4);
-  await expect(hoverValues(page)).not.toHaveText(["50.00", "60.00", "70.00", "80.00"]);
+  await expect(hoverValues(page)).not.toHaveText([
+    "50.00",
+    "60.00",
+    "70.00",
+    "80.00",
+  ]);
 });
 
-
-test("automatic markers contribute crossings only when the live renderer draws them", async ({ page }) => {
-  await crossingFixture(page, [{ id: "dense", points: Array.from({ length: 1001 }, (_, x) => [x, 10] as [number, number]) }], {
-    config: { xMin: 0, xMax: 1000, yMin: 0, yMax: 20,
-      style: { width: 0, fill: 0, markers: { show: "auto", size: 5, space: 10 } } },
-  });
+test("automatic markers contribute crossings only when the live renderer draws them", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [
+      {
+        id: "dense",
+        points: Array.from(
+          { length: 1001 },
+          (_, x) => [x, 10] as [number, number],
+        ),
+      },
+    ],
+    {
+      config: {
+        xMin: 0,
+        xMax: 1000,
+        yMin: 0,
+        yMax: 20,
+        style: {
+          width: 0,
+          fill: 0,
+          markers: { show: "auto", size: 5, space: 10 },
+        },
+      },
+    },
+  );
   await moveCrossingPointer(page, 500, 10);
   await expect(hoverNames(page)).toHaveCount(0);
   await page.getByText("Show legend", { exact: true }).click();
   await expect(page.locator(".card-legend-name")).toHaveText("Run dense");
-  await page.evaluate(() => (window as any).geometry.card.plot.showView({ x: [495, 505], y: [0, 20] }));
+  await page.evaluate(() =>
+    (window as any).geometry.card.plot.showView({ x: [495, 505], y: [0, 20] }),
+  );
   await moveCrossingPointer(page, 500, 10);
   await expect(hoverNames(page)).toHaveText(["Run dense"]);
   await expect(hoverValues(page)).toHaveText(["10"]);
-  await page.evaluate(() => (window as any).geometry.card.plot.showView({ x: [0, 1000], y: [0, 20] }));
+  await page.evaluate(() =>
+    (window as any).geometry.card.plot.showView({ x: [0, 1000], y: [0, 20] }),
+  );
   await moveCrossingPointer(page, 500, 10);
   await expect(hoverNames(page)).toHaveCount(0);
 });
 
-test("smoothed lines do not report suppressed automatic raw markers as extra neighbors", async ({ page }) => {
-  await crossingFixture(page, [{ id: "smooth", points: Array.from({ length: 1001 }, (_, x) => [x, x === 500 ? 10 : 0] as [number, number]) }], {
-    config: { xMin: 0, xMax: 1000, yMin: 0, yMax: 20, smoothing: true,
-      style: { markers: { show: "auto", size: 5, space: 10 } } },
-  });
+test("smoothed lines do not report suppressed automatic raw markers as extra neighbors", async ({
+  page,
+}) => {
+  await crossingFixture(
+    page,
+    [
+      {
+        id: "smooth",
+        points: Array.from(
+          { length: 1001 },
+          (_, x) => [x, x === 500 ? 10 : 0] as [number, number],
+        ),
+      },
+    ],
+    {
+      config: {
+        xMin: 0,
+        xMax: 1000,
+        yMin: 0,
+        yMax: 20,
+        smoothing: true,
+        style: { markers: { show: "auto", size: 5, space: 10 } },
+      },
+    },
+  );
   await moveCrossingPointer(page, 500, 5);
   await expect(hoverNames(page)).toHaveText(["Run smooth"]);
   await expect(hoverValues(page)).not.toContainText("(");
   await expect(hoverValues(page)).not.toHaveText(["10"]);
 });
 
-test("moving ticks honor advanced axis notation and restore ordinary labels", async ({ page }) => {
-  await crossingFixture(page, rankedTraces(), { config: {
-    xFormat: "number", yFormat: "number",
-    advanced: { axes: [{ values: "scientific" }, { values: "fixed-2" }] },
-  } });
+test("moving ticks honor advanced axis notation and restore ordinary labels", async ({
+  page,
+}) => {
+  await crossingFixture(page, rankedTraces(), {
+    config: {
+      xFormat: "number",
+      yFormat: "number",
+      advanced: { axes: [{ values: "scientific" }, { values: "fixed-2" }] },
+    },
+  });
   await moveCrossingPointer(page, 50, 75);
   await expect(page.locator(".mouse-axis-tick-x")).toHaveText("5.000e+1");
   await expect(page.locator(".mouse-axis-tick-y")).toHaveText("75.00");
-  const read = () => page.evaluate(() => {
-    const u = (window as any).geometry.card.plot.chart;
-    return [u.axes[0].values(u, [50], 0, 50, 25), u.axes[1].values(u, [75], 1, 50, 25)];
-  });
+  const read = () =>
+    page.evaluate(() => {
+      const u = (window as any).geometry.card.plot.chart;
+      return [
+        u.axes[0].values(u, [50], 0, 50, 25),
+        u.axes[1].values(u, [75], 1, 50, 25),
+      ];
+    });
   expect(await read()).toEqual([[""], [""]]);
   await page.mouse.move(0, 0);
   await expect(page.locator(".mouse-axis-tick-x")).toBeHidden();
@@ -1572,43 +2040,105 @@ test("moving ticks honor advanced axis notation and restore ordinary labels", as
   expect(await read()).toEqual([["5.000e+1"], ["75.00"]]);
 });
 
-test("many selected missing-field runs keep late multi-metric source identities without a legend ceiling", async ({ page }) => {
+test("many selected missing-field runs keep late multi-metric source identities without a legend ceiling", async ({
+  page,
+}) => {
   const traces: HoverTrace[] = Array.from({ length: 70 }, (_, i) => ({
-    id: String(i), points: i < 64 ? [] : [[0, i], [100, i]],
+    id: String(i),
+    points:
+      i < 64
+        ? []
+        : [
+            [0, i],
+            [100, i],
+          ],
   }));
-  for (let i = 64; i < 70; i++) traces.push({ id: String(i), key: "other/value", points: [[0, i + 0.4], [100, i + 0.4]] });
-  await crossingFixture(page, traces);
+  for (let i = 64; i < 70; i++)
+    traces.push({
+      id: String(i),
+      key: "other/value",
+      points: [
+        [0, i + 0.4],
+        [100, i + 0.4],
+      ],
+    });
+  await crossingFixture(page, traces, { config: { yMin: 63, yMax: 71 } });
   await moveCrossingPointer(page, 50, 67.1);
-  await expect(hoverNames(page)).toHaveText(["Run 67", "Run 66", "Run 68", "Run 65"]);
-  await expect(page.locator(".card-hover")).not.toContainText(/loss|other|more/);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 67 · train/loss",
+    "Run 67 · other/value",
+    "Run 66 · other/value",
+    "Run 68 · train/loss",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["67", "67.4", "66.4", "68"]);
+  await expect(page.locator(".card-hover-more")).toHaveCount(0);
   await page.getByText("Show legend", { exact: true }).click();
   await expect(page.locator(".card-legend-item")).toHaveCount(12);
-  await moveCrossingPointer(page, 50, 69.2);
-  await expect(hoverNames(page)).toHaveText(["Run 69", "Run 68", "Run 67", "Run 66"]);
+  await moveCrossingPointer(page, 50, 69.1);
+  await expect(hoverNames(page)).toHaveText([
+    "Run 69 · train/loss",
+    "Run 69 · other/value",
+    "Run 68 · other/value",
+    "Run 68 · train/loss",
+  ]);
+  await expect(hoverValues(page)).toHaveText(["69", "69.4", "68.4", "68"]);
 });
 
 test.describe("default crosshair orientation", () => {
   test.use({ hasTouch: true });
-  for (const exit of ["toggle", "keyboard", "complete pair", "clear", "touch navigation"]) {
-    test(`default popup matches vertical crossings after horizontal ${exit}`, async ({ page }) => {
-      await crossingFixture(page, [{ id: "loop", name: "Loop run",
-        points: [[10, 20], [10, 80], [30, 80], [30, 20], [10, 20]],
-      }], { xy: true, config: { xFormat: "fixed-2", yFormat: "number" } });
-      const horizontal = page.getByRole("button", { name: "Add horizontal cursor", exact: true });
+  for (const exit of [
+    "toggle",
+    "keyboard",
+    "complete pair",
+    "clear",
+    "touch navigation",
+  ]) {
+    test(`default popup matches vertical crossings after horizontal ${exit}`, async ({
+      page,
+    }) => {
+      await crossingFixture(
+        page,
+        [
+          {
+            id: "loop",
+            name: "Loop run",
+            points: [
+              [10, 20],
+              [10, 80],
+              [30, 80],
+              [30, 20],
+              [10, 20],
+            ],
+          },
+        ],
+        { xy: true, config: { xFormat: "fixed-2", yFormat: "number" } },
+      );
+      const horizontal = page.getByRole("button", {
+        name: "Add horizontal cursor",
+        exact: true,
+      });
       await horizontal.click();
       await moveCrossingPointer(page, 20, 45);
       await expect(hoverValues(page)).toHaveText(["(10.00, 30.00)"]);
       if (exit === "toggle") await horizontal.click();
       else if (exit === "keyboard") await page.keyboard.press("c");
       else if (exit === "touch navigation") {
-        await page.getByRole("button", { name: "Touch navigation: drag to inspect, two fingers to pan and pinch to zoom", exact: true }).click();
+        await page
+          .getByRole("button", {
+            name: "Touch navigation: drag to inspect, two fingers to pan and pinch to zoom",
+            exact: true,
+          })
+          .click();
       } else {
         for (const y of [30, 70]) {
           await moveCrossingPointer(page, 20, y);
           await page.mouse.down();
           await page.mouse.up();
         }
-        if (exit === "clear") await page.getByRole("button", { name: "Clear cursors", exact: true }).click();
+        if (exit === "clear")
+          await page
+            .getByRole("button", { name: "Clear cursors", exact: true })
+            .click();
       }
       await expect(horizontal).toHaveAttribute("aria-pressed", "false");
       await moveCrossingPointer(page, 20, 45);
@@ -1617,7 +2147,9 @@ test.describe("default crosshair orientation", () => {
       await expect(hoverNames(page)).toHaveText(["Loop run"]);
       await expect(hoverValues(page)).toHaveText(["80"]);
       const before = await snapshot(page);
-      await page.getByRole("button", { name: "Add vertical cursor", exact: true }).click();
+      await page
+        .getByRole("button", { name: "Add vertical cursor", exact: true })
+        .click();
       await moveCrossingPointer(page, 20, 100);
       await expect(hoverValues(page)).toHaveText(["80"]);
       expect((await snapshot(page)).pins).toEqual(before.pins);

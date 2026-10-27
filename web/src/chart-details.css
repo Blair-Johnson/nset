@@ -1,0 +1,315 @@
+body.has-chart-details #main {
+  padding-right: calc(var(--chart-details-width, 340px) + 24px);
+}
+body.has-chart-details .card-maximized {
+  right: calc(var(--chart-details-width, 340px) + 24px);
+}
+.chart-details {
+  position: fixed;
+  right: 10px;
+  top: 50px;
+  bottom: 12px;
+  width: var(--chart-details-width, 340px);
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px #00000026;
+  /* A maximized chart is 1000; details remain an operable sibling. */
+  z-index: 1001;
+  font:
+    12px/1.6 system-ui,
+    sans-serif;
+}
+.chart-details-scroll {
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border-radius: inherit;
+}
+.chart-details-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 13px 12px 11px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.chart-details-titles {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chart-details .chart-details-heading {
+  margin: 0;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+.chart-details .chart-details-title {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chart-details .chart-details-close {
+  flex: none;
+  padding: 1px 8px;
+  min-height: 26px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+.chart-details-report,
+.chart-details-configuration {
+  padding: 12px;
+  overflow-wrap: anywhere;
+}
+.chart-details-configuration {
+  border-top: 1px solid var(--border);
+}
+.chart-details [hidden] {
+  display: none;
+}
+.chart-details-report > :first-child {
+  margin-top: 0;
+}
+.chart-details-report > :last-child {
+  margin-bottom: 0;
+}
+.chart-details-report h1,
+.chart-details-report h2 {
+  font-size: 15px;
+  line-height: 1.4;
+  margin: 16px 0 9px;
+}
+.chart-details-report h3 {
+  font-size: 13px;
+  margin: 15px 0 7px;
+}
+.chart-details-report h4,
+.chart-details-report h5,
+.chart-details-report h6 {
+  font-size: 12px;
+  margin: 13px 0 6px;
+}
+.chart-details-report p {
+  margin: 8px 0;
+}
+.chart-details-report ul,
+.chart-details-report ol {
+  padding-left: 20px;
+  margin: 8px 0 12px;
+}
+.chart-details-report blockquote {
+  margin: 10px 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+}
+.chart-details-report code {
+  font-size: 11px;
+  background: var(--surface-raised);
+  padding: 1px 3px;
+  border-radius: 3px;
+}
+.chart-details-report pre {
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  white-space: pre;
+}
+.chart-details-report pre code {
+  padding: 0;
+  background: none;
+}
+.chart-details-report hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 18px 0;
+}
+.chart-details-report table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+.chart-details-report th,
+.chart-details-report td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.chart-details-report .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 3px 0;
+}
+.chart-details .chart-measurement-link {
+  display: inline;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  white-space: normal;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.chart-details .chart-measurement-link:hover {
+  color: var(--text);
+}
+.chart-details :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.chart-details-configuration h4 {
+  font-size: 12px;
+  margin: 0 0 7px;
+}
+.chart-details-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.chart-details-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.chart-details-table th {
+  text-align: left;
+  font-weight: 500;
+  padding: 6px 8px;
+  vertical-align: top;
+}
+.chart-details-table tbody th,
+.chart-details-table td {
+  border-top: 1px solid var(--border);
+}
+.chart-details-table td {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  padding: 6px 8px;
+  vertical-align: top;
+  white-space: pre-wrap;
+  min-width: 70px;
+  max-width: 240px;
+  overflow-wrap: anywhere;
+}
+.chart-details-table tbody th {
+  color: var(--muted);
+  min-width: 90px;
+}
+.chart-details-run {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 90px;
+  max-width: 230px;
+  overflow-wrap: anywhere;
+}
+.chart-details-swatch {
+  flex: none;
+  width: 16px;
+  border-top: 2px solid;
+  transform: translateY(-3px);
+}
+.chart-details-empty,
+.chart-details-status {
+  color: var(--muted);
+  font-size: 11px;
+}
+.chart-details-status {
+  margin: 0;
+  padding: 10px 12px;
+}
+.chart-details-status:empty {
+  display: none;
+}
+.chart-details-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.chart-details-resizer {
+  position: absolute;
+  left: -6px;
+  top: 8px;
+  bottom: 8px;
+  width: 12px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 3;
+  border-radius: 6px;
+}
+.chart-details-resizer::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: calc(50% - 24px);
+  height: 48px;
+  width: 2px;
+  background: var(--muted);
+  opacity: 0.5;
+  border-radius: 2px;
+}
+.chart-details-resizer:hover::after,
+.chart-details-resizer:focus-visible::after {
+  background: var(--accent);
+  opacity: 1;
+}
+body.chart-details-resizing,
+body.chart-details-resizing * {
+  cursor: ew-resize !important;
+  user-select: none !important;
+}
+@media (max-width: 950px) {
+  body.has-chart-details #main {
+    padding-right: 14px;
+  }
+  .chart-details {
+    position: relative;
+    inset: auto;
+    width: auto;
+    margin: 12px;
+    z-index: auto;
+  }
+  .chart-details-scroll {
+    height: auto;
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+  .chart-details-header {
+    position: static;
+    border-radius: 9px 9px 0 0;
+  }
+  .chart-details-resizer {
+    display: none;
+  }
+  /* Fixed fullscreen cards would otherwise cover the in-flow companion. */
+  body.has-chart-details .card-maximized {
+    position: relative;
+    inset: auto;
+    z-index: auto;
+    box-shadow: none;
+  }
+}

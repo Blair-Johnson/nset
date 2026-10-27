@@ -17,7 +17,13 @@ export function plotType(card: ChartSpec): PlotType {
 export function setPlotType(card: ChartSpec, type: PlotType): void {
   const wasScatter = card.kind !== "image" && plotType(card) === "scatter";
   card.kind = type === "image" ? "image" : "timeseries";
-  if (type === "image") return;
+  if (type === "image") {
+    if (card.details?.measurements) {
+      const { measurements: _measurements, ...details } = card.details;
+      card.details = details;
+    }
+    return;
+  }
   const style = card.config.style;
   style.path = type === "step" ? "stepped-after" : "matched";
   style.width = type === "scatter" ? 0 : style.width || 2;

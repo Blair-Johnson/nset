@@ -12,11 +12,16 @@
     "format": "prettier --write \"src/{api,config,images,main,plot,settings,utils,views}*.ts\" src/style.css \"tests/*.ts\" *.ts *.json index.html"
   },
   "dependencies": {
+    "katex": "0.19.1",
+    "markdown-it": "14.3.3",
+    "markdown-it-texmath": "1.0.0",
     "openseadragon": "6.1.1",
     "uplot": "1.6.32"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
+    "@types/katex": "0.16.8",
+    "@types/markdown-it": "14.2.0",
     "@types/node": "26.6.5",
     "prettier": "3.9.10",
     "tsx": "4.23.15",

@@ -1,0 +1,529 @@
+{
+  "validDetails": [
+    {},
+    {
+      "markdown": ""
+    },
+    {
+      "configFields": [],
+      "measurements": {}
+    },
+    {
+      "markdown": "### Comparison\n\n$x^2$ [Inspect](measurement:late-training)",
+      "configFields": [
+        {
+          "path": ["optimizer", "lr"],
+          "label": "Learning rate"
+        },
+        {
+          "path": ["optimizer.lr"]
+        },
+        {
+          "path": ["layers", "0", "width"]
+        },
+        {
+          "path": ["repeat", "repeat"]
+        },
+        {
+          "path": ["a/b", "c"]
+        },
+        {
+          "path": ["a", "b/c"]
+        }
+      ],
+      "measurements": {
+        "late-training": {
+          "axis": "x",
+          "a": 500,
+          "b": 1500
+        },
+        "0": {
+          "axis": "y",
+          "a": -0.5,
+          "b": null
+        },
+        "one_cursor": {
+          "axis": "x",
+          "a": 0
+        },
+        "toString": {
+          "axis": "y",
+          "a": 1e300,
+          "b": -1e300
+        }
+      }
+    },
+    {
+      "configFields": [
+        {
+          "path": ["\u0085"],
+          "label": "\u0085"
+        }
+      ]
+    }
+  ],
+  "invalidDetails": [
+    null,
+    [],
+    "",
+    1,
+    {
+      "unknown": true
+    },
+    {
+      "markdown": null
+    },
+    {
+      "markdown": 1
+    },
+    {
+      "markdown": {}
+    },
+    {
+      "configFields": null
+    },
+    {
+      "configFields": {}
+    },
+    {
+      "configFields": [null]
+    },
+    {
+      "configFields": [[]]
+    },
+    {
+      "configFields": [{}]
+    },
+    {
+      "configFields": [
+        {
+          "path": null
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": "optimizer.lr"
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": []
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": [""]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": [" "]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["\ufeff"]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": [0]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": [null]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": [[]]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["optimizer", "__proto__"]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["constructor"]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["a", "prototype", "b"]
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": null
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": ""
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": " "
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": "\ufeff"
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": 1
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "label": []
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["ok"],
+          "extra": true
+        }
+      ]
+    },
+    {
+      "configFields": [
+        {
+          "path": ["a", "b"]
+        },
+        {
+          "path": ["a", "b"],
+          "label": "Again"
+        }
+      ]
+    },
+    {
+      "measurements": null
+    },
+    {
+      "measurements": []
+    },
+    {
+      "measurements": "x"
+    },
+    {
+      "measurements": {
+        "": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "has space": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "_first": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "-first": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "a:b": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "a.b": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "\u00e9": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "__proto__": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "constructor": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "prototype": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": null
+      }
+    },
+    {
+      "measurements": {
+        "sample": []
+      }
+    },
+    {
+      "measurements": {
+        "sample": 1
+      }
+    },
+    {
+      "measurements": {
+        "sample": {}
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x"
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "z",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": null,
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": null
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": "1"
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": true
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": 0,
+          "b": "1"
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": 0,
+          "b": false
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample": {
+          "axis": "x",
+          "a": 0,
+          "extra": 1
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample\n": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample\r": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample\u2028": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    },
+    {
+      "measurements": {
+        "sample\u2029": {
+          "axis": "x",
+          "a": 0
+        }
+      }
+    }
+  ],
+  "validRunLabels": [
+    {},
+    {
+      "rx:source:uid": "A \u00b7 2 layers",
+      "missing/run": "Unavailable run",
+      "another": "A \u00b7 2 layers",
+      "toString": "Own identity",
+      "\u0085": "\u0085"
+    }
+  ],
+  "invalidRunLabels": [
+    null,
+    [],
+    "",
+    1,
+    {
+      "": "Label"
+    },
+    {
+      " ": "Label"
+    },
+    {
+      "\ufeff": "Label"
+    },
+    {
+      "__proto__": "Label"
+    },
+    {
+      "constructor": "Label"
+    },
+    {
+      "prototype": "Label"
+    },
+    {
+      "run-a": null
+    },
+    {
+      "run-a": ""
+    },
+    {
+      "run-a": " "
+    },
+    {
+      "run-a": "\ufeff"
+    },
+    {
+      "run-a": 1
+    },
+    {
+      "run-a": false
+    },
+    {
+      "run-a": []
+    },
+    {
+      "run-a": {}
+    }
+  ]
+}

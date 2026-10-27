@@ -834,3 +834,136 @@ async fn unlimited_body_extraction_applies_only_to_view_writes() {
         saved["workspace"]["sections"]
     );
 }
+
+fn details_schema() -> Value {
+    serde_json::from_str(include_str!("fixtures/chart_details_schema.json")).unwrap()
+}
+
+#[tokio::test]
+async fn chart_details_and_run_labels_api_match_frontend_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    let fixture = details_schema();
+    for (cases, field, chart) in [
+        ("validDetails", "details", true),
+        ("invalidDetails", "details", true),
+        ("validRunLabels", "runLabels", false),
+        ("invalidRunLabels", "runLabels", false),
+    ] {
+        for value in fixture[cases].as_array().unwrap() {
+            let mut w = workspace();
+            if chart {
+                w["sections"][0]["cards"][0][field] = value.clone();
+            } else {
+                w[field] = value.clone();
+            }
+            let (status, result) =
+                request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+            let expected = if cases.starts_with("valid") {
+                StatusCode::CREATED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            assert_eq!(status, expected, "{cases}: {value}: {result}");
+            if expected == StatusCode::CREATED {
+                w["id"] = result["id"].clone();
+                w["updatedAt"] = result["workspace"]["updatedAt"].clone();
+                assert_eq!(result["workspace"], w);
+            }
+        }
+    }
+    let mut image = workspace();
+    image["sections"][0]["cards"][0]["kind"] = json!("image");
+    image["sections"][0]["cards"][0]["details"] = json!({
+        "markdown":"", "configFields":[{"path":["optimizer", "lr"]}], "measurements":{}
+    });
+    let (status, result) = request(&app, "POST", "/api/views", json!({"workspace":image})).await;
+    assert_eq!(status, StatusCode::CREATED, "{result}");
+    assert_eq!(result["workspace"]["sections"], image["sections"]);
+    image["sections"][0]["cards"][0]["details"]["measurements"] =
+        json!({"sample":{"axis":"x","a":0}});
+    assert_eq!(
+        request(&app, "POST", "/api/views", json!({"workspace":image}))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn chart_details_and_semantic_labels_survive_cas_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    let fixture = details_schema();
+    let mut w = workspace();
+    w["runLabels"] = fixture["validRunLabels"][1].clone();
+    w["sections"][0]["cards"][0]["details"] = fixture["validDetails"][3].clone();
+    let (status, first) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    w["id"] = first["id"].clone();
+    w["updatedAt"] = first["workspace"]["updatedAt"].clone();
+    assert_eq!(first["workspace"], w);
+    let url = format!("/api/views/{}", first["id"].as_str().unwrap());
+    assert_eq!(request(&app, "GET", &url, Value::Null).await.1, first);
+
+    w["runLabels"]["rx:run-a"] = json!("Reviewed semantic name");
+    w["sections"][0]["cards"][0]["details"]["markdown"] =
+        json!("Updated [inspect](measurement:late-training)");
+    w["sections"][0]["cards"][0]["details"]["measurements"]["late-training"]["b"] = Value::Null;
+    let (status, saved) = request(&app, "PUT", &url, json!({"revision":1,"workspace":w})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["revision"], 2);
+    w["updatedAt"] = saved["workspace"]["updatedAt"].clone();
+    assert_eq!(saved["workspace"], w);
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &url,
+            json!({"revision":1,"workspace":first["workspace"]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let mut invalid = w.clone();
+    invalid["sections"][0]["cards"][0]["details"]["unexpected"] = json!(true);
+    assert_eq!(
+        request(&app, "PUT", &url, json!({"revision":2,"workspace":invalid}))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(&app, "GET", &format!("{url}?revision=2"), Value::Null)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(request(&app, "GET", &url, Value::Null).await.1, saved);
+    drop(app);
+    let app = api::router(open(dir.path()));
+    assert_eq!(request(&app, "GET", &url, Value::Null).await.1, saved);
+}
+
+#[tokio::test]
+async fn chart_details_content_has_no_new_size_or_count_quotas() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = api::router(open(dir.path()));
+    let mut w = workspace();
+    w["runLabels"] = Value::Object(
+        (0..4097)
+            .map(|i| (format!("run{i}"), json!(format!("Label {i}"))))
+            .collect(),
+    );
+    w["sections"][0]["cards"][0]["details"] = json!({
+        "markdown":"x".repeat(262_145),
+        "configFields":(0..513).map(|i| json!({"path":[format!("field{i}")]})).collect::<Vec<_>>(),
+        "measurements":(0..513).map(|i| (format!("m{i}"), json!({"axis":"x","a":i}))).collect::<serde_json::Map<_,_>>()
+    });
+    let (status, saved) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    w["id"] = saved["id"].clone();
+    w["updatedAt"] = saved["workspace"]["updatedAt"].clone();
+    assert_eq!(saved["workspace"], w);
+}

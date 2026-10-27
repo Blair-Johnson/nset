@@ -1,4 +1,5 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { palette } from "./config";
 import assert from "node:assert/strict";
 import {
@@ -448,4 +449,155 @@ test("section reorder preserves identities, collapse states and intervening filt
   assert.equal(reorderSections(sections, "last", "hidden", true), sections);
   assert.equal(reorderSections(sections, "missing", "first"), sections);
   assert.equal(reorderSections(sections, "first", "missing"), sections);
+});
+
+const detailsSchema = JSON.parse(
+  readFileSync(
+    new URL("../../tests/fixtures/chart_details_schema.json", import.meta.url),
+    "utf8",
+  ),
+) as Record<
+  "validDetails" | "invalidDetails" | "validRunLabels" | "invalidRunLabels",
+  unknown[]
+>;
+
+test("chart details and semantic labels share the backend acceptance fixture", () => {
+  const card = newChart("timeseries", ["loss"]);
+  for (const details of detailsSchema.validDetails)
+    assert.deepEqual(validateChart({ ...card, details }).details, details);
+  for (const details of detailsSchema.invalidDetails)
+    assert.throws(
+      () => validateChart({ ...card, details }),
+      JSON.stringify(details),
+    );
+  const workspace = newWorkspace("e1", "Named", [], catalog());
+  for (const runLabels of detailsSchema.validRunLabels)
+    assert.deepEqual(
+      validateWorkspace({ ...workspace, runLabels }).runLabels,
+      runLabels,
+    );
+  for (const runLabels of detailsSchema.invalidRunLabels)
+    assert.throws(
+      () => validateWorkspace({ ...workspace, runLabels }),
+      JSON.stringify(runLabels),
+    );
+  assert.equal(Object.hasOwn(validateChart(card), "details"), false);
+  assert.equal(Object.hasOwn(validateWorkspace(workspace), "runLabels"), false);
+});
+
+test("details reject nonfinite coordinates and non-JSON objects without invoking getters", () => {
+  const card = newChart("timeseries", []);
+  for (const coordinate of [NaN, Infinity, -Infinity, undefined]) {
+    for (const key of ["a", "b"]) {
+      const sample = { axis: "x", a: 1, [key]: coordinate };
+      assert.throws(() =>
+        validateChart({ ...card, details: { measurements: { sample } } }),
+      );
+    }
+  }
+  let invoked = false;
+  const accessor = Object.defineProperty({}, "markdown", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return "unsafe";
+    },
+  });
+  for (const details of [
+    accessor,
+    Object.create({ markdown: "inherited" }),
+    { configFields: [{ path: ["safe", , "sparse"] }] },
+    { configFields: [{ path: ["safe", () => "callback"] }] },
+    { markdown: undefined },
+  ])
+    assert.throws(() => validateChart({ ...card, details }));
+  assert.equal(invoked, false);
+  const workspace = newWorkspace("e1", "Named", [], catalog());
+  assert.throws(() =>
+    validateWorkspace({
+      ...workspace,
+      runLabels: Object.create({ r1: "Inherited" }),
+    }),
+  );
+});
+
+test("image charts retain prose and selected configuration but reject native measurements", () => {
+  const card = newChart("image", ["sample"]);
+  const details = {
+    markdown: "",
+    configFields: [{ path: ["optimizer", "lr"] }],
+    measurements: {},
+  };
+  assert.deepEqual(validateChart({ ...card, details }).details, details);
+  assert.throws(
+    () =>
+      validateChart({
+        ...card,
+        details: { measurements: { sample: { axis: "y", a: 0 } } },
+      }),
+    /Image/,
+  );
+});
+
+test("authored details and aliases survive import, export, reset, clone and local storage", () => {
+  const view = newWorkspace("e1", "Annotated", ["r1"], catalog());
+  view.runLabels = { r1: "Semantic name", missing: "Portable unavailable run" };
+  const card = view.sections[0].cards[0];
+  card.details = {
+    markdown: "### Why this chart\n\n[Inspect](measurement:window)",
+    configFields: [
+      { path: ["optimizer", "lr"] },
+      { path: ["optimizer.lr"], label: "Literal dotted key" },
+    ],
+    measurements: {
+      window: { axis: "x", a: 1, b: 2 },
+      single: { axis: "y", a: 3, b: null },
+    },
+  };
+  const roundTrip = importWorkspace(exportWorkspace(view));
+  assert.deepEqual(roundTrip, view);
+  const reset = resetChart(card);
+  assert.deepEqual(reset.details, card.details);
+  assert.notEqual(reset.details, card.details);
+  const duplicate = validateChart({
+    ...structuredClone(card),
+    id: "duplicate",
+  });
+  assert.deepEqual(duplicate.details, card.details);
+  const copied = validateWorkspace({
+    ...structuredClone(view),
+    id: "view:copy",
+    name: "Copy",
+  });
+  assert.deepEqual(copied.runLabels, view.runLabels);
+  assert.deepEqual(copied.sections, view.sections);
+  const library: WorkspaceLibrary = {
+    version: 2,
+    views: [view],
+    activeByExperiment: { e1: view.id },
+  };
+  const target = storage();
+  saveLibrary(library, target);
+  assert.deepEqual(loadLibrary(target), library);
+});
+
+test("annotation content has no arbitrary size or field-count quotas", () => {
+  const details = {
+    markdown: "x".repeat(262145),
+    configFields: Array.from({ length: 513 }, (_, i) => ({
+      path: [`field${i}`],
+    })),
+    measurements: Object.fromEntries(
+      Array.from({ length: 513 }, (_, i) => [`m${i}`, { axis: "x", a: i }]),
+    ),
+  };
+  const view = newWorkspace("e1", "Large annotations", ["r1"], catalog());
+  view.runLabels = Object.fromEntries(
+    Array.from({ length: 4097 }, (_, i) => [`run${i}`, `Label ${i}`]),
+  );
+  view.sections[0].cards[0] = validateChart({
+    ...view.sections[0].cards[0],
+    details,
+  });
+  assert.deepEqual(importWorkspace(exportWorkspace(view)), view);
 });

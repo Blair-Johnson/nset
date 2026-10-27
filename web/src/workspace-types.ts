@@ -47,6 +47,21 @@ export interface CardLayout {
   width: number;
   height: number;
 }
+/** Literal own-property path beneath a run's params (dots are not separators). */
+export interface ChartConfigField {
+  path: string[];
+  label?: string;
+}
+export interface ChartMeasurement {
+  axis: "x" | "y";
+  a: number;
+  b?: number | null;
+}
+export interface ChartDetails {
+  markdown?: string;
+  configFields?: ChartConfigField[];
+  measurements?: Record<string, ChartMeasurement>;
+}
 export interface ChartSpec {
   records?: import("./records").RecordBinding;
   id: string;
@@ -59,6 +74,7 @@ export interface ChartSpec {
   outliers: "all" | "robust";
   size: "normal" | "wide";
   layout?: CardLayout;
+  details?: ChartDetails;
 }
 export interface Section {
   id: string;
@@ -74,6 +90,8 @@ export interface Workspace {
   selectedRunIds: string[];
   /** Selected intent withheld until Event/filter evidence resolves. Never plotted. */
   pendingSelectedRunIds?: string[];
+  /** View-wide semantic names keyed by stable run identity. */
+  runLabels?: Record<string, string>;
   sections: Section[];
   updatedAt: number;
 }
@@ -102,9 +120,12 @@ export interface CardContext {
   catalog: Catalog;
   selectedRunIds: string[];
   store: MetricLoader;
+  runLabels?: Record<string, string>;
+  labelMode?: "semantic" | "original";
 }
 export interface CardActions {
   onEdit(id: string): void;
+  onDetails?: (id: string) => void;
   onRemove(id: string): void;
   onDuplicate(id: string): void;
   /** Return the chart's settings to new-chart defaults, keeping its data. */
@@ -113,7 +134,8 @@ export interface CardActions {
   onResize(id: string, size: "normal" | "wide"): void;
   onDimensions?: (id: string, layout: CardLayout) => boolean | void;
 }
-export type InteractionMode = "pan" | "zoom" | "inspect" | "threshold" | "navigate";
+export type InteractionMode =
+  "pan" | "zoom" | "inspect" | "threshold" | "navigate";
 export type NavigationAxis = "x" | "y" | "both";
 export interface PlotInteraction {
   mode: InteractionMode;

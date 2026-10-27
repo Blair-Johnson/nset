@@ -3,6 +3,8 @@ import { validateRecordBinding, recordRuns } from "./records";
 import { assertSafe, defaults, parseSafeJson, validateConfig } from "./config";
 import type {
   Catalog,
+  ChartDetails,
+  ChartMeasurement,
   ChartSpec,
   ResolvedSeries,
   Section,
@@ -197,7 +199,8 @@ export function newChart(
  * "Reset chart": every display setting returns to what a new chart gets
  * (axes, scales, bounds, smoothing, style, legend, advanced options). What
  * the chart plots — its sources and X binding — and its title, id, size and
- * place on the dashboard stay. XY charts keep their join parameter.
+ * place on the dashboard stay, including authored details. XY charts keep
+ * their join parameter.
  */
 export function resetChart(card: ChartSpec): ChartSpec {
   const fresh = newChart(card.kind, [], card.title);
@@ -281,6 +284,69 @@ export function newWorkspace(
     updatedAt: Date.now(),
   });
 }
+/** Called only after the enclosing chart passes safe-JSON validation. */
+function validateDetails(
+  value: unknown,
+  kind: ChartSpec["kind"],
+): ChartDetails {
+  const v = object(value, ["markdown", "configFields", "measurements"]);
+  const details: ChartDetails = {};
+  if (v.markdown !== undefined) {
+    if (typeof v.markdown !== "string")
+      throw new Error("Invalid details markdown.");
+    details.markdown = v.markdown;
+  }
+  if (v.configFields !== undefined) {
+    details.configFields = array(v.configFields).map((value) => {
+      const field = object(value, ["path", "label"]);
+      const path = array(field.path).map(id);
+      if (!path.length)
+        throw new Error("Configuration field paths cannot be empty.");
+      return {
+        path,
+        ...(field.label !== undefined
+          ? { label: text(field.label, "field label") }
+          : {}),
+      };
+    });
+    distinct(
+      details.configFields.map((field) => JSON.stringify(field.path)),
+      "configuration path",
+    );
+  }
+  if (v.measurements !== undefined) {
+    const entries = Object.entries(object(v.measurements));
+    if (kind === "image" && entries.length)
+      throw new Error("Image charts do not support measurements.");
+    details.measurements = Object.fromEntries(
+      entries.map(([name, value]) => {
+        // JS `$` also matches before a final newline; require the entire match.
+        if (
+          name.match(/^[A-Za-z0-9][A-Za-z0-9_-]*$/)?.[0] !== name ||
+          forbidden.has(name)
+        )
+          throw new Error("Invalid measurement identity.");
+        const m = object(value, ["axis", "a", "b"]);
+        if (
+          typeof m.a !== "number" ||
+          !Number.isFinite(m.a) ||
+          (m.b !== undefined &&
+            m.b !== null &&
+            (typeof m.b !== "number" || !Number.isFinite(m.b)))
+        )
+          throw new Error("Measurement coordinates must be finite numbers.");
+        const measurement: ChartMeasurement = {
+          axis: enumValue(m.axis, ["x", "y"]),
+          a: m.a,
+          ...(m.b !== undefined ? { b: m.b as number | null } : {}),
+        };
+        return [name, measurement];
+      }),
+    );
+  }
+  return details;
+}
+
 export function validateChart(value: unknown): ChartSpec {
   assertSafe(value);
   const v = object(value, [
@@ -294,6 +360,7 @@ export function validateChart(value: unknown): ChartSpec {
     "size",
     "layout",
     "records",
+    "details",
   ]);
   const kind = enumValue(v.kind, ["timeseries", "image"]);
   const source = object(v.source);
@@ -374,6 +441,9 @@ export function validateChart(value: unknown): ChartSpec {
     outliers: enumValue(v.outliers, ["all", "robust"]),
     size: enumValue(v.size, ["normal", "wide"]),
     ...(layout ? { layout } : {}),
+    ...(v.details !== undefined
+      ? { details: validateDetails(v.details, kind) }
+      : {}),
   };
 }
 export function validateWorkspace(value: unknown): Workspace {
@@ -385,6 +455,7 @@ export function validateWorkspace(value: unknown): Workspace {
     "experimentId",
     "selectedRunIds",
     "pendingSelectedRunIds",
+    "runLabels",
     "sections",
     "updatedAt",
   ]);
@@ -421,6 +492,15 @@ export function validateWorkspace(value: unknown): Workspace {
       ? []
       : array(v.pendingSelectedRunIds).map(id);
   distinct([...selectedRunIds, ...pendingSelectedRunIds], "selected run");
+  const runLabels =
+    v.runLabels === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(object(v.runLabels)).map(([runId, label]) => [
+            id(runId),
+            text(label, "run label"),
+          ]),
+        );
   return {
     version: 2,
     id: id(v.id),
@@ -428,6 +508,7 @@ export function validateWorkspace(value: unknown): Workspace {
     experimentId: id(v.experimentId),
     selectedRunIds,
     ...(pendingSelectedRunIds.length ? { pendingSelectedRunIds } : {}),
+    ...(runLabels !== undefined ? { runLabels } : {}),
     sections,
     updatedAt: v.updatedAt,
   };

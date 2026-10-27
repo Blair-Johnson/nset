@@ -7,6 +7,7 @@
 
 use crate::errors::{ApiError, Result};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 const INF: f64 = f64::INFINITY;
 // JavaScript Number.MIN_VALUE is the smallest subnormal, not MIN_POSITIVE.
@@ -510,6 +511,101 @@ fn validate_advanced(v: &Value) -> Result<()> {
     )
 }
 
+fn annotation_text(v: &Value) -> Result<&str> {
+    v.as_str()
+        .filter(|s| !trim(s).is_empty())
+        .ok_or_else(|| bad("chart details: expected nonempty text"))
+}
+
+fn annotation_identity(s: &str) -> bool {
+    !trim(s).is_empty() && !matches!(s, "__proto__" | "constructor" | "prototype")
+}
+
+/// View-wide semantic names. Unavailable/unselected run IDs remain portable.
+pub(crate) fn validate_run_labels(v: &Value) -> Result<()> {
+    for (run_id, label) in object(v)? {
+        if !annotation_identity(run_id) {
+            return Err(bad("run labels: unsafe or empty run identity"));
+        }
+        annotation_text(label)?;
+    }
+    Ok(())
+}
+
+fn config_fields(v: &Value) -> Result<()> {
+    let mut paths = HashSet::new();
+    for field in array(v)? {
+        fields(
+            field,
+            &[
+                ("path", Check::Custom(|v| array(v).map(|_| ()))),
+                ("label", Check::Custom(|v| annotation_text(v).map(|_| ()))),
+            ],
+        )?;
+        let path = array(&field["path"])?;
+        let segments = path
+            .iter()
+            .map(annotation_text)
+            .collect::<Result<Vec<_>>>()?;
+        if segments.is_empty() || segments.iter().any(|s| !annotation_identity(s)) {
+            return Err(bad("chart details: unsafe or empty configuration path"));
+        }
+        // Segment arrays, not dot-joined strings: literal dotted keys stay distinct.
+        if !paths.insert(segments) {
+            return Err(bad("chart details: duplicate configuration path"));
+        }
+    }
+    Ok(())
+}
+
+fn measurements(v: &Value) -> Result<()> {
+    for (name, measurement) in object(v)? {
+        if !annotation_identity(name)
+            || !name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+        {
+            return Err(bad("chart details: invalid measurement identity"));
+        }
+        fields(
+            measurement,
+            &[
+                ("axis", Check::Strings(&["x", "y"])),
+                ("a", Check::Number(-INF, INF)),
+                ("b", Check::Custom(|v| nullable_number(v, -INF, INF))),
+            ],
+        )?;
+        // axis and a are required; b may be missing or null for a single cursor.
+        check(&measurement["axis"], Check::Strings(&["x", "y"]))?;
+        number(&measurement["a"], -INF, INF)?;
+    }
+    Ok(())
+}
+
+/// Validate optional authored metadata, after the caller's global safe-JSON checks.
+/// Image charts can carry narrative/configuration fields and an empty measurement map.
+pub(crate) fn validate_chart_details(v: &Value, image: bool) -> Result<()> {
+    fields(
+        v,
+        &[
+            ("markdown", Check::String),
+            ("configFields", Check::Custom(config_fields)),
+            ("measurements", Check::Custom(measurements)),
+        ],
+    )?;
+    if image
+        && v.get("measurements")
+            .is_some_and(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+    {
+        return Err(bad("image charts do not support measurements"));
+    }
+    Ok(())
+}
+
 /// Validate a partial view config after the caller's global safe-JSON checks.
 pub(crate) fn validate_config(v: &Value) -> Result<()> {
     use Check::*;
@@ -786,6 +882,30 @@ const NAMED_COLORS: &str = "aliceblue antiquewhite aqua aquamarine azure beige b
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn chart_details_and_run_labels_match_frontend_schema_fixture() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/chart_details_schema.json"))
+                .unwrap();
+        for details in fixture["validDetails"].as_array().unwrap() {
+            assert!(validate_chart_details(details, false).is_ok(), "{details}");
+        }
+        for details in fixture["invalidDetails"].as_array().unwrap() {
+            assert!(validate_chart_details(details, false).is_err(), "{details}");
+        }
+        for labels in fixture["validRunLabels"].as_array().unwrap() {
+            assert!(validate_run_labels(labels).is_ok(), "{labels}");
+        }
+        for labels in fixture["invalidRunLabels"].as_array().unwrap() {
+            assert!(validate_run_labels(labels).is_err(), "{labels}");
+        }
+        assert!(validate_chart_details(&json!({"markdown":"", "configFields":[{"path":["optimizer", "lr"]}], "measurements":{}}), true).is_ok());
+        assert!(
+            validate_chart_details(&json!({"measurements":{"sample":{"axis":"x","a":0}}}), true)
+                .is_err()
+        );
+    }
 
     #[test]
     fn partial_configs_and_complete_literal_subset() {

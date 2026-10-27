@@ -56,3 +56,20 @@ test("points are an overlay: line, area and step keep the chosen markers", () =>
     assert.deepEqual(card.config.runs.r, { markers: { show: true } });
   }
 });
+
+test("plot presets preserve authored details; image conversion drops scalar measurements only", () => {
+  const card = newChart("timeseries", ["train/loss"]);
+  card.details = {
+    markdown: "Inspect this trajectory.",
+    configFields: [{ path: ["optimizer", "lr"], label: "Learning rate" }],
+    measurements: { interval: { axis: "x", a: 10, b: 20 } },
+  };
+  const details = structuredClone(card.details);
+  setPlotType(card, "scatter");
+  assert.deepEqual(card.details, details);
+  setPlotType(card, "image");
+  assert.deepEqual(card.details, {
+    markdown: details.markdown,
+    configFields: details.configFields,
+  });
+});

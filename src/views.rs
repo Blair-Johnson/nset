@@ -157,6 +157,7 @@ pub(crate) fn validate_workspace(v: &Value) -> Result<()> {
             "experimentId",
             "selectedRunIds",
             "pendingSelectedRunIds",
+            "runLabels",
             "sections",
             "updatedAt",
         ],
@@ -167,6 +168,9 @@ pub(crate) fn validate_workspace(v: &Value) -> Result<()> {
     text(&v["name"])?;
     safe_integer(&v["updatedAt"], 0)?;
     strings(&v["selectedRunIds"], true)?;
+    if let Some(labels) = v.get("runLabels") {
+        crate::view_config::validate_run_labels(labels)?;
+    }
     if let Some(pending) = v.get("pendingSelectedRunIds") {
         strings(pending, true)?;
         let selected: HashSet<_> = array(&v["selectedRunIds"])?
@@ -204,7 +208,8 @@ fn validate_chart(v: &Value) -> Result<()> {
     let o = object(
         v,
         &[
-            "id", "title", "kind", "source", "x", "config", "outliers", "size", "layout", "records",
+            "id", "title", "kind", "source", "x", "config", "outliers", "size", "layout",
+            "records", "details",
         ],
     )?;
     identity(&v["id"])?;
@@ -259,6 +264,9 @@ fn validate_chart(v: &Value) -> Result<()> {
             (300..=4096).contains(&safe_integer(&layout["width"], 0)?)
                 && (240..=2160).contains(&safe_integer(&layout["height"], 0)?),
         )?;
+    }
+    if let Some(details) = o.get("details") {
+        crate::view_config::validate_chart_details(details, v["kind"] == "image")?;
     }
     crate::view_config::validate_config(&v["config"])
 }

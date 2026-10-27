@@ -41,6 +41,7 @@ import type {
   CardContext,
 } from "./workspace-types";
 import { ChartCard } from "./cards";
+import { ChartDetailsPanel } from "./chart-details";
 import { setPlotType } from "./plot-types";
 import { addMissingCharts } from "./dashboard-layout";
 import { openChartEditor } from "./chart-editor";
@@ -476,6 +477,7 @@ function commitLibrary(mutate: () => void): boolean {
 }
 function disposeCards() {
   sectionDrag.cancel();
+  chartDetails.close(false);
   runDrawer?.destroy();
   runDrawer = undefined;
   for (const card of cards.values()) card.view.destroy();
@@ -487,6 +489,7 @@ function disposeCards() {
 }
 function suspendDashboard() {
   sectionDrag.cancel();
+  chartDetails.close(false);
   if (!currentWorkspaceId || suspendedDashboard) return;
   suspendedFocus = $("page").contains(document.activeElement)
     ? (document.activeElement as HTMLElement)
@@ -537,8 +540,111 @@ function chartFollowsSelection(spec: ChartSpec): boolean {
     ? !spec.records.runUids.length
     : spec.source.mode === "selected";
 }
+const labelModes = new Map<string, "semantic" | "original">();
+function labelMode(workspace: Workspace): "semantic" | "original" {
+  if (!labelModes.has(workspace.id)) {
+    let mode: "semantic" | "original" = "semantic";
+    try {
+      if (
+        localStorage.getItem(
+          `nset:chart-label-mode:v1:${encodeURIComponent(workspace.id)}`,
+        ) === "original"
+      )
+        mode = "original";
+    } catch {
+      /* Presentation preferences must not block charts. */
+    }
+    labelModes.set(workspace.id, mode);
+  }
+  return labelModes.get(workspace.id)!;
+}
 function context(workspace: Workspace): CardContext {
-  return { api, catalog, selectedRunIds: workspace.selectedRunIds, store };
+  return {
+    api,
+    catalog,
+    selectedRunIds: workspace.selectedRunIds,
+    store,
+    runLabels: workspace.runLabels,
+    labelMode: labelMode(workspace),
+  };
+}
+function activeChartWorkspace(id = currentWorkspaceId): Workspace | undefined {
+  if (
+    !connected ||
+    currentRoute().view !== "charts" ||
+    id !== currentWorkspaceId
+  )
+    return;
+  if (serverWorkspace?.workspace.id === id) return serverWorkspace.workspace;
+  return library.views.find((view) => view.id === id);
+}
+function updateDetailsButtons() {
+  const selected = chartDetails.active;
+  for (const [id, entry] of cards)
+    entry.view.setDetailsOpen(
+      selected?.workspaceId === currentWorkspaceId && selected.cardId === id,
+    );
+}
+const chartDetails = new ChartDetailsPanel({
+  onClose: updateDetailsButtons,
+  onMeasure: async (workspaceId, id, measurement, signal) => {
+    const workspace = activeChartWorkspace(workspaceId);
+    const found = workspace && locate(workspace, id);
+    const entry = cards.get(id);
+    if (
+      !found ||
+      !entry ||
+      entry.host.hidden ||
+      found.section.collapsed ||
+      chartDetails.active?.workspaceId !== workspaceId ||
+      chartDetails.active.cardId !== id
+    )
+      return false;
+    return entry.view.showMeasurement(measurement, signal);
+  },
+});
+function openChartDetails(workspaceId: string, id: string) {
+  const workspace = activeChartWorkspace(workspaceId);
+  const found = workspace && locate(workspace, id);
+  const entry = cards.get(id);
+  if (
+    !workspace ||
+    !found ||
+    !entry ||
+    !found.card.details ||
+    entry.host.hidden ||
+    found.section.collapsed
+  )
+    return;
+  chartDetails.open(
+    { workspaceId, chart: found.card, context: context(workspace) },
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : undefined,
+  );
+  updateDetailsButtons();
+}
+function syncChartDetails(workspace: Workspace) {
+  const selected = chartDetails.active;
+  if (!selected) return;
+  const found = locate(workspace, selected.cardId);
+  const entry = cards.get(selected.cardId);
+  if (
+    selected.workspaceId !== workspace.id ||
+    !found?.card.details ||
+    !entry ||
+    entry.host.hidden ||
+    found.section.collapsed
+  ) {
+    chartDetails.close(false);
+    return;
+  }
+  chartDetails.update({
+    workspaceId: workspace.id,
+    chart: found.card,
+    context: context(workspace),
+  });
+  updateDetailsButtons();
 }
 
 function workspaceFor(experimentId: string): Workspace {
@@ -1344,6 +1450,33 @@ function workspaceToolbar(workspace: Workspace) {
   marker.hidden = !isModified(workspace);
   viewControl.append(marker);
   host.append(viewControl);
+  if (Object.keys(workspace.runLabels ?? {}).length) {
+    const group = element("label", "workspace-label-mode", "Run labels ");
+    const naming = element("select");
+    naming.setAttribute("aria-label", "Run labels");
+    for (const [value, text] of [
+      ["semantic", "Semantic"],
+      ["original", "Original"],
+    ]) {
+      const option = element("option", "", text);
+      option.value = value;
+      naming.append(option);
+    }
+    naming.value = labelMode(workspace);
+    naming.onchange = () => {
+      const mode = naming.value === "original" ? "original" : "semantic";
+      labelModes.set(workspace.id, mode);
+      try {
+        localStorage.setItem(
+          `nset:chart-label-mode:v1:${encodeURIComponent(workspace.id)}`,
+          mode,
+        );
+      } catch {}
+      renderCharts(workspace);
+    };
+    group.append(naming);
+    host.append(group);
+  }
   const settings = dashboardSettings(workspace);
   if (settings.count) {
     const apply = (controls: DashboardControls) =>
@@ -1617,7 +1750,7 @@ function renderCharts(workspace: Workspace) {
       });
     };
     for (const [cardIndex, spec] of section.cards.entries()) {
-      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? workspace.selectedRunIds.join(",") : "explicit"}`;
+      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? workspace.selectedRunIds.join(",") : "explicit"}:${labelMode(workspace)}:${JSON.stringify(workspace.runLabels ?? {})}`;
       keep.add(spec.id);
       let entry = cards.get(spec.id);
       const serialized = JSON.stringify(spec);
@@ -1627,6 +1760,7 @@ function renderCharts(workspace: Workspace) {
         host.dataset.cardKind = spec.kind;
         host.setAttribute("aria-label", spec.title);
         const view = new ChartCard(host, spec, context(workspace), {
+          onDetails: (id) => openChartDetails(workspace.id, id),
           onEdit: (id) => {
             const found = locate(workspace, id);
             if (found) editCard(workspace, found.card);
@@ -1816,6 +1950,7 @@ function applyChartFilter(workspace: Workspace) {
       button("Open run table", () => navigate(workspace.experimentId)),
     );
   } else empty?.remove();
+  syncChartDetails(workspace);
 }
 
 async function connect(refresh = false) {
@@ -1918,6 +2053,8 @@ window.addEventListener("nset:run-colors-changed", () => {
   refreshRunSwatches($("page"), catalog);
   if (suspendedDashboard) refreshRunSwatches(suspendedDashboard, catalog);
   for (const card of cards.values()) card.view.refreshColors();
+  const workspace = activeChartWorkspace();
+  if (workspace) syncChartDetails(workspace);
 });
 window.addEventListener("hashchange", () => {
   disposeServerView();

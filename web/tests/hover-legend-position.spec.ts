@@ -129,7 +129,7 @@ async function contents(page: Page) {
     .evaluateAll((rows) =>
       rows.map((row) => ({
         name: row.children[0].textContent,
-        title: (row.children[0] as HTMLElement).title,
+        title: row.querySelector<HTMLElement>(".card-series-label")!.title,
         color: getComputedStyle(row.children[0]).color,
         value: row.children[1].textContent,
       })),
@@ -226,7 +226,10 @@ test("resized/maximized cards and clipping offsets use the current measured boun
   const actual = (await popup(page).boundingBox())!;
   const plot = (await page.locator(".u-over").boundingBox())!;
   await expectInsidePlot(page);
-  await page.mouse.move(actual.x + actual.width - 20, actual.y + actual.height / 2);
+  await page.mouse.move(
+    actual.x + actual.width - 20,
+    actual.y + actual.height / 2,
+  );
   await expect.poll(() => side(page)).toBe("left");
   await expectInsidePlot(page);
   await page.mouse.move(plot.x + plot.width / 2, plot.y + plot.height * 0.7);
@@ -340,7 +343,9 @@ test("stationary and fresh touch crosshairs use the resized corners", async ({
   context,
 }) => {
   await fixture(page, true);
-  await popup(page).evaluate((el: HTMLElement) => { el.style.width = "150px"; });
+  await popup(page).evaluate((el: HTMLElement) => {
+    el.style.width = "150px";
+  });
   await page.setViewportSize({ width: 1200, height: 950 });
   await page
     .getByRole("button", {
@@ -388,24 +393,39 @@ test("stationary and fresh touch crosshairs use the resized corners", async ({
 });
 
 async function expectInsidePlot(page: Page) {
-  await expect.poll(async () => {
-    const box = await popup(page).boundingBox();
-    const plot = await page.locator(".u-over").boundingBox();
-    return !!box && !!plot && box.x >= plot.x && box.y >= plot.y &&
-      box.x + box.width <= plot.x + plot.width + 0.5 &&
-      box.y + box.height <= plot.y + plot.height + 0.5;
-  }).toBe(true);
+  await expect
+    .poll(async () => {
+      const box = await popup(page).boundingBox();
+      const plot = await page.locator(".u-over").boundingBox();
+      return (
+        !!box &&
+        !!plot &&
+        box.x >= plot.x &&
+        box.y >= plot.y &&
+        box.x + box.width <= plot.x + plot.width + 0.5 &&
+        box.y + box.height <= plot.y + plot.height + 0.5
+      );
+    })
+    .toBe(true);
   const box = (await popup(page).boundingBox())!;
-  for (const tick of await page.locator('[data-role^="mouse-axis-tick-"]:visible').all()) {
+  for (const tick of await page
+    .locator('[data-role^="mouse-axis-tick-"]:visible')
+    .all()) {
     const bounds = await tick.boundingBox();
-    if (bounds) expect(bounds.x + bounds.width <= box.x ||
-      bounds.x >= box.x + box.width || bounds.y + bounds.height <= box.y ||
-      bounds.y >= box.y + box.height).toBe(true);
+    if (bounds)
+      expect(
+        bounds.x + bounds.width <= box.x ||
+          bounds.x >= box.x + box.width ||
+          bounds.y + bounds.height <= box.y ||
+          bounds.y >= box.y + box.height,
+      ).toBe(true);
   }
 }
 
 for (const mobile of [false, true]) {
-  test(`popup stays inside the axes in both corners and after resize (${mobile ? "mobile" : "desktop"})`, async ({ page }) => {
+  test(`popup stays inside the axes in both corners and after resize (${mobile ? "mobile" : "desktop"})`, async ({
+    page,
+  }) => {
     await fixture(page, mobile);
     await page.evaluate((mobile) => {
       const f = (window as any).legendFixture;
@@ -419,12 +439,15 @@ for (const mobile of [false, true]) {
     await page.mouse.move(plot.x + plot.width - 10, plot.y + 20);
     await expectInsidePlot(page);
     if (!mobile) await expect.poll(() => side(page)).toBe("left");
-    await page.locator(".chart-card").screenshot({ path: test.info().outputPath("popup-inside-plot.png") });
+    await page
+      .locator(".chart-card")
+      .screenshot({ path: test.info().outputPath("popup-inside-plot.png") });
     await page.mouse.move(plot.x + 10, plot.y + 20);
     await expectInsidePlot(page);
     await expect.poll(() => side(page)).toBe("right");
     await page.evaluate(() => {
-      document.querySelector<HTMLElement>(".card-clipping")!.style.height = "80px";
+      document.querySelector<HTMLElement>(".card-clipping")!.style.height =
+        "80px";
       const f = (window as any).legendFixture;
       f.spec.layout.height = 360;
       f.card.applyDimensions();

@@ -1,5 +1,6 @@
 import { touchPrimary } from "./input-capabilities";
 import { nearestCrossingRuns, plottedSeries } from "./crossings";
+import { chartIdentities, type ChartIdentity } from "./chart-identities";
 import { loadRecordPlot, recordConfig } from "./records";
 import {
   analyze,
@@ -17,17 +18,14 @@ import { loadPlotRuns, withMetricLabel } from "./card-label";
 import { HoverLegendPosition } from "./hover-legend-position";
 import { nextCursorPlacement } from "./cursor-placement";
 import { NAVIGATE_LABEL, plotIcon, type PlotIconName } from "./plot-icons";
-import {
-  formatDuration,
-  formatXValue,
-  type XQuantity,
-} from "./options";
+import { formatDuration, formatXValue, type XQuantity } from "./options";
 import { cameraAxis } from "./workspace";
 import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
   CardContext,
   ChartSpec,
+  ChartMeasurement,
   InteractionMode,
   CardLayout,
   ResolvedSeries,
@@ -98,7 +96,12 @@ export class ChartCard {
   private hoverPosition?: HoverLegendPosition;
   private legend = element("div", "card-legend");
   private lastHoverX: number | null = null;
-  private legendCoordinate = element("div", "card-legend-coordinate");
+  private identities = new Map<string, ChartIdentity>();
+  private lastHoverPointer: [number, number] | null = null;
+  private detailsButton?: HTMLButtonElement;
+  private detailsOpen = false;
+  private measurementRevision = 0;
+  private loading?: Promise<void>;
   private legendValues: [HTMLElement, Analyzed][] = [];
   private clipping = element("div", "card-clipping");
   private plot?: PlotPanel;
@@ -195,7 +198,11 @@ export class ChartCard {
   }
 
   private displayConfig(): ViewConfig {
-    if (this.spec.records) return recordConfig(withRunColors(this.spec.config, this.sources, this.context.catalog), this.spec.records);
+    if (this.spec.records)
+      return recordConfig(
+        withRunColors(this.spec.config, this.sources, this.context.catalog),
+        this.spec.records,
+      );
     return withMetricLabel(
       withRunColors(this.spec.config, this.sources, this.context.catalog),
       this.spec.source,
@@ -217,6 +224,39 @@ export class ChartCard {
     if (this.destroyed || !this.plot) return;
     this.plot.refreshColors(this.displayConfig());
     this.renderLegend();
+    this.renderResults();
+    this.renderHover();
+  }
+
+  /** Parent owns the pane; keep the native trigger state synchronized. */
+  setDetailsOpen(open: boolean): void {
+    this.detailsOpen = open;
+    this.detailsButton?.setAttribute("aria-expanded", String(open));
+    this.detailsButton?.setAttribute("aria-pressed", String(open));
+  }
+
+  private updateDetailsButton() {
+    const details = this.spec.details;
+    const meaningful = !!(
+      details?.markdown?.trim() ||
+      details?.configFields?.length ||
+      Object.keys(details?.measurements ?? {}).length
+    );
+    if (!meaningful || !this.actions.onDetails) {
+      this.detailsButton?.remove();
+      this.detailsButton = undefined;
+      return;
+    }
+    if (!this.detailsButton) {
+      this.detailsButton = button("Details", "Chart details", () =>
+        this.actions.onDetails?.(this.spec.id),
+      );
+      this.detailsButton.classList.add("card-details-button");
+      this.header.insertBefore(this.detailsButton, this.maximize);
+    }
+    this.detailsButton.id = `chart-details-trigger-${encodeURIComponent(this.spec.id)}`;
+    this.detailsButton.dataset.chartId = this.spec.id;
+    this.setDetailsOpen(this.detailsOpen);
   }
 
   private applyDimensions(layout = this.spec.layout) {
@@ -434,6 +474,7 @@ export class ChartCard {
     this.root.classList.toggle("card-wide", this.spec.size === "wide");
     this.applyDimensions();
     this.title.textContent = this.spec.title;
+    this.updateDetailsButton();
     this.menu.replaceChildren();
     const summary = element("summary", "card-menu-toggle", "⋯");
     summary.title = "Chart actions";
@@ -572,35 +613,19 @@ export class ChartCard {
         this.configure(false);
       },
       onHover: (x, pointer) => {
-        this.hover.replaceChildren();
-        if (x === null || !pointer) {
-          this.hoverPosition?.update(null);
-          return;
-        }
-        this.lastHoverX = x;
+        this.lastHoverX = x === null || !pointer ? null : x;
+        this.lastHoverPointer = this.lastHoverX === null ? null : pointer!;
         this.updateLegendReadout();
-        const popupAxis = this.mode === "inspect" ? this.cursorAxis : "x";
-        const crossings = this.plot!.hoverCrossings(pointer, popupAxis);
-        const rows = nearestCrossingRuns(crossings.rows,
-          (index) => this.sources[index]?.runId ?? this.data[index].run.id,
-          crossings.mouse);
-        for (const { index, positions } of rows) {
-          const row = element("div", "card-hover-row");
-          const name = element("span", "", this.sources[index]?.run.name ?? this.data[index].run.name);
-          name.title = name.textContent ?? "";
-          name.style.color = this.plot!.seriesColor(index) ?? "";
-          const values = positions.map(crossings.value).sort((a, b) => a - b)
-            .map((value) => popupAxis === "x" ? this.number(value) : this.xText(value));
-          row.append(name, element("span", "", values.length === 1 ? values[0] : `(${values.join(", ")})`));
-          this.hover.append(row);
-        }
-        this.hoverPosition?.update(pointer);
+        this.renderHover();
       },
       onViewChange: () => {
         if (this.backButton) this.backButton.disabled = !this.plot?.canGoBack();
       },
     });
-    this.navigateButton?.setAttribute("aria-pressed", String(this.mode === "navigate"));
+    this.navigateButton?.setAttribute(
+      "aria-pressed",
+      String(this.mode === "navigate"),
+    );
     for (const [axis, control] of this.cursorButtons)
       control.setAttribute(
         "aria-pressed",
@@ -688,11 +713,6 @@ export class ChartCard {
 
   private updateLegendReadout() {
     const x = this.lastHoverX;
-    this.legendCoordinate.hidden = x === null;
-    this.legendCoordinate.textContent =
-      x === null
-        ? ""
-        : `At ${this.xAxis() === "step" ? "step " : ""}${this.xText(x)}`;
     for (const [cell, series] of this.legendValues) {
       cell.textContent = x === null ? "" : this.number(series.fn.at(x));
       cell.title = cell.textContent;
@@ -701,40 +721,22 @@ export class ChartCard {
   }
 
   private renderLegend() {
-    this.legend.replaceChildren(this.legendCoordinate);
+    this.identities = chartIdentities(this.sources, this.context);
+    this.legend.replaceChildren();
     this.legendValues = [];
     this.legend.tabIndex = 0;
     const config = this.displayConfig();
     const advanced = config.advanced.legend as { show?: boolean } | undefined;
     this.legendDetails.hidden = !(advanced?.show ?? config.legend);
     if (this.legendDetails.hidden) return;
-    const mixed = new Set(this.sources.map((source) => source.key)).size > 1;
-    this.legend.classList.toggle("card-legend-mixed", mixed);
     this.data.forEach((series, index) => {
       if (!plottedSeries(series, config, index)) return;
-      const style = styleFor(config, series.run.id, index);
       const item = element("span", "card-legend-item");
+      item.dataset.seriesId = series.run.id;
       item.setAttribute("role", "listitem");
-      const swatch = element("span", "card-legend-swatch");
-      swatch.style.backgroundColor = style.color;
-      const source = this.sources[index];
-      const name = element(
-        "span",
-        "card-legend-name",
-        source?.run.name ?? series.run.name,
-      );
-      const key = element("span", "card-legend-key", source?.key ?? "");
-      name.title = name.textContent ?? "";
-      key.title = key.textContent ?? "";
       const value = element("span", "card-legend-value");
       this.legendValues.push([value, series]);
-      item.append(swatch, name);
-      if (mixed) item.append(key);
-      item.append(value);
-      if (!style.visible) {
-        item.classList.add("card-series-hidden");
-        item.title = "Hidden in chart settings";
-      }
+      item.append(this.identityElement(index), value);
       this.legend.append(item);
     });
     if (config.smoothing)
@@ -760,15 +762,86 @@ export class ChartCard {
   private number(value: number | null) {
     return value === null ? "—" : formatValue(value, this.spec.config.yFormat);
   }
-  private seriesLabel(index: number) {
-    if (this.spec.records) return this.data[index].run.name;
-    const source = this.sources[index];
-    if (!source) return this.data[index].run.name;
-    const mixed = new Set(this.sources.map((item) => item.key)).size > 1;
-    return mixed ? `${source.run.name} · ${source.key}` : source.run.name;
+  /** One identity renderer for every native chart readout. */
+  private identityElement(index: number): HTMLElement {
+    const series = this.data[index];
+    const identity = this.identities.get(series.run.id);
+    const style = styleFor(this.displayConfig(), series.run.id, index);
+    const node = element("span", "card-series-identity");
+    node.dataset.seriesId = series.run.id;
+    node.dataset.runId = identity?.runId ?? series.run.id;
+    const color = this.plot?.seriesColor(index) ?? style.color;
+    node.style.color = color;
+    const swatch = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "svg",
+    );
+    swatch.classList.add("card-legend-swatch");
+    swatch.setAttribute("viewBox", "0 0 24 8");
+    swatch.setAttribute("aria-hidden", "true");
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    for (const [key, value] of Object.entries({
+      x1: "0",
+      x2: "24",
+      y1: "4",
+      y2: "4",
+      stroke: color,
+      "stroke-width": String(Math.max(1, Math.min(4, style.width))),
+      "stroke-dasharray": style.dash.join(" "),
+      "stroke-opacity": String(style.alpha),
+    }))
+      line.setAttribute(key, value);
+    swatch.append(line);
+    const text = element("span", "card-series-label");
+    text.append(
+      element("span", "card-legend-name", identity?.name ?? series.run.name),
+    );
+    if (identity?.metric)
+      text.append(element("span", "card-legend-key", ` · ${identity.metric}`));
+    text.title = identity?.label ?? series.run.name;
+    node.append(swatch, text);
+    return node;
+  }
+
+  private renderHover() {
+    this.hover.replaceChildren();
+    const pointer = this.lastHoverPointer;
+    if (this.lastHoverX === null || !pointer || !this.plot) {
+      this.hoverPosition?.update(null);
+      return;
+    }
+    const axis = this.mode === "inspect" ? this.cursorAxis : "x";
+    const crossings = this.plot.hoverCrossings(pointer, axis);
+    const rows = nearestCrossingRuns(
+      crossings.rows,
+      (index) => this.data[index].run.id,
+      crossings.mouse,
+    );
+    for (const { index, positions } of rows) {
+      const row = element("div", "card-hover-row");
+      row.dataset.seriesId = this.data[index].run.id;
+      const values = positions
+        .map(crossings.value)
+        .sort((a, b) => a - b)
+        .map((value) =>
+          axis === "x" ? this.number(value) : this.xText(value),
+        );
+      row.append(
+        this.identityElement(index),
+        element(
+          "span",
+          "card-hover-value",
+          values.length === 1 ? values[0] : `(${values.join(", ")})`,
+        ),
+      );
+      this.hover.append(row);
+    }
+    this.hoverPosition?.update(pointer);
   }
 
   private renderResults() {
+    this.identities = chartIdentities(this.sources, this.context);
+    const config = this.displayConfig();
     const open =
       this.results.querySelector<HTMLDetailsElement>(".card-series-details")
         ?.open ?? false;
@@ -807,8 +880,7 @@ export class ChartCard {
         const difference =
           delta === null
             ? "—"
-            : vertical &&
-                (quantity === "timestamp" || quantity === "relative")
+            : vertical && (quantity === "timestamp" || quantity === "relative")
               ? formatDuration(delta)
               : vertical
                 ? formatValue(
@@ -862,10 +934,14 @@ export class ChartCard {
         head.append(element("th", "", name));
       table.append(head);
       for (const [index, series] of this.data.entries()) {
+        if (!plottedSeries(series, config, index)) continue;
         const a = this.pins.a === null ? null : series.fn.at(this.pins.a);
         const b = this.pins.b === null ? null : series.fn.at(this.pins.b);
         const row = element("tr");
-        row.append(element("th", "", this.seriesLabel(index)));
+        row.dataset.seriesId = series.run.id;
+        const heading = element("th");
+        heading.append(this.identityElement(index));
+        row.append(heading);
         for (const value of [a, b, a === null || b === null ? null : b - a])
           row.append(element("td", "", this.number(value)));
         table.append(row);
@@ -882,15 +958,21 @@ export class ChartCard {
       for (const [label, level] of levels) {
         if (level == null) continue;
         for (const [index, series] of this.data.entries()) {
+          if (!plottedSeries(series, config, index)) continue;
           const crossings = series.fn.crossings(level);
           const details = element("details", "card-crossings");
-          details.append(
+          details.dataset.seriesId = series.run.id;
+          const summary = element("summary");
+          summary.append(
+            element("span", "", `${label} · `),
+            this.identityElement(index),
             element(
-              "summary",
+              "span",
               "",
-              `${label} · ${this.seriesLabel(index)} · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
+              ` · ${crossings.points.length} crossings${crossings.plateaus.length ? ` · ${crossings.plateaus.length} intervals` : ""}`,
             ),
           );
+          details.append(summary);
           const list = element("div");
           list.textContent =
             [
@@ -924,7 +1006,17 @@ export class ChartCard {
       }
       return;
     }
-    if (!this.loaded) void this.load();
+    if (!this.loaded) void this.ensureLoaded();
+  }
+  private ensureLoaded(): Promise<void> {
+    if (!this.loaded) {
+      const pending = this.load();
+      this.loading = pending;
+      void pending.finally(() => {
+        if (this.loading === pending) this.loading = undefined;
+      });
+    }
+    return this.loading ?? Promise.resolve();
   }
   private async load() {
     if (this.destroyed) return;
@@ -939,6 +1031,7 @@ export class ChartCard {
     this.plot?.clear();
     this.hover.textContent = "";
     this.lastHoverX = null;
+    this.lastHoverPointer = null;
     this.legendValues = [];
     this.clipping.replaceChildren();
     this.renderResults();
@@ -975,15 +1068,28 @@ export class ChartCard {
     }
     this.status.textContent = "Loading…";
     try {
-      const recordResult = this.spec.records ? await loadRecordPlot(this.context.api, this.spec.records, this.context.catalog, this.context.selectedRunIds, controller.signal) : undefined;
-      const data = recordResult?.data ?? await loadPlotRuns(sources, this.context.store, controller.signal);
+      const recordResult = this.spec.records
+        ? await loadRecordPlot(
+            this.context.api,
+            this.spec.records,
+            this.context.catalog,
+            this.context.selectedRunIds,
+            controller.signal,
+          )
+        : undefined;
+      const data =
+        recordResult?.data ??
+        (await loadPlotRuns(sources, this.context.store, controller.signal));
       if (
         this.destroyed ||
         generation !== this.generation ||
         controller.signal.aborted
       )
         return;
-      if (recordResult) { this.notice.textContent = recordResult.warning; this.sources = recordResult.sources; }
+      if (recordResult) {
+        this.notice.textContent = recordResult.warning;
+        this.sources = recordResult.sources;
+      }
       this.raw = data;
       this.data = analyze(data, this.spec.config);
       const display = this.displayConfig();
@@ -1035,8 +1141,20 @@ export class ChartCard {
   }
   setContext(context: CardContext): void {
     if (this.destroyed) return;
+    this.measurementRevision++;
     const apiChanged = context.api !== this.context.api;
+    const presentationOnly =
+      !apiChanged &&
+      context.store === this.context.store &&
+      JSON.stringify(context.catalog) ===
+        JSON.stringify(this.context.catalog) &&
+      JSON.stringify(context.selectedRunIds) ===
+        JSON.stringify(this.context.selectedRunIds);
     this.context = context;
+    if (presentationOnly) {
+      this.refreshColors();
+      return;
+    }
     if (apiChanged && this.images) {
       this.images.destroy();
       this.images = undefined;
@@ -1044,6 +1162,87 @@ export class ChartCard {
     }
     this.refresh();
   }
+  /** Coordinates are in the displayed axis units, never steps by assumption.
+   * Returns false for images, stale/inactive views, invalid log coordinates or
+   * unavailable data. No observations or persisted settings are modified. */
+  async showMeasurement(
+    measurement: ChartMeasurement,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (
+      !measurement ||
+      signal?.aborted ||
+      this.destroyed ||
+      !this.active ||
+      !this.plot ||
+      this.spec.kind === "image" ||
+      (measurement.axis !== "x" && measurement.axis !== "y") ||
+      !Number.isFinite(measurement.a) ||
+      (measurement.b != null && !Number.isFinite(measurement.b))
+    )
+      return false;
+    const { axis, a } = measurement,
+      b = measurement.b ?? null;
+    if (
+      this.spec.config[axis === "x" ? "xScale" : "yScale"] === "log" &&
+      (a <= 0 || (b !== null && b <= 0))
+    )
+      return false;
+    const revision = ++this.measurementRevision;
+    const plot = this.plot;
+    this.root.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // Explicit user reveal may precede IntersectionObserver's next delivery.
+    this.visible = true;
+    const ready = this.ensureLoaded();
+    const generation = this.generation;
+    await ready;
+    if (
+      this.destroyed ||
+      !this.active ||
+      signal?.aborted ||
+      revision !== this.measurementRevision ||
+      generation !== this.generation ||
+      this.plot !== plot ||
+      !this.data.some((s) => s.points.length)
+    )
+      return false;
+    const view = plot.viewport();
+    if (!view) return false;
+    const values = b === null ? [a] : [a, b];
+    const [lo, hi] = view[axis];
+    if (values.some((v) => v < lo || v > hi)) {
+      const low = Math.min(lo, ...values),
+        high = Math.max(hi, ...values);
+      const log =
+        this.spec.config[axis === "x" ? "xScale" : "yScale"] === "log";
+      const pad = (high - low || Math.abs(low) || 1) * 0.05;
+      const range: [number, number] = log
+        ? [low / 1.1, high * 1.1]
+        : [low - pad, high + pad];
+      if (!range.every(Number.isFinite)) return false;
+      plot.showView({ ...view, [axis]: range });
+    }
+    this.pins = {
+      a: null,
+      b: null,
+      threshold: null,
+      yA: null,
+      yB: null,
+      ...(axis === "x" ? { a, b } : { yA: a, yB: b }),
+    };
+    this.cursorAxis = axis;
+    this.mode = "zoom";
+    this.inspectOpen = true;
+    this.activePin = b === null ? "b" : "a";
+    plot.setPins(this.pins);
+    this.configure();
+    this.results
+      .querySelector<HTMLDetailsElement>(".card-series-details")
+      ?.setAttribute("open", "");
+    this.inspection.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return true;
+  }
+
   /** Current camera, for handing to the editor preview. */
   camera(): EditorCamera | undefined {
     if (this.images) {
@@ -1091,10 +1290,12 @@ export class ChartCard {
   }
   setSpec(spec: ChartSpec): void {
     if (this.destroyed) return;
+    this.measurementRevision++;
     const contentKey = ({
       layout: _layout,
       size: _size,
       title: _title,
+      details: _details,
       config,
       ...rest
     }: ChartSpec) =>
@@ -1111,6 +1312,7 @@ export class ChartCard {
         this.cancelResize();
       this.spec = spec;
       this.title.textContent = spec.title;
+      this.updateDetailsButton();
       this.root.classList.toggle("card-wide", spec.size === "wide");
       this.applyDimensions(this.resizeGesture?.next);
       return;
@@ -1138,6 +1340,7 @@ export class ChartCard {
     ) {
       this.spec = spec;
       this.title.textContent = spec.title;
+      this.updateDetailsButton();
       this.applyDimensions();
       this.data = analyze(this.raw, spec.config);
       this.renderLegend();
@@ -1165,11 +1368,13 @@ export class ChartCard {
     this.refresh();
   }
   setActive(active: boolean): void {
+    if (!active) this.measurementRevision++;
     this.active = active;
     this.updateActive();
   }
   refresh(): void {
     if (this.destroyed) return;
+    this.measurementRevision++;
     this.cancel();
     this.loaded = false;
     this.data = [];
@@ -1181,6 +1386,7 @@ export class ChartCard {
     this.notice.textContent = "";
     this.hover.textContent = "";
     this.lastHoverX = null;
+    this.lastHoverPointer = null;
     this.legendValues = [];
     this.clipping.replaceChildren();
     this.renderResults();
@@ -1190,6 +1396,7 @@ export class ChartCard {
     if (this.destroyed) return;
     this.cancelResize();
     this.destroyed = true;
+    this.measurementRevision++;
     this.cancel();
     this.observer?.disconnect();
     this.foldObserver?.disconnect();

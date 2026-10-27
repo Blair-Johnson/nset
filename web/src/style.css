@@ -1148,3 +1148,15 @@ optgroup {
   font-size: 12px;
   padding: 2px 4px;
 }
+
+.workspace-label-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.workspace-label-mode select {
+  width: auto;
+}
