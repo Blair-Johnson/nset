@@ -1,8 +1,10 @@
-.section-heading,
-.section-heading .section-toggle {
+.section-heading {
   cursor: grab;
   touch-action: none;
   user-select: none;
+}
+.section-heading .section-toggle {
+  cursor: pointer;
 }
 .dashboard.section-dragging {
   overflow-anchor: none;

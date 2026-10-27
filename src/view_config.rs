@@ -521,7 +521,7 @@ fn annotation_identity(s: &str) -> bool {
     !trim(s).is_empty() && !matches!(s, "__proto__" | "constructor" | "prototype")
 }
 
-/// View-wide semantic names. Unavailable/unselected run IDs remain portable.
+/// Semantic names or chart-local configuration headings. Unavailable/unselected run IDs remain portable.
 pub(crate) fn validate_run_labels(v: &Value) -> Result<()> {
     for (run_id, label) in object(v)? {
         if !annotation_identity(run_id) {
@@ -594,6 +594,7 @@ pub(crate) fn validate_chart_details(v: &Value, image: bool) -> Result<()> {
         &[
             ("markdown", Check::String),
             ("configFields", Check::Custom(config_fields)),
+            ("configRunLabels", Check::Custom(validate_run_labels)),
             ("measurements", Check::Custom(measurements)),
         ],
     )?;
@@ -900,7 +901,18 @@ mod tests {
         for labels in fixture["invalidRunLabels"].as_array().unwrap() {
             assert!(validate_run_labels(labels).is_err(), "{labels}");
         }
-        assert!(validate_chart_details(&json!({"markdown":"", "configFields":[{"path":["optimizer", "lr"]}], "measurements":{}}), true).is_ok());
+        assert!(
+            validate_chart_details(
+                &json!({
+                    "markdown": "",
+                    "configFields": [{"path": ["optimizer", "lr"]}],
+                    "configRunLabels": {"unavailable-run": "A"},
+                    "measurements": {}
+                }),
+                true
+            )
+            .is_ok()
+        );
         assert!(
             validate_chart_details(&json!({"measurements":{"sample":{"axis":"x","a":0}}}), true)
                 .is_err()

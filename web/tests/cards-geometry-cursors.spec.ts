@@ -271,9 +271,37 @@ test("collapsed aligned legend and bounded hover use shared display colors witho
     height: node.clientHeight,
     scroll: node.scrollWidth,
   }));
-  expect(dimensions.width).toBeLessThan(330);
+  // Inline run / metric labels use the compact popup's 360px outer cap.
+  const popup = (await page.locator(".card-hover").boundingBox())!;
+  const plot = (await page.locator(".u-over").boundingBox())!;
+  expect(popup.width).toBeLessThanOrEqual(360);
+  expect(popup.x).toBeGreaterThanOrEqual(plot.x);
+  expect(popup.x + popup.width).toBeLessThanOrEqual(plot.x + plot.width + 1);
   expect(dimensions.height).toBeLessThan(125);
   expect(dimensions.scroll).toBe(dimensions.width);
+  await expect(page.locator(".card-hover-separator")).toHaveText([
+    " / ",
+    " / ",
+    " / ",
+    " / ",
+  ]);
+  const samples = await page.evaluate(() => {
+    const collect = (selector: string) =>
+      [...document.querySelectorAll<HTMLElement>(selector)]
+        .map((node) => ({
+          id: node.dataset.seriesId,
+          color: getComputedStyle(node.querySelector("line")!).stroke,
+          width: node.querySelector("svg")!.getBoundingClientRect().width,
+        }))
+        .sort((a, b) => a.id!.localeCompare(b.id!));
+    return {
+      hover: collect(".card-hover .card-series-identity"),
+      legend: collect(".card-legend .card-series-identity"),
+    };
+  });
+  expect(samples.hover).toEqual(samples.legend);
+  expect(new Set(samples.hover.map((sample) => sample.id)).size).toBe(4);
+  expect(samples.hover.every((sample) => sample.width === 14)).toBe(true);
   expect(
     await page.evaluate(() => (window as any).geometry.card.spec.config.runs),
   ).toEqual({});
@@ -1475,7 +1503,7 @@ test("C and toolbar orientation rank horizontal crossings by pointer X at unchan
   expect((await snapshot(page)).viewport).toEqual(before.viewport);
 });
 
-test("multi-metric popup ranks four separate series and disambiguates duplicate run names with full IDs", async ({
+test("multi-metric popup ranks four separate series with exact run names and distinct internal IDs", async ({
   page,
 }) => {
   await crossingFixture(page, [
@@ -1508,28 +1536,52 @@ test("multi-metric popup ranks four separate series and disambiguates duplicate 
     },
   ]);
   await moveCrossingPointer(page, 50, 56);
+  const ids = () =>
+    page
+      .locator(".card-hover-row")
+      .evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-series-id")),
+      );
   await expect(hoverNames(page)).toHaveText([
-    "Shared run name (aggregate) · metric/2",
-    "Shared run name (other) · metric/0",
-    "Shared run name (aggregate) · metric/1",
-    "Shared run name (aggregate) · metric/3",
+    "Shared run name / metric/2",
+    "Shared run name / metric/0",
+    "Shared run name / metric/1",
+    "Shared run name / metric/3",
+  ]);
+  expect(await ids()).toEqual([
+    '["metric","aggregate","metric/2"]',
+    '["metric","other","metric/0"]',
+    '["metric","aggregate","metric/1"]',
+    '["metric","aggregate","metric/3"]',
   ]);
   await expect(hoverValues(page)).toHaveText(["60", "50", "40", "80"]);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
   await moveCrossingPointer(page, 50, 90);
   await expect(hoverNames(page)).toHaveText([
-    "Shared run name (aggregate) · metric/3",
-    "Third run · metric/0",
-    "Shared run name (aggregate) · metric/2",
-    "Shared run name (other) · metric/0",
+    "Shared run name / metric/3",
+    "Third run / metric/0",
+    "Shared run name / metric/2",
+    "Shared run name / metric/0",
+  ]);
+  expect(await ids()).toEqual([
+    '["metric","aggregate","metric/3"]',
+    '["metric","third","metric/0"]',
+    '["metric","aggregate","metric/2"]',
+    '["metric","other","metric/0"]',
   ]);
   await expect(hoverValues(page)).toHaveText(["80", "110", "60", "50"]);
   await moveCrossingPointer(page, 50, 10);
   await expect(hoverNames(page)).toHaveText([
-    "Shared run name (aggregate) · metric/0",
-    "Shared run name (aggregate) · metric/1",
-    "Shared run name (other) · metric/0",
-    "Shared run name (aggregate) · metric/2",
+    "Shared run name / metric/0",
+    "Shared run name / metric/1",
+    "Shared run name / metric/0",
+    "Shared run name / metric/2",
+  ]);
+  expect(await ids()).toEqual([
+    '["metric","aggregate","metric/0"]',
+    '["metric","aggregate","metric/1"]',
+    '["metric","other","metric/0"]',
+    '["metric","aggregate","metric/2"]',
   ]);
   await expect(hoverValues(page)).toHaveText(["20", "40", "50", "60"]);
 });
@@ -1788,22 +1840,41 @@ test("record paired groups retain separate semantic identities and repeated-X ne
     .toBe(4);
   await moveCrossingPointer(page, 20, 50);
   await expect(hoverNames(page)).toHaveText([
-    "Alias b · metrics.loss",
-    'Alias a · metrics.loss (["rx:test","a","metrics.loss",1])',
-    'Alias a · metrics.loss (["rx:test","a","metrics.loss","1"])',
-    "Alias a · metrics.other",
+    "Alias b / metrics.loss",
+    "Alias a / metrics.loss",
+    "Alias a / metrics.loss",
+    "Alias a / metrics.other",
   ]);
+  const ids = () =>
+    page
+      .locator(".card-hover-row")
+      .evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-series-id")),
+      );
+  const verticalIds = [
+    '["rx:test","b","metrics.loss",null]',
+    '["rx:test","a","metrics.loss",1]',
+    '["rx:test","a","metrics.loss","1"]',
+    '["rx:test","a","metrics.other",null]',
+  ];
+  expect(await ids()).toEqual(verticalIds);
   await expect(hoverValues(page)).toHaveText(["45", "(20, 80)", "5", "100"]);
   await expect(page.locator(".card-hover")).not.toContainText("Missing pair");
   await page.getByText("Show legend", { exact: true }).click();
   await expect(page.locator(".card-legend-item")).toHaveCount(4);
+  expect(
+    await page
+      .locator(".card-legend .card-series-identity")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => node.getAttribute("data-series-id")).sort(),
+      ),
+  ).toEqual([...verticalIds].sort());
   await page
     .getByRole("button", { name: "Add horizontal cursor", exact: true })
     .click();
   await moveCrossingPointer(page, 20, 50);
-  await expect(hoverNames(page)).toHaveText([
-    'Alias a · metrics.loss (["rx:test","a","metrics.loss",1])',
-  ]);
+  await expect(hoverNames(page)).toHaveText(["Alias a / metrics.loss"]);
+  expect(await ids()).toEqual(['["rx:test","a","metrics.loss",1]']);
   await expect(hoverValues(page)).toHaveText(["(10, 30)"]);
 });
 
@@ -2063,12 +2134,24 @@ test("many selected missing-field runs keep late multi-metric source identities 
       ],
     });
   await crossingFixture(page, traces, { config: { yMin: 63, yMax: 71 } });
+  const ids = () =>
+    page
+      .locator(".card-hover-row")
+      .evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-series-id")),
+      );
   await moveCrossingPointer(page, 50, 67.1);
   await expect(hoverNames(page)).toHaveText([
-    "Run 67 · train/loss",
-    "Run 67 · other/value",
-    "Run 66 · other/value",
-    "Run 68 · train/loss",
+    "Run 67 / train/loss",
+    "Run 67 / other/value",
+    "Run 66 / other/value",
+    "Run 68 / train/loss",
+  ]);
+  expect(await ids()).toEqual([
+    '["metric","67","train/loss"]',
+    '["metric","67","other/value"]',
+    '["metric","66","other/value"]',
+    '["metric","68","train/loss"]',
   ]);
   await expect(hoverValues(page)).toHaveText(["67", "67.4", "66.4", "68"]);
   await expect(page.locator(".card-hover-more")).toHaveCount(0);
@@ -2076,10 +2159,16 @@ test("many selected missing-field runs keep late multi-metric source identities 
   await expect(page.locator(".card-legend-item")).toHaveCount(12);
   await moveCrossingPointer(page, 50, 69.1);
   await expect(hoverNames(page)).toHaveText([
-    "Run 69 · train/loss",
-    "Run 69 · other/value",
-    "Run 68 · other/value",
-    "Run 68 · train/loss",
+    "Run 69 / train/loss",
+    "Run 69 / other/value",
+    "Run 68 / other/value",
+    "Run 68 / train/loss",
+  ]);
+  expect(await ids()).toEqual([
+    '["metric","69","train/loss"]',
+    '["metric","69","other/value"]',
+    '["metric","68","other/value"]',
+    '["metric","68","train/loss"]',
   ]);
   await expect(hoverValues(page)).toHaveText(["69", "69.4", "68.4", "68"]);
 });

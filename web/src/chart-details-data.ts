@@ -7,8 +7,8 @@ import type { CardContext, ChartSpec } from "./workspace-types";
 const unsafe = new Set(["__proto__", "prototype", "constructor"]);
 
 /** Literal segments only: never follow inherited properties or dotted paths. */
-export function chartConfigValue(params: unknown, path: string[]): string {
-  if (!path.length) return "—";
+function rawConfigValue(params: unknown, path: string[]): unknown {
+  if (!path.length) return undefined;
   let value = params;
   for (const segment of path) {
     if (
@@ -17,16 +17,28 @@ export function chartConfigValue(params: unknown, path: string[]): string {
       typeof value !== "object" ||
       !Object.hasOwn(value, segment)
     )
-      return "—";
+      return undefined;
     value = (value as Record<string, unknown>)[segment];
   }
-  if (value === undefined) return "—";
-  if (typeof value === "string") return value;
+  return value;
+}
+
+function serializedValue(value: unknown): string | undefined {
   try {
-    return JSON.stringify(value) ?? "—";
+    return JSON.stringify(value);
   } catch {
-    return "—";
+    return undefined;
   }
+}
+
+function displayValue(value: unknown): string {
+  const text =
+    typeof value === "string" ? value : (serializedValue(value) ?? "—");
+  return text.length > 100 ? `${text.slice(0, 97)}…` : text;
+}
+
+export function chartConfigValue(params: unknown, path: string[]): string {
+  return displayValue(rawConfigValue(params, path));
 }
 
 export function chartDetailsData(chart: ChartSpec, context: CardContext) {
@@ -37,11 +49,21 @@ export function chartDetailsData(chart: ChartSpec, context: CardContext) {
   );
   const config = withRunColors(chart.config, sources, context.catalog);
   const identities = chartIdentities(sources, context);
+  const fields = chart.details?.configFields ?? [];
+  const labels = chart.details?.configRunLabels;
+  const rawValues: unknown[][] = [];
   const seen = new Set<string>();
   const columns = sources.flatMap((source, index) => {
     if (seen.has(source.runId)) return [];
     seen.add(source.runId);
-    const name = identities.get(source.id)!.name;
+    const name =
+      labels && Object.hasOwn(labels, source.runId)
+        ? labels[source.runId]
+        : identities.get(source.id)!.name;
+    const values = fields.map((field) =>
+      rawConfigValue(source.run.params, field.path),
+    );
+    rawValues.push(values);
     const style = styleFor(config, source.id, index);
     return [
       {
@@ -50,9 +72,7 @@ export function chartDetailsData(chart: ChartSpec, context: CardContext) {
         original: source.run.name,
         color: style.color,
         dash: style.dash,
-        values: (chart.details?.configFields ?? []).map((field) =>
-          chartConfigValue(source.run.params, field.path),
-        ),
+        values: values.map(displayValue),
       },
     ];
   });
@@ -60,9 +80,12 @@ export function chartDetailsData(chart: ChartSpec, context: CardContext) {
     // Counts and timestamps deliberately excluded: polling must not invalidate UI.
     sources: sources.map((source) => [source.id, source.x?.ref ?? null]),
     columns,
-    fields: (chart.details?.configFields ?? []).map((field) => ({
+    fields: fields.map((field, index) => ({
       label: field.label ?? field.path.join(" · "),
       path: field.path,
+      differs:
+        new Set(rawValues.map((values) => serializedValue(values[index])))
+          .size > 1,
     })),
   };
 }

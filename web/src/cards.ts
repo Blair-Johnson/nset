@@ -736,7 +736,7 @@ export class ChartCard {
       item.setAttribute("role", "listitem");
       const value = element("span", "card-legend-value");
       this.legendValues.push([value, series]);
-      item.append(this.identityElement(index), value);
+      item.append(this.identityElement(index, "legend"), value);
       this.legend.append(item);
     });
     if (config.smoothing)
@@ -763,13 +763,25 @@ export class ChartCard {
     return value === null ? "—" : formatValue(value, this.spec.config.yFormat);
   }
   /** One identity renderer for every native chart readout. */
-  private identityElement(index: number): HTMLElement {
+  private identityElement(
+    index: number,
+    surface: "legend" | "hover" | "cursor" = "cursor",
+  ): HTMLElement {
     const series = this.data[index];
     const identity = this.identities.get(series.run.id);
     const style = styleFor(this.displayConfig(), series.run.id, index);
     const node = element("span", "card-series-identity");
     node.dataset.seriesId = series.run.id;
     node.dataset.runId = identity?.runId ?? series.run.id;
+    if (
+      surface === "legend" &&
+      this.context.labelMode !== "original" &&
+      identity &&
+      this.context.runLabels &&
+      Object.hasOwn(this.context.runLabels, identity.runId) &&
+      this.context.runLabels[identity.runId]?.trim()
+    )
+      node.classList.add("card-series-semantic");
     const color = this.plot?.seriesColor(index) ?? style.color;
     node.style.color = color;
     const swatch = document.createElementNS(
@@ -777,16 +789,18 @@ export class ChartCard {
       "svg",
     );
     swatch.classList.add("card-legend-swatch");
-    swatch.setAttribute("viewBox", "0 0 24 8");
+    swatch.setAttribute("width", "14");
+    swatch.setAttribute("height", "8");
+    swatch.setAttribute("viewBox", "0 0 14 8");
     swatch.setAttribute("aria-hidden", "true");
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     for (const [key, value] of Object.entries({
       x1: "0",
-      x2: "24",
+      x2: "14",
       y1: "4",
       y2: "4",
       stroke: color,
-      "stroke-width": String(Math.max(1, Math.min(4, style.width))),
+      "stroke-width": String(Math.min(3, style.width || 2)),
       "stroke-dasharray": style.dash.join(" "),
       "stroke-opacity": String(style.alpha),
     }))
@@ -796,8 +810,20 @@ export class ChartCard {
     text.append(
       element("span", "card-legend-name", identity?.name ?? series.run.name),
     );
-    if (identity?.metric)
-      text.append(element("span", "card-legend-key", ` · ${identity.metric}`));
+    if (identity?.metric) {
+      if (surface === "hover") {
+        const separator = element("span", "card-hover-separator", " / ");
+        separator.setAttribute("aria-hidden", "true");
+        text.append(
+          separator,
+          element("span", "card-legend-key", identity.metric),
+        );
+      } else {
+        text.append(
+          element("span", "card-legend-key", ` · ${identity.metric}`),
+        );
+      }
+    }
     text.title = identity?.label ?? series.run.name;
     node.append(swatch, text);
     return node;
@@ -827,7 +853,7 @@ export class ChartCard {
           axis === "x" ? this.number(value) : this.xText(value),
         );
       row.append(
-        this.identityElement(index),
+        this.identityElement(index, "hover"),
         element(
           "span",
           "card-hover-value",
@@ -1206,6 +1232,8 @@ export class ChartCard {
       !this.data.some((s) => s.points.length)
     )
       return false;
+    // Report links reveal their measurement from the configured chart range.
+    plot.reset();
     const view = plot.viewport();
     if (!view) return false;
     const values = b === null ? [a] : [a, b];
@@ -1239,7 +1267,10 @@ export class ChartCard {
     this.results
       .querySelector<HTMLDetailsElement>(".card-series-details")
       ?.setAttribute("open", "");
-    this.inspection.scrollIntoView({ block: "nearest", inline: "nearest" });
+    this.content.querySelector<HTMLElement>(".card-plot")?.scrollIntoView({
+      block: "center",
+      inline: "nearest",
+    });
     return true;
   }
 

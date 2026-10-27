@@ -1,5 +1,37 @@
 {
   "validDetails": [
+    {
+      "configRunLabels": {}
+    },
+    {
+      "configRunLabels": {
+        "rx:source:uid": "A \u00b7 2 layers",
+        "missing/run": "Unavailable run",
+        "another": "A \u00b7 2 layers",
+        "toString": "Own identity",
+        "\u0085": "\u0085"
+      }
+    },
+    {
+      "configFields": [
+        {
+          "path": ["optimizer", "lr"]
+        }
+      ],
+      "configRunLabels": {
+        "rx:source:run-a": "A",
+        "rx:source:run-b": "B",
+        "rx:source:run-c": "C",
+        "missing/run-d": "D"
+      }
+    },
+    {
+      "configRunLabels": {
+        " padded-run ": " A ",
+        "run-b": "A",
+        "run-c": "A"
+      }
+    },
     {},
     {
       "markdown": ""
@@ -63,6 +95,91 @@
     }
   ],
   "invalidDetails": [
+    {
+      "configRunLabels": null
+    },
+    {
+      "configRunLabels": []
+    },
+    {
+      "configRunLabels": ""
+    },
+    {
+      "configRunLabels": 1
+    },
+    {
+      "configRunLabels": {
+        "": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        " ": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        "\ufeff": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        "__proto__": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        "constructor": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        "prototype": "Label"
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": null
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": ""
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": " "
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": "\ufeff"
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": 1
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": false
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": []
+      }
+    },
+    {
+      "configRunLabels": {
+        "run-a": {}
+      }
+    },
+    {
+      "configRunLabels": false
+    },
     null,
     [],
     "",

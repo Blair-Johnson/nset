@@ -90,7 +90,7 @@ export class ChartDetailsPanel {
     const titles = element("div", "chart-details-titles");
     titles.append(this.heading, this.title);
     header.append(titles, this.closeButton);
-    this.scroll.append(header, this.report, this.configuration, this.status);
+    this.scroll.append(header, this.report, this.configuration);
     this.root.append(this.separator, this.scroll);
     try {
       const saved = Number(localStorage.getItem(WIDTH_KEY));
@@ -232,6 +232,15 @@ export class ChartDetailsPanel {
           ? {}
           : (input.chart.details?.measurements ?? {}),
       );
+      for (const table of this.report.querySelectorAll("table")) {
+        const wrapper = element("div", "chart-details-report-table-wrap");
+        wrapper.tabIndex = 0;
+        wrapper.setAttribute("role", "region");
+        wrapper.setAttribute("aria-label", "Report table");
+        table.before(wrapper);
+        wrapper.append(table);
+      }
+      this.report.append(this.status);
       this.report.hidden = !markdown.trim();
       if (focused) {
         const replacement = [
@@ -292,26 +301,22 @@ export class ChartDetailsPanel {
       "Selected configuration parameters by plotted run",
     );
     const head = table.createTHead().insertRow();
-    const first = element("th", "", "Parameter");
+    const first = element("th", "", "Setting");
     first.scope = "col";
     head.append(first);
     for (const column of data.columns) {
       const cell = element("th", "");
       cell.scope = "col";
       cell.dataset.runId = column.id;
-      cell.title = `${column.original} (${column.id})`;
-      const identity = element("span", "chart-details-run");
-      const swatch = element("span", "chart-details-swatch");
-      swatch.style.borderTopColor = column.color;
-      swatch.style.borderTopStyle = column.dash.length ? "dashed" : "solid";
-      swatch.setAttribute("aria-hidden", "true");
-      identity.append(swatch, document.createTextNode(column.name));
-      cell.append(identity);
+      cell.title = column.original;
+      cell.style.color = column.color;
+      cell.textContent = column.name;
       head.append(cell);
     }
     const body = table.createTBody();
     data.fields.forEach((field, index) => {
       const row = body.insertRow();
+      row.classList.toggle("chart-details-difference", field.differs);
       const name = element("th", "", field.label);
       name.scope = "row";
       name.title = JSON.stringify(field.path);
@@ -433,7 +438,7 @@ export class ChartDetailsPanel {
     this.separator.addEventListener(
       "keydown",
       (event) => {
-        const step = event.shiftKey ? 40 : 10;
+        const step = event.shiftKey ? 80 : 20;
         const values: Record<string, number> = {
           ArrowLeft: this.width + step,
           ArrowRight: this.width - step,
@@ -501,8 +506,20 @@ export class ChartDetailsPanel {
         generation !== this.generation
       )
         return;
+      const isStep =
+        measurement.axis === "x" &&
+        (input.chart.records
+          ? input.chart.records.x === "step"
+          : !input.chart.x && input.chart.config.axis === "step");
+      const position = isStep
+        ? measurement.b == null
+          ? "step"
+          : "steps"
+        : `${measurement.axis.toUpperCase()} =`;
       this.status.textContent = applied
-        ? "Measurement shown on chart."
+        ? measurement.b == null
+          ? `Cursor placed at ${position} ${measurement.a}.`
+          : `Cursors placed at ${position} ${measurement.a} and ${measurement.b}.`
         : "This measurement is not available for the current chart.";
     } catch {
       if (

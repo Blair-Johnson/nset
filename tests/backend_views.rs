@@ -897,7 +897,13 @@ async fn chart_details_and_semantic_labels_survive_cas_and_restart() {
     let fixture = details_schema();
     let mut w = workspace();
     w["runLabels"] = fixture["validRunLabels"][1].clone();
-    w["sections"][0]["cards"][0]["details"] = fixture["validDetails"][3].clone();
+    w["sections"][0]["cards"][0]["details"] = fixture["validDetails"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|details| details["measurements"]["late-training"].is_object())
+        .expect("measurement fixture")
+        .clone();
     let (status, first) = request(&app, "POST", "/api/views", json!({"workspace":w})).await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     w["id"] = first["id"].clone();

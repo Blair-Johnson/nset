@@ -187,13 +187,28 @@ async function fixture(page: Page, empty = false, extraSection = false) {
   return () => histories;
 }
 
-async function beginDrag(page: Page, id: string) {
-  const title = card(page, id).locator(".card-title");
-  await title.scrollIntoViewIfNeeded();
-  const r = (await title.boundingBox())!;
-  await page.mouse.move(r.x + Math.min(30, r.width / 2), r.y + r.height / 2);
+async function beginDrag(
+  page: Page,
+  id: string,
+  origin: "title" | "header padding" = "title",
+) {
+  const handle = card(page, id).locator(
+    origin === "title" ? ".card-title" : ".card-header",
+  );
+  await handle.scrollIntoViewIfNeeded();
+  const r = (await handle.boundingBox())!;
+  const x = r.x + (origin === "title" ? Math.min(30, r.width / 2) : 2);
+  const y = r.y + (origin === "title" ? r.height / 2 : 2);
+  if (origin === "header padding")
+    expect(
+      await handle.evaluate(
+        (node, point) => document.elementFromPoint(point.x, point.y) === node,
+        { x, y },
+      ),
+    ).toBe(true);
+  await page.mouse.move(x, y);
   await page.mouse.down();
-  await page.mouse.move(r.x + 45, r.y + r.height / 2 + 5, { steps: 5 });
+  await page.mouse.move(x + 20, y + 5, { steps: 5 });
 }
 async function hoverSlot(
   page: Page,
@@ -306,6 +321,158 @@ test("cross-section insertion preserves source identity and supports an empty de
   await page.reload();
   await expect.poll(() => order(page)).toEqual(["a", "c", "d"]);
   expect(await order(page, "second")).toEqual(["b"]);
+});
+
+for (const origin of ["header padding", "title"] as const) {
+  test(`native ${origin} drag reorders and moves across sections without rebuilding charts`, async ({
+    page,
+  }) => {
+    const histories = await fixture(page, true);
+    const loads = histories();
+    await beginDrag(page, "a", origin);
+    await hoverSlot(page, "d", true);
+    await page.mouse.up();
+    expect(await order(page)).toEqual(["b", "c", "d", "a"]);
+    expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+    await beginDrag(page, "a", origin);
+    const grid = section(page, "second").locator(".chart-grid");
+    const r = (await grid.boundingBox())!;
+    await page.mouse.move(r.x + 100, r.y + 20, { steps: 12 });
+    await page.mouse.move(r.x + 100, r.y + 20);
+    await expect(page.locator(".card-drop-indicator")).toBeVisible();
+    await page.mouse.up();
+    await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
+    expect(await order(page)).toEqual(["b", "c", "d"]);
+    expect(await order(page, "second")).toEqual(["a"]);
+    expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+    expect(histories()).toBe(loads);
+    expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(
+      2,
+    );
+    expect(
+      await page.evaluate(() =>
+        (window as any).reorderTest.dragEvents
+          .filter((event: any) => event.type === "dragstart")
+          .map((event: any) => event.target),
+      ),
+    ).toEqual(["a", "a"]);
+    const persisted = JSON.parse((await saved(page))!);
+    expect(
+      persisted.views[0].sections.map((s: any) =>
+        s.cards.map((c: any) => c.id),
+      ),
+    ).toEqual([["b", "c", "d"], ["a"]]);
+    await page.reload();
+    await expect.poll(() => order(page)).toEqual(["b", "c", "d"]);
+    await expect.poll(() => order(page, "second")).toEqual(["a"]);
+  });
+}
+
+test("chart headers and titles advertise drag without tooltips while section titles advertise folding", async ({
+  page,
+}) => {
+  await fixture(page);
+  const header = card(page, "a").locator(".card-header");
+  const title = card(page, "a").locator(".card-title");
+  await expect(header).toHaveClass(/card-reorder-handle/);
+  await expect(header).toHaveAttribute("draggable", "true");
+  for (const handle of [header, title]) {
+    await expect(handle).toHaveCSS("cursor", "grab");
+    await expect(handle).toHaveCSS("user-select", "none");
+    expect(await handle.getAttribute("title")).toBeNull();
+  }
+  await expect(section(page, "first").locator(".section-heading")).toHaveCSS(
+    "cursor",
+    "grab",
+  );
+  await expect(section(page, "first").locator(".section-toggle")).toHaveCSS(
+    "cursor",
+    "pointer",
+  );
+  const before = await saved(page);
+  await beginDrag(page, "a", "header padding");
+  await hoverSlot(page, "d", true);
+  await expect(page.locator(".card-reordering")).toHaveCount(1);
+  await expect(header).toHaveCSS("cursor", "grabbing");
+  await expect(title).toHaveCSS("cursor", "grabbing");
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(page.locator(".card-reordering")).toHaveCount(0);
+  await expect(header).toHaveCSS("cursor", "grab");
+  expect(await saved(page)).toBe(before);
+});
+
+test("real mouse drags on chart toolbar controls, nested SVG and menu summary never reorder", async ({
+  page,
+}) => {
+  await fixture(page);
+  const source = card(page, "a");
+  const header = source.locator(".card-header");
+  const before = await saved(page);
+  const controls = await header
+    .locator("button:visible:not(:disabled), .card-menu > summary")
+    .all();
+  expect(controls.length).toBeGreaterThan(4);
+  const icon = header
+    .getByRole("button", { name: "Zoom out", exact: true })
+    .locator("svg");
+  // Normally icons use pointer-events:none. Exercise actual SVG event targeting
+  // as well, rather than relying solely on events retargeted to the button.
+  await icon.evaluate((svg) => {
+    (svg as SVGElement).style.pointerEvents = "auto";
+  });
+  for (const target of [...controls, icon]) {
+    await target.scrollIntoViewIfNeeded();
+    const r = (await target.boundingBox())!;
+    const x = r.x + r.width / 2,
+      y = r.y + r.height / 2;
+    if (target === icon)
+      expect(
+        await page.evaluate(
+          ({ x, y }) => document.elementFromPoint(x, y) instanceof SVGElement,
+          { x, y },
+        ),
+      ).toBe(true);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 20, y + 8, { steps: 5 });
+    const destination = (await card(page, "b").boundingBox())!;
+    await page.mouse.move(
+      destination.x + destination.width * 0.8,
+      destination.y + destination.height * 0.35,
+      { steps: 12 },
+    );
+    await page.mouse.move(
+      destination.x + destination.width * 0.8,
+      destination.y + destination.height * 0.35,
+    );
+    await expect(
+      page.locator(".card-reordering, .card-drop-indicator"),
+    ).toHaveCount(0);
+    await expect(page.locator("#dashboard")).not.toHaveClass(
+      /section-dragging/,
+    );
+    await page.mouse.up();
+    expect(
+      await page.evaluate(() =>
+        (window as any).reorderTest.dragEvents.filter(
+          (event: any) => event.type === "dragstart",
+        ),
+      ),
+    ).toEqual([]);
+    expect(await order(page)).toEqual(["a", "b", "c", "d"]);
+    expect(await saved(page)).toBe(before);
+    expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(
+      0,
+    );
+  }
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  // Excluding a control gesture must not leave the shared header disabled.
+  await beginDrag(page, "a", "header padding");
+  await hoverSlot(page, "b", true);
+  await page.mouse.up();
+  expect(await order(page)).toEqual(["b", "a", "c", "d"]);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
 });
 
 test("Escape, invalid targets, no-op and foreign drags clear feedback without saving", async ({
@@ -502,7 +669,7 @@ test.afterEach(async ({ page }, info) => {
   }
 });
 
-test("only titles initiate reorder and keyboard Move up/down remains available", async ({
+test("chart content and controls reject synthetic reorder and keyboard Move up/down remains available", async ({
   page,
 }) => {
   await fixture(page);
@@ -560,7 +727,7 @@ const sectionState = async (page: Page) =>
 async function beginSectionDrag(
   page: Page,
   id: string,
-  part = ".section-toggle",
+  part = ".section-heading",
 ) {
   const handle = section(page, id).locator(part);
   await handle.scrollIntoViewIfNeeded();
@@ -623,7 +790,7 @@ async function expectMixedSections(page: Page) {
   ).toHaveAttribute("aria-expanded", "false");
 }
 
-test("section title drag folds only the preview and restores mixed collapse states and chart state", async ({
+test("section heading drag folds only the preview and restores mixed collapse states and chart state", async ({
   page,
 }) => {
   const histories = await fixture(page, false, true);
@@ -645,7 +812,7 @@ test("section title drag folds only the preview and restores mixed collapse stat
     { id: "third", collapsed: true },
     { id: "first", collapsed: false },
   ]);
-  // The full bar and the count are handles too, including a collapsed source.
+  // The non-control heading area and count are handles, even when collapsed.
   await moveSectionByPointer(
     page,
     "third",
@@ -758,6 +925,53 @@ test("section dragging respects chart filters and retains filtered-out sections"
   ]);
 });
 
+test("section title movement beyond the drag threshold never starts section dragging", async ({
+  page,
+}) => {
+  const histories = await fixture(page, false, true);
+  const loads = histories();
+  const first = section(page, "first");
+  const toggle = first.locator(".section-toggle");
+  const before = await saved(page);
+  await expect(toggle).toHaveCSS("cursor", "pointer");
+  await toggle.scrollIntoViewIfNeeded();
+  const r = (await toggle.boundingBox())!;
+  const heading = (await first.locator(".section-heading").boundingBox())!;
+  await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+  await page.mouse.down();
+  for (const point of [
+    { x: r.x + r.width / 2 + 20, y: r.y + r.height / 2 },
+    { x: heading.x + heading.width * 0.85, y: heading.y + heading.height / 2 },
+  ]) {
+    await page.mouse.move(point.x, point.y, { steps: 5 });
+    await expect(page.locator("#dashboard")).not.toHaveClass(
+      /section-dragging/,
+    );
+    await expect(page.locator(".section-drop-indicator")).toHaveCount(0);
+    await expectMixedSections(page);
+    expect(await saved(page)).toBe(before);
+  }
+  // Release outside the fold button so this gesture cannot click it.
+  await page.mouse.up();
+  expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
+  expect(await saved(page)).toBe(before);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+  expect(
+    await page.evaluate(() =>
+      (window as any).reorderTest.dragEvents.filter(
+        (event: any) => event.type === "dragstart",
+      ),
+    ),
+  ).toEqual([]);
+  await toggle.click();
+  await expect(first.locator(".chart-grid")).toBeHidden();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expectMixedSections(page);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+  expect(histories()).toBe(loads);
+});
+
 test("section action controls do not initiate drags, and ordinary title clicks still toggle", async ({
   page,
 }) => {
@@ -855,4 +1069,119 @@ test("filter updates and navigation cancel an active section drag without saving
   expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
   expect(await saved(page)).toBe(before);
   expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+});
+
+test("unchanged refresh finishing during a chart drag preserves the drop", async ({
+  page,
+}) => {
+  await fixture(page);
+  let release!: () => void;
+  let requested!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const requestSeen = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  await page.route("**/api/catalog", async (route) => {
+    requested();
+    await pending;
+    await route.fallback();
+  });
+  await page.locator("#refresh").click();
+  await requestSeen;
+  try {
+    await beginDrag(page, "a", "header padding");
+    await hoverSlot(page, "d", true);
+  } finally {
+    release();
+  }
+  await expect(page.locator("#refresh")).toBeEnabled();
+  await expect(card(page, "a").locator(".card-header")).toHaveClass(
+    /card-reordering/,
+  );
+  await hoverSlot(page, "d", true);
+  await page.mouse.up();
+  expect(await order(page)).toEqual(["b", "c", "d", "a"]);
+  await expect(
+    page.locator(".card-reordering,.card-drop-indicator"),
+  ).toHaveCount(0);
+  await page.reload();
+  await expect.poll(() => order(page)).toEqual(["b", "c", "d", "a"]);
+});
+
+test("a changed view cancels an in-flight chart drag instead of applying a stale drop", async ({
+  page,
+}) => {
+  await fixture(page);
+  await beginDrag(page, "a");
+  await hoverSlot(page, "d", true);
+  await section(page, "second")
+    .locator(".section-toggle")
+    .evaluate((node) => (node as HTMLElement).click());
+  await expect(
+    page.locator(".card-reordering,.card-drop-indicator"),
+  ).toHaveCount(0);
+  const target = (await card(page, "d").boundingBox())!;
+  await page.mouse.move(
+    target.x + target.width * 0.8,
+    target.y + target.height * 0.35,
+  );
+  await page.mouse.move(
+    target.x + target.width * 0.8,
+    target.y + target.height * 0.35,
+  );
+  await page.mouse.up();
+  expect(await order(page)).toEqual(["a", "b", "c", "d"]);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(1);
+  await move(page, "a", "d", true);
+  expect(await order(page)).toEqual(["b", "c", "d", "a"]);
+});
+
+test("refresh cannot turn a held toolbar button into a chart drag", async ({
+  page,
+}) => {
+  await fixture(page);
+  let release!: () => void;
+  let requested!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const requestSeen = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  await page.route("**/api/catalog", async (route) => {
+    requested();
+    await pending;
+    await route.fallback();
+  });
+  await page.locator("#refresh").click();
+  await requestSeen;
+  const header = card(page, "a").locator(".card-header");
+  try {
+    const button = card(page, "a").getByRole("button", {
+      name: "Zoom out",
+      exact: true,
+    });
+    const r = (await button.boundingBox())!;
+    await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+    await page.mouse.down();
+    await expect(header).toHaveAttribute("draggable", "false");
+  } finally {
+    release();
+  }
+  await expect(page.locator("#refresh")).toBeEnabled();
+  await expect(header).toHaveAttribute("draggable", "false");
+  const r = (await card(page, "b").boundingBox())!;
+  await page.mouse.move(r.x + r.width * 0.8, r.y + r.height * 0.35, {
+    steps: 12,
+  });
+  await page.mouse.up();
+  await expect(
+    page.locator(".card-reordering,.card-drop-indicator"),
+  ).toHaveCount(0);
+  expect(await order(page)).toEqual(["a", "b", "c", "d"]);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+  await move(page, "a", "d", true);
+  expect(await order(page)).toEqual(["b", "c", "d", "a"]);
 });

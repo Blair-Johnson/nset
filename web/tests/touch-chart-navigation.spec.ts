@@ -161,8 +161,9 @@ async function plotPoint(page: Page, x = 0.5, y = 0.5, id = 1): Promise<Point> {
 async function popupColors(page: Page) {
   return page.locator(".card-hover-row").evaluateAll((rows) =>
     rows.map((row) => ({
-      name: row.children[0].textContent,
-      color: getComputedStyle(row.children[0]).color,
+      name: row.querySelector(".card-legend-name")!.textContent,
+      metric: row.querySelector(".card-legend-key")?.textContent,
+      color: getComputedStyle(row.querySelector(".card-legend-name")!).color,
     })),
   );
 }
@@ -192,18 +193,25 @@ for (const mobile of [false, true])
     for (let i = 0; i < 5; i++) {
       p = { ...p, x: p.x + 1 };
       await touch(cdp, "touchMove", [p]);
-      await expect(page.locator(".card-hover-row")).toHaveCount(2);
+      await expect(page.locator(".card-hover-row")).toHaveCount(3);
     }
     await touch(cdp, "touchEnd");
     await page.waitForTimeout(120); // regression: legacy touchend/mouseout must not erase it
-    await expect(page.locator(".card-hover-row")).toHaveCount(2);
+    await expect(page.locator(".card-hover-row")).toHaveCount(3);
     expect(await popupColors(page)).toContainEqual({
       name: "Run a",
+      metric: "other",
       color: "rgb(18, 182, 120)",
     });
     expect(await popupColors(page)).toContainEqual({
       name: "Run b",
+      metric: "loss",
       color: "rgb(120, 69, 205)",
+    });
+    expect(await popupColors(page)).toContainEqual({
+      name: "Run a",
+      metric: "loss",
+      color: "rgb(193, 35, 69)",
     });
     const after = await state(page);
     expect(after.view).toEqual(before.view);
@@ -369,7 +377,7 @@ test("page touch scrolling remains available outside the plot", async ({
   await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(100);
 });
 
-test("desktop crossing popup tracks the actual representative stroke for both cursor orientations", async ({
+test("desktop crossing popup tracks each resolved trace stroke for both cursor orientations", async ({
   page,
 }) => {
   await fixture(page);
@@ -388,13 +396,21 @@ test("desktop crossing popup tracks the actual representative stroke for both cu
     await page.mouse.move(p.x, p.y);
   };
   await moveTo(50, 65);
+  await expect(page.locator(".card-hover-row")).toHaveCount(3);
   expect(await popupColors(page)).toContainEqual({
     name: "Run a",
+    metric: "loss",
+    color: "rgb(193, 35, 69)",
+  });
+  expect(await popupColors(page)).toContainEqual({
+    name: "Run a",
+    metric: "other",
     color: "rgb(18, 182, 120)",
   });
   await moveTo(50, 20);
   expect(await popupColors(page)).toContainEqual({
     name: "Run a",
+    metric: "loss",
     color: "rgb(193, 35, 69)",
   });
   await page
@@ -405,6 +421,7 @@ test("desktop crossing popup tracks the actual representative stroke for both cu
   expect(values.some((value) => value.includes("("))).toBe(true);
   expect(await popupColors(page)).toContainEqual({
     name: "Run a",
+    metric: "other",
     color: "rgb(18, 182, 120)",
   });
   // A live effective stroke change must be reflected without a palette lookup.
@@ -415,6 +432,7 @@ test("desktop crossing popup tracks the actual representative stroke for both cu
   });
   expect(await popupColors(page)).toContainEqual({
     name: "Run a",
+    metric: "other",
     color: "rgb(255, 224, 18)",
   });
 });

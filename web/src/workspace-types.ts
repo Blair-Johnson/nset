@@ -60,6 +60,8 @@ export interface ChartMeasurement {
 export interface ChartDetails {
   markdown?: string;
   configFields?: ChartConfigField[];
+  /** Authored configuration-table headings keyed by stable run identity, not semantic run labels. */
+  configRunLabels?: Record<string, string>;
   measurements?: Record<string, ChartMeasurement>;
 }
 export interface ChartSpec {

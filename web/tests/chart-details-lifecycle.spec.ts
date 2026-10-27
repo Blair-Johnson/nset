@@ -184,7 +184,7 @@ test("newer measurement alone supplies pins and status", async ({ page }) => {
     await page.evaluate(() => (window as any).lifecycle.card.pins),
   ).toEqual({ ...emptyPins, yA: 1 });
   await expect(pane(page).getByRole("status")).toHaveText(
-    "Measurement shown on chart.",
+    "Cursor placed at Y = 1.",
   );
 });
 
@@ -288,7 +288,7 @@ test("wide and narrow maximized layouts remain operable", async ({ page }) => {
   await expect(inspect).toBeInViewport();
   await inspect.click();
   await expect(pane(page).getByRole("status")).toHaveText(
-    "Measurement shown on chart.",
+    "Cursor placed at Y = 1.",
   );
   const restore = page.getByRole("button", {
     name: "Restore chart",
@@ -300,4 +300,134 @@ test("wide and narrow maximized layouts remain operable", async ({ page }) => {
   await expect(page.locator(".card-maximized")).toHaveCount(0);
   await pane(page).getByRole("button", { name: "Close chart details" }).click();
   await expect(pane(page)).toHaveCount(0);
+});
+
+test("report feedback uses steps only for step-based X axes", async ({
+  page,
+}) => {
+  await fixture(page);
+  for (const [binding, expected] of [
+    ["step", "Cursors placed at steps 0 and 2."],
+    ["timestamp", "Cursors placed at X = 0 and 2."],
+    ["relative", "Cursors placed at X = 0 and 2."],
+    ["metric", "Cursors placed at X = 0 and 2."],
+    ["record-step", "Cursors placed at steps 0 and 2."],
+    ["record-metric", "Cursors placed at X = 0 and 2."],
+  ]) {
+    // Exercise panel feedback independently of the card's data bindings.
+    await page.evaluate((binding) => {
+      const s = (window as any).lifecycle;
+      const chart = structuredClone(s.input.chart);
+      chart.config.axis = ["timestamp", "relative"].includes(binding)
+        ? binding
+        : "step";
+      if (binding === "metric") chart.x = { mode: "key", key: "loss" };
+      if (binding.startsWith("record-"))
+        chart.records = {
+          sourceId: "records",
+          runUids: [],
+          ys: ["loss"],
+          x: binding === "record-step" ? "step" : "tokens",
+          filters: { any: false, conditions: [] },
+        };
+      s.panel.update({ ...s.input, chart });
+    }, binding);
+    await pane(page).getByRole("button", { name: "Inspect interval" }).click();
+    await expect(
+      pane(page).locator(".chart-details-report > [role=status]:last-child"),
+    ).toHaveText(expected);
+  }
+});
+
+test("report replacement retains accessible feedback and failure messages", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => {
+    const s = (window as any).lifecycle;
+    s.input.chart.details.markdown =
+      "### Updated\n\n[Inspect interval](measurement:interval)";
+    s.panel.update(s.input);
+    s.card.showMeasurement = async () => false;
+  });
+  await pane(page).getByRole("button", { name: "Inspect interval" }).click();
+  const status = pane(page).locator(
+    ".chart-details-report > [role=status]:last-child",
+  );
+  await expect(status).toHaveText(
+    "This measurement is not available for the current chart.",
+  );
+  await expect(status).toHaveAttribute("aria-live", "polite");
+  await page.evaluate(() => {
+    (window as any).lifecycle.card.showMeasurement = async () => {
+      throw new Error("Unavailable");
+    };
+  });
+  await pane(page).getByRole("button", { name: "Inspect interval" }).click();
+  await expect(status).toHaveText(
+    "The measurement could not be shown. Try again.",
+  );
+});
+
+test("report typography, math and tables retain compact styling and safe overflow", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => {
+    const s = (window as any).lifecycle;
+    s.input.chart.details.markdown = [
+      "## Overview",
+      "### Findings",
+      "Muted paragraph with **strong emphasis**.",
+      "- First item\n- Second item",
+      "#### Detail",
+      "$$\nx^2 + y^2 = z^2\n$$",
+      "| Setting | Value |\n| --- | --- |\n| example | 1 |",
+      `\`\`\`text\n${"long-code ".repeat(80)}\n\`\`\``,
+    ].join("\n\n");
+    s.panel.update(s.input);
+  });
+  const report = pane(page).locator(".chart-details-report");
+  await expect(report).toHaveCSS("padding-top", "10px");
+  await expect(report.locator("h2")).toHaveCSS("font-size", "14px");
+  await expect(report.locator("h2")).toHaveCSS("margin-top", "2px");
+  await expect(report.locator("h3")).toHaveCSS("font-size", "12px");
+  await expect(report.locator("h4")).toHaveCSS("margin-top", "0px");
+  await expect(report.locator("li").first()).toHaveCSS("margin-top", "4px");
+  const muted = await report
+    .locator("p")
+    .first()
+    .evaluate((node) => getComputedStyle(node).color);
+  await expect(report.locator("li").first()).toHaveCSS("color", muted);
+  await expect(report.locator("th").first()).toHaveCSS("color", muted);
+  const text = await pane(page).evaluate(
+    (node) => getComputedStyle(node).color,
+  );
+  await expect(report.locator("strong")).toHaveCSS("color", text);
+  await expect(report.locator(".katex-display")).toHaveCSS(
+    "padding-top",
+    "5px",
+  );
+  await expect(report.locator(".katex-display")).toHaveCSS(
+    "margin-top",
+    "12px",
+  );
+  await expect(report.locator(".katex-display > .katex")).toHaveCSS(
+    "text-align",
+    "left",
+  );
+  await expect(report.locator("table")).toHaveCSS("display", "table");
+  await expect(report.locator("table")).toHaveCSS("font-size", "11px");
+  await expect(report.locator("th").first()).toHaveCSS("padding", "6px 4px");
+  await expect(report.locator("th").first()).toHaveCSS("font-weight", "550");
+  await expect(report.locator("pre")).toHaveCSS("padding", "10px");
+  await expect(report.locator("pre")).toHaveCSS("line-height", "18px");
+  await expect(report.locator(".chart-details-report-table-wrap")).toHaveCSS(
+    "overflow-x",
+    "auto",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(391);
 });

@@ -30,7 +30,7 @@ Saved views have no arbitrary count, workspace-byte, or annotation-content quota
 
 ### Authored chart details and semantic run names
 
-These optional fields extend workspace version 2; old documents remain valid. `workspace.runLabels` maps stable run IDs to view-wide semantic names without renaming runs. Keys and labels must be nonempty after trimming; keys cannot be `__proto__`, `constructor`, or `prototype`. IDs may refer to unavailable or unselected runs, and labels need not be unique. Legends and cursor readouts distinguish same-run metrics and disambiguate colliding names. Switching to original labels is a local presentation preference.
+These optional fields extend workspace version 2; old documents remain valid. `workspace.runLabels` maps stable run IDs to view-wide semantic names without renaming runs. Keys and labels must be nonempty after trimming; keys cannot be `__proto__`, `constructor`, or `prototype`. IDs may refer to unavailable or unselected runs, and labels need not be unique. Legends and cursor readouts distinguish same-run metrics. Authored labels and original run names are displayed without automatically appending run or series IDs; stable IDs remain internal. Switching to original labels is a local presentation preference.
 
 The resizable Chart details pane supports Markdown headings, emphasis, lists, tables, quotations, code, rules, and inline/display LaTeX. Raw HTML, scripts, executable code, remote images, and arbitrary embeds are not supported. HTTP(S) links are allowed; math rendering disables trusted HTML and bounds expansion. Configuration fields are selected by the view author, not inferred or expanded into the full run configuration.
 
@@ -41,6 +41,8 @@ Each chart may have `details` with these optional members:
 - `markdown`: a string, including an empty string. Rendering is inert; saving Markdown does not enable executable content.
 - `configFields`: an ordered array of `{ "path": ["optimizer", "lr"], "label": "Learning rate" }`. Paths contain one or more nonblank string segments and resolve only own properties beneath `run.params`. A literal dotted key uses one segment, such as `["optimizer.lr"]`. The three forbidden names above are rejected in every segment; duplicate segment arrays are rejected. An optional label must be nonblank. Missing values are displayed explicitly rather than inferred.
 - `measurements`: a map from names matching `^[A-Za-z0-9][A-Za-z0-9_-]*$` to `{ "axis": "x", "a": 500, "b": 1500 }`. The three forbidden names are also rejected here. Axis is `x` or `y`; `a` is required and both coordinates must be finite numbers. Omit `b` or use `null` for a single cursor. Image charts may have an empty map but cannot declare measurements.
+
+`configRunLabels` is an optional map within `details` from run IDs to compact configuration-table headings, such as `{"run-a": "A", "run-b": "B"}`. It follows the same validation rules as `runLabels`. These headings remain stable when switching the chart's naming mode; omitted headings use the current semantic label or original run name. Only `configFields` selects which parameter values appear in the table.
 
 Unknown fields and null containers are rejected. Empty details objects, field arrays, and alias maps are valid. Chart reset preserves authored details; JSON import/export and saved-view copies preserve details and aliases. There are no annotation-specific size or count quotas; existing safe-JSON and request validation still apply.
 

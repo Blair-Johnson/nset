@@ -22,6 +22,16 @@
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
+.card-header.card-reorder-handle {
+  cursor: grab;
+  user-select: none;
+}
+.card-header.card-reordering {
+  cursor: grabbing;
+}
+.card-header.card-reorder-handle .card-title {
+  user-select: none;
+}
 .card-title {
   margin: 0;
   flex: 1;
@@ -480,7 +490,7 @@
   right: var(--legend-right, 15px);
   box-sizing: border-box;
   width: max-content;
-  max-width: min(330px, var(--legend-width, calc(100% - 45px)));
+  max-width: min(360px, var(--legend-width, 360px), calc(100vw - 32px));
   height: auto;
   max-height: min(112px, var(--legend-height, 112px));
   overflow: auto;
@@ -500,8 +510,11 @@
 }
 .card-hover-row {
   display: grid;
-  grid-template-columns: minmax(0, max-content) auto;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 .card-hover-row > .card-series-identity {
@@ -767,12 +780,12 @@
   align-items: center;
   min-width: 0;
   max-width: 100%;
-  gap: 5px;
+  gap: 6px;
   vertical-align: middle;
 }
 .card-series-identity .card-legend-swatch {
-  flex: 0 0 24px;
-  width: 24px;
+  flex: 0 0 14px;
+  width: 14px;
   height: 8px;
   border-radius: 0;
   background: none;
@@ -786,8 +799,33 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.card-series-label .card-legend-key {
-  opacity: 0.8;
+.card-legend .card-series-semantic .card-legend-name {
+  color: var(--text);
+}
+.card-legend .card-legend-key {
+  color: var(--muted);
+}
+.card-hover .card-series-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.card-hover .card-legend-name,
+.card-hover .card-legend-key {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.card-hover .card-legend-key {
+  color: var(--text);
+}
+.card-hover-separator {
+  flex: none;
+  color: var(--muted);
+  opacity: 0.65;
+}
+.card-value-table .card-series-label,
+.card-crossings .card-series-label {
+  max-width: 36ch;
 }
 .card-legend-item {
   grid-template-columns: minmax(0, max-content) auto;

@@ -14,14 +14,7 @@ pixi run format-check
 pixi run api-test
 ```
 
-`check` builds the UI and runs frontend unit tests and locked Cargo tests. `api-test` builds the debug server and runs Python tests with disposable server data. Official SDK tests require the compatibility environment:
-
-```sh
-pixi install -e compat --locked
-pixi run -e compat compat-test
-```
-
-This enables the W&B SDK cases alongside MLflow checks. Inspect test output for skipped cases when running a smaller environment.
+`check` builds the UI and runs frontend unit tests and locked Cargo tests. `api-test` builds the debug server and runs Python tests with disposable server data. Inspect test output for skipped cases when optional SDK dependencies are not installed.
 
 For browser fixtures:
 
@@ -30,7 +23,7 @@ pixi run browser-install
 CI=1 pixi run npm --prefix web run test:browser
 ```
 
-Playwright starts a local Vite server; `NSET_TEST_PORT` selects its port (default 4173). Failure screenshots and traces go to `web/test-results`. The broader `bash scripts/verify.sh` also builds a release binary, runs strict Clippy, installs Chromium, and exercises real-server browser journeys and performance probes. It is separate from the opt-in SDK check above.
+Playwright starts a local Vite server; `NSET_TEST_PORT` selects its port (default 4173). Failure screenshots and traces go to `web/test-results`. The broader `bash scripts/verify.sh` also builds a release binary, runs strict Clippy, installs Chromium, and exercises real-server browser journeys and performance probes.
 
 For [server-backed saved views](server-views.md), install Chromium with `pixi run browser-install` if needed, then run:
 

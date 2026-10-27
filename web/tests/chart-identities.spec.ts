@@ -140,7 +140,7 @@ test("resolved identities, metrics, colors and dash samples agree across native 
     );
   expect(new Set(hoverIds).size).toBe(4);
   await expect(page.locator(".card-hover")).toContainText(
-    "Baseline · eval/loss",
+    "Baseline / eval/loss",
   );
   await page.evaluate(() =>
     (window as any).identities.card.showMeasurement({ axis: "x", a: 1, b: 4 }),
@@ -171,9 +171,38 @@ test("resolved identities, metrics, colors and dash samples agree across native 
   await expect(page.locator(".card-crossings").first()).toContainText(
     "Baseline",
   );
+  const crossingValues = await page
+    .locator(".card-crossings > div")
+    .allTextContents();
+  await page.evaluate(() => {
+    const s = (window as any).identities;
+    s.card.setContext({ ...s.context, labelMode: "original" });
+  });
+  await expect(page.locator(".card-crossings .card-legend-name")).toHaveText([
+    "Duplicate",
+    "Duplicate",
+    "Duplicate",
+    "Duplicate",
+  ]);
+  expect(await page.locator(".card-crossings > div").allTextContents()).toEqual(
+    crossingValues,
+  );
+  await page.evaluate(() => {
+    const s = (window as any).identities;
+    s.card.setContext({ ...s.context, labelMode: "semantic" });
+  });
+  await expect(page.locator(".card-crossings .card-legend-name")).toHaveText([
+    "Baseline",
+    "Baseline",
+    "Candidate",
+    "Candidate",
+  ]);
+  expect(await page.locator(".card-crossings > div").allTextContents()).toEqual(
+    crossingValues,
+  );
 });
 
-test("presentation changes preserve data, camera and cursors; raw names and alias collisions stay distinct", async ({
+test("presentation changes preserve data, camera and cursors; duplicate labels retain distinct trace IDs", async ({
   page,
 }) => {
   await fixture(page);
@@ -183,6 +212,37 @@ test("presentation changes preserve data, camera and cursors; raw names and alia
     c.plot.showView({ x: [0.5, 4.5], y: [0.1, 1.9] });
   });
   const before = await snapshot(page);
+  const traceIds = await page
+    .locator(".card-legend-item")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => (node as HTMLElement).dataset.seriesId),
+    );
+  expect(new Set(traceIds).size).toBe(4);
+  const values = await page.locator(".card-value-table td").allTextContents();
+  const expectNames = async (name: string) => {
+    await moveTo(page, 2.5, 1);
+    for (const surface of [
+      ".card-legend",
+      ".card-hover",
+      ".card-value-table",
+    ]) {
+      await expect(page.locator(`${surface} .card-legend-name`)).toHaveText([
+        name,
+        name,
+        name,
+        name,
+      ]);
+      const ids = await page
+        .locator(`${surface} .card-series-identity`)
+        .evaluateAll((nodes) =>
+          nodes.map((node) => (node as HTMLElement).dataset.seriesId),
+        );
+      expect(ids.sort()).toEqual([...traceIds].sort());
+    }
+    expect(
+      await page.locator(".card-value-table td").allTextContents(),
+    ).toEqual(values);
+  };
   await page.evaluate(() => {
     const s = (window as any).identities;
     s.card.setContext({ ...s.context, labelMode: "original" });
@@ -191,23 +251,19 @@ test("presentation changes preserve data, camera and cursors; raw names and alia
       details: { markdown: "Updated narrative" },
     });
   });
-  await expect(page.locator(".card-legend")).toContainText("Duplicate (a)");
-  await expect(page.locator(".card-value-table")).toContainText(
-    "Duplicate (b)",
-  );
+  await expectNames("Duplicate");
   expect(await snapshot(page)).toEqual(before);
   await page.evaluate(() => {
     const s = (window as any).identities;
     s.card.setContext({ ...s.context, runLabels: { a: "Same", b: "Same" } });
   });
-  await expect(page.locator(".card-legend")).toContainText("Same (a)");
-  await expect(page.locator(".card-value-table")).toContainText("Same (b)");
+  await expectNames("Same");
   expect(await snapshot(page)).toEqual(before);
   await page.evaluate(() => {
     const s = (window as any).identities;
     s.card.setContext({ ...s.context, runLabels: undefined });
   });
-  await expect(page.locator(".card-legend")).toContainText("Duplicate (a)");
+  await expectNames("Duplicate");
 });
 
 test("hover exit clears readings, no coordinate heading, compact content fits a narrow chart", async ({
@@ -222,7 +278,8 @@ test("hover exit clears readings, no coordinate heading, compact content fits a 
   ).not.toBe("");
   await page.mouse.move(2, 2);
   await expect(page.locator(".card-hover")).toBeEmpty();
-  await expect(page.locator(".card-legend-value").first()).toBeEmpty();
+  await expect(page.locator(".card-legend-value")).toHaveText(["", "", "", ""]);
+  await expect(page.locator(".card-hover")).toBeHidden();
   expect(
     await page.evaluate(() => (window as any).identities.card.lastHoverX),
   ).toBeNull();
@@ -253,6 +310,110 @@ test("hover exit clears readings, no coordinate heading, compact content fits a 
   expect(boxes.left).toBeGreaterThanOrEqual(boxes.plotLeft - 1);
   expect(boxes.right).toBeLessThanOrEqual(boxes.plotRight + 1);
   expect(boxes.truncated).toBe(true);
+});
+
+test("inline hover matches compact prototype geometry and neutral text hierarchy", async ({
+  page,
+}) => {
+  await fixture(page);
+  await moveTo(page, 2.5, 1);
+  await expect(page.locator(".card-hover-row")).toHaveCount(4);
+  await expect(page.locator(".card-hover-separator")).toHaveText([
+    " / ",
+    " / ",
+    " / ",
+    " / ",
+  ]);
+  expect(
+    (
+      await page.locator(".card-hover .card-legend-key").allTextContents()
+    ).sort(),
+  ).toEqual(["eval/loss", "eval/loss", "train/loss", "train/loss"]);
+  const geometry = await page.locator(".card-hover-row").evaluateAll((rows) =>
+    rows.map((row) => {
+      const run = row.querySelector(".card-legend-name")!;
+      const metric = row.querySelector(".card-legend-key")!;
+      const value = row.querySelector(".card-hover-value")!;
+      const stroke = row.querySelector("svg")!;
+      const r = run.getBoundingClientRect(),
+        m = metric.getBoundingClientRect(),
+        v = value.getBoundingClientRect();
+      return {
+        inline: Math.abs(r.y - m.y) < 1,
+        ordered: r.right < m.x && m.right < v.x,
+        height: row.getBoundingClientRect().height,
+        strokeWidth: stroke.getBoundingClientRect().width,
+        strokeHeight: stroke.getBoundingClientRect().height,
+        metricColor: getComputedStyle(metric).color,
+        runColor: getComputedStyle(run).color,
+        dash: stroke.querySelector("line")!.getAttribute("stroke-dasharray"),
+      };
+    }),
+  );
+  expect(geometry.every((g) => g.inline && g.ordered && g.height < 30)).toBe(
+    true,
+  );
+  expect(
+    geometry.every((g) => g.strokeWidth === 14 && g.strokeHeight === 8),
+  ).toBe(true);
+  expect(geometry.every((g) => g.metricColor === "rgb(221, 221, 221)")).toBe(
+    true,
+  );
+  expect(geometry.map((g) => g.dash).sort()).toEqual(["", "", "5 3", "5 3"]);
+  expect(geometry.map((g) => g.runColor).sort()).toEqual([
+    "rgb(0, 204, 255)",
+    "rgb(0, 204, 255)",
+    "rgb(255, 0, 0)",
+    "rgb(255, 0, 0)",
+  ]);
+  expect((await page.locator(".card-hover").boundingBox())!.width).toBeLessThan(
+    360,
+  );
+  expect(
+    await page
+      .locator(".card-legend .card-legend-name")
+      .evaluateAll((nodes) =>
+        nodes.every(
+          (node) => getComputedStyle(node).color === "rgb(221, 221, 221)",
+        ),
+      ),
+  ).toBe(true);
+  await expect(page.locator(".card-hover")).not.toContainText("At step");
+  const overflow = await page.locator(".card-hover").evaluate((hover) => {
+    const clone = hover.cloneNode(true) as HTMLElement;
+    clone.style.cssText =
+      "position:fixed;left:10px;top:10px;display:block;font:13px/1.45 system-ui";
+    document.body.append(clone);
+    const result: boolean[] = [];
+    for (const width of [440, 280]) {
+      clone.style.width = `${width}px`;
+      for (const row of clone.querySelectorAll<HTMLElement>(
+        ".card-hover-row",
+      )) {
+        const run = row.querySelector<HTMLElement>(".card-legend-name")!;
+        const metric = row.querySelector<HTMLElement>(".card-legend-key")!;
+        const value = row.querySelector<HTMLElement>(".card-hover-value")!;
+        run.textContent = metric.textContent = "very_long_name_".repeat(12);
+        const r = run.getBoundingClientRect(),
+          m = metric.getBoundingClientRect(),
+          v = value.getBoundingClientRect();
+        result.push(
+          r.width > 20 &&
+            m.width > 20 &&
+            r.right < m.x &&
+            m.right < v.x &&
+            Math.abs(r.y - m.y) < 1 &&
+            run.scrollWidth > run.clientWidth &&
+            metric.scrollWidth > metric.clientWidth &&
+            row.scrollWidth <= row.clientWidth + 1 &&
+            value.scrollWidth <= value.clientWidth + 1,
+        );
+      }
+    }
+    clone.remove();
+    return result;
+  });
+  expect(overflow.every(Boolean)).toBe(true);
 });
 
 test("details hook and native measurement replacement retain data and authoritative Clear cursors", async ({
@@ -291,6 +452,8 @@ test("details hook and native measurement replacement retain data and authoritat
     ),
   ).toBe(true);
   const y = await snapshot(page);
+  // Each report reference starts from the configured range, not the previous zoom.
+  expect(y.view).toEqual(before.view);
   expect(y.pins).toEqual({
     a: null,
     b: null,

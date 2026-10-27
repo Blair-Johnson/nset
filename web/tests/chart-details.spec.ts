@@ -22,6 +22,7 @@ function fixture() {
   chart.details = {
     markdown:
       "### Findings\n\n**Authored** report with $x^2$.\n\n$$\n\\Delta = v_1-v_2\n$$\n\n[Inspect interval](measurement:window) and [Inspect level](measurement:level).\n\n<script>window.bad=true</script>",
+    configRunLabels: { r1: "A", r2: "D" },
     configFields: [
       { path: ["optimizer", "lr"], label: "Learning rate" },
       { path: ["data.window"], label: "Window" },
@@ -169,6 +170,36 @@ test("authored Markdown, LaTeX and selected parameter paths; measurements use na
   await expect(pane(page)).toHaveCount(0);
   await open(page);
   await expect(pane(page)).toContainText("Authored");
+  const table = pane(page).locator(".chart-details-table");
+  await expect(table.locator("thead th")).toHaveText(["Setting", "A", "D"]);
+  await expect(table.locator("thead th[data-run-id=r1]")).toHaveAttribute(
+    "title",
+    "same raw name",
+  );
+  await expect(table.locator(".chart-details-swatch")).toHaveCount(0);
+  await expect(table.locator("tbody tr")).toHaveCount(3);
+  await expect(table.locator(".chart-details-difference")).toHaveCount(2);
+  await expect(table.locator("tbody tr").last()).not.toHaveClass(
+    /chart-details-difference/,
+  );
+  await expect(table.locator("tbody th").first()).toHaveCSS(
+    "font-size",
+    "10px",
+  );
+  await expect(table.locator("tbody th").first()).toHaveCSS(
+    "font-weight",
+    "400",
+  );
+  await expect(table.locator("td").first()).toHaveCSS("padding-top", "5px");
+  await expect(table.locator("td").first()).toHaveCSS("white-space", "nowrap");
+  const selected = await table
+    .locator(".chart-details-difference td")
+    .first()
+    .evaluate((node) => getComputedStyle(node).backgroundColor);
+  await expect(table.locator(".chart-details-difference th").first()).toHaveCSS(
+    "background-color",
+    selected,
+  );
   await expect(pane(page).locator(".katex").first()).toBeVisible();
   await expect(pane(page)).toContainText("Learning rate");
   await expect(pane(page)).toContainText("0.01");
@@ -191,6 +222,16 @@ test("authored Markdown, LaTeX and selected parameter paths; measurements use na
   ).toHaveValue("2");
   await expect(card(page).locator(".card-value-table")).toBeVisible();
   await expect(
+    pane(page).locator(".chart-details-report > [role=status]:last-child"),
+  ).toHaveText("Cursors placed at steps 0 and 2.");
+  await expect(pane(page).getByRole("status")).toHaveAttribute(
+    "aria-live",
+    "polite",
+  );
+  await expect(
+    pane(page).locator(".chart-details-report + .chart-details-configuration"),
+  ).toBeVisible();
+  await expect(
     pane(page).getByRole("button", { name: /clear cursors/i }),
   ).toHaveCount(0);
   await pane(page).getByRole("button", { name: "Inspect level" }).click();
@@ -201,6 +242,9 @@ test("authored Markdown, LaTeX and selected parameter paths; measurements use na
     }),
   ).toHaveValue("0.5");
   await expect(card(page).locator(".card-crossings")).toHaveCount(3);
+  await expect(pane(page).getByRole("status")).toHaveText(
+    "Cursor placed at Y = 0.5.",
+  );
   await card(page)
     .getByRole("button", { name: /^Clear cursors$/i })
     .click();
@@ -240,6 +284,11 @@ test("local naming mode preserves plots and cursors without saving the view", as
         document.querySelector('[data-card-id="comparison"] .uplot'),
     ),
   ).toBe(true);
+  await expect(pane(page).locator(".chart-details-table thead th")).toHaveText([
+    "Setting",
+    "A",
+    "D",
+  ]);
   expect(server.histories).toBe(requests);
   expect(server.writes).toEqual([]);
   await page
@@ -314,7 +363,11 @@ test("pane resize is local, cancellable, keyboard accessible, persisted and resp
   await handle.focus();
   await page.keyboard.press("ArrowRight");
   const retained = (await pane(page).boundingBox())!.width;
-  expect(retained).toBeLessThan(expanded);
+  expect(retained).toBe(expanded - 20);
+  await page.keyboard.press("Shift+ArrowLeft");
+  expect((await pane(page).boundingBox())!.width).toBe(retained + 80);
+  await page.keyboard.press("Shift+ArrowRight");
+  expect((await pane(page).boundingBox())!.width).toBe(retained);
   bounds = (await handle.boundingBox())!;
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 30);
   await page.mouse.down();

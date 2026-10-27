@@ -96,18 +96,22 @@ test("only chosen fields and plotted runs appear, once per run and in source ord
   );
 });
 
-test("semantic aliases use stable IDs and collisions retain full identity", () => {
+test("semantic aliases preserve authored labels and internal IDs despite collisions", () => {
   const ctx = context();
   const chart = newChart("timeseries", ["loss"]);
   ctx.runLabels = { a: "Alias", b: "Alias" };
   assert.deepEqual(
     chartDetailsData(chart, ctx).columns.map((column) => column.name),
-    ["Alias (a)", "Alias (b)"],
+    ["Alias", "Alias"],
+  );
+  assert.deepEqual(
+    chartDetailsData(chart, ctx).columns.map((column) => column.id),
+    ["a", "b"],
   );
   ctx.labelMode = "original";
   assert.deepEqual(
     chartDetailsData(chart, ctx).columns.map((column) => column.name),
-    ["Same name (a)", "Same name (b)"],
+    ["Same name", "Same name"],
   );
 });
 
@@ -168,10 +172,154 @@ test("column names exactly match the shared chart identity helper", () => {
   const columns = chartDetailsData(chart, ctx).columns;
   assert.deepEqual(
     columns.map((column) => column.name),
-    ["Same name (b) (a)", "Same name (b) (b)"],
+    ["Same name (b)", "Same name"],
   );
   for (const column of columns) {
     const first = sources.find((source) => source.runId === column.id)!;
     assert.equal(column.name, identities.get(first.id)!.name);
   }
+});
+
+test("identity labels are exact, catalog-independent, and never append run or trace IDs", () => {
+  const ctx = context();
+  const chart = newChart("timeseries", ["loss", "accuracy"]);
+  const sources = resolveSources(chart, ctx.selectedRunIds, ctx.catalog);
+  const uuid = "639b1886-300e-46a0-942c-3a5690eb019b";
+  const source = {
+    ...sources[0],
+    id: JSON.stringify(["metric", uuid, "loss"]),
+    runId: uuid,
+    run: { ...sources[0].run, id: uuid, name: "  Raw name  " },
+  };
+  const duplicate = { ...source, id: "independent-trace" };
+  const traces = [source, duplicate, sources[1]];
+  ctx.runLabels = { [uuid]: "  Authored alias  " };
+  const ids = traces.map((trace) => trace.id);
+  const semantic = chartIdentities(traces, ctx);
+  assert.deepEqual([...semantic.keys()], ids);
+  assert.deepEqual(
+    [...semantic.values()].map((identity) => identity.id),
+    ids,
+  );
+  for (const trace of [source, duplicate]) {
+    assert.equal(semantic.get(trace.id)!.runId, uuid);
+    assert.equal(semantic.get(trace.id)!.name, "  Authored alias  ");
+    assert.equal(semantic.get(trace.id)!.metric, "loss");
+    assert.equal(semantic.get(trace.id)!.label, "  Authored alias   · loss");
+  }
+  ctx.catalog.runs.push({ ...source.run, id: "unplotted" });
+  assert.deepEqual(chartIdentities(traces, ctx), semantic);
+  ctx.labelMode = "original";
+  assert.equal(
+    chartIdentities(traces, ctx).get(source.id)!.name,
+    "  Raw name  ",
+  );
+  ctx.labelMode = "semantic";
+  ctx.runLabels = { [uuid]: "   " };
+  assert.equal(
+    chartIdentities(traces, ctx).get(source.id)!.name,
+    "  Raw name  ",
+  );
+  ctx.runLabels = Object.create({ [uuid]: "Inherited alias" });
+  assert.equal(
+    chartIdentities(traces, ctx).get(source.id)!.name,
+    "  Raw name  ",
+  );
+  const singleMetric = chartIdentities([source, duplicate], ctx);
+  assert.equal(singleMetric.size, 2);
+  assert.deepEqual(
+    [...singleMetric.values()].map((identity) => identity.label),
+    ["  Raw name  ", "  Raw name  "],
+  );
+  assert.ok(
+    [...singleMetric.values()].every((identity) => identity.metric === ""),
+  );
+});
+
+test("authored compact headings survive naming modes and chart-local source order", () => {
+  const ctx = context();
+  const chart = newChart("timeseries", ["loss"]);
+  chart.details = { configRunLabels: { a: "A", b: "D" } };
+  ctx.runLabels = { a: "Alias A", b: "Alias B" };
+  for (const mode of ["semantic", "original"] as const) {
+    ctx.labelMode = mode;
+    assert.deepEqual(
+      chartDetailsData(chart, ctx).columns.map((column) => column.name),
+      ["A", "D"],
+    );
+    chart.source = {
+      mode: "explicit",
+      series: [{ runId: "b", key: "loss", kind: "metric" }],
+    };
+    assert.deepEqual(
+      chartDetailsData(chart, ctx).columns.map((column) => column.name),
+      ["D"],
+    );
+    chart.source = { mode: "selected", keys: ["loss"] };
+  }
+  chart.details.configRunLabels = { a: "A" };
+  assert.deepEqual(
+    chartDetailsData(chart, ctx).columns.map((column) => column.name),
+    ["A", "Same name"],
+  );
+  chart.details.configRunLabels = Object.create({ a: "Inherited heading" });
+  assert.equal(chartDetailsData(chart, ctx).columns[0].name, "Same name");
+});
+
+test("all authored rows remain ordered and differences compare raw values, not display text", () => {
+  const ctx = context();
+  const prefix = "x".repeat(110);
+  ctx.catalog.runs[0].params = {
+    typed: 1,
+    missing: "\u2014",
+    long: `${prefix}a`,
+    same: { a: [1, 2] },
+  };
+  ctx.catalog.runs[1].params = {
+    typed: "1",
+    long: `${prefix}b`,
+    same: { a: [1, 2] },
+  };
+  const chart = newChart("timeseries", ["loss", "accuracy"]);
+  chart.details = {
+    configFields: ["same", "typed", "missing", "long", "absent"].map((key) => ({
+      path: [key],
+    })),
+  };
+  const data = chartDetailsData(chart, ctx);
+  assert.deepEqual(
+    data.fields.map((field) => [field.label, field.differs]),
+    [
+      ["same", false],
+      ["typed", true],
+      ["missing", true],
+      ["long", true],
+      ["absent", false],
+    ],
+  );
+  assert.deepEqual(data.columns[0].values, data.columns[1].values);
+  assert.equal(data.columns[0].values[3], `${"x".repeat(97)}\u2026`);
+  assert.equal(ctx.catalog.runs[0].params.long, `${prefix}a`);
+  ctx.selectedRunIds = ["a"];
+  assert.ok(
+    chartDetailsData(chart, ctx).fields.every((field) => !field.differs),
+  );
+  ctx.selectedRunIds = [];
+  assert.ok(
+    chartDetailsData(chart, ctx).fields.every((field) => !field.differs),
+  );
+});
+
+test("display truncation matches the prototype boundary without changing path safety", () => {
+  assert.equal(
+    chartConfigValue({ value: "x".repeat(100) }, ["value"]),
+    "x".repeat(100),
+  );
+  assert.equal(
+    chartConfigValue({ value: "x".repeat(101) }, ["value"]),
+    `${"x".repeat(97)}\u2026`,
+  );
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  assert.equal(chartConfigValue({ value: cycle }, ["value"]), "\u2014");
 });

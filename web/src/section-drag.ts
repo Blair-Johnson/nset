@@ -15,10 +15,10 @@ export class SectionDrag {
       if (!(target instanceof Element)) return;
       const header = target.closest<HTMLElement>(".section-heading");
       if (!header || header.parentElement?.parentElement !== dashboard) return;
-      // The title/toggle is deliberately draggable, every other control is not.
+      // The title is a fold button; only the non-control header area drags.
       if (
         target.closest(
-          ".menu,summary,a,input,select,textarea,[contenteditable],[role=button]:not(.section-toggle),button:not(.section-toggle)",
+          ".menu,summary,a,input,select,textarea,[contenteditable],[role=button],button",
         )
       )
         return;

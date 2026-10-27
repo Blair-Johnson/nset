@@ -284,12 +284,27 @@ export function newWorkspace(
     updatedAt: Date.now(),
   });
 }
+/** Shared by semantic run names and chart-local configuration-table headings. */
+function validateRunLabels(value: unknown): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(object(value)).map(([runId, label]) => [
+      id(runId),
+      text(label, "run label"),
+    ]),
+  );
+}
+
 /** Called only after the enclosing chart passes safe-JSON validation. */
 function validateDetails(
   value: unknown,
   kind: ChartSpec["kind"],
 ): ChartDetails {
-  const v = object(value, ["markdown", "configFields", "measurements"]);
+  const v = object(value, [
+    "markdown",
+    "configFields",
+    "configRunLabels",
+    "measurements",
+  ]);
   const details: ChartDetails = {};
   if (v.markdown !== undefined) {
     if (typeof v.markdown !== "string")
@@ -314,6 +329,8 @@ function validateDetails(
       "configuration path",
     );
   }
+  if (v.configRunLabels !== undefined)
+    details.configRunLabels = validateRunLabels(v.configRunLabels);
   if (v.measurements !== undefined) {
     const entries = Object.entries(object(v.measurements));
     if (kind === "image" && entries.length)
@@ -493,14 +510,7 @@ export function validateWorkspace(value: unknown): Workspace {
       : array(v.pendingSelectedRunIds).map(id);
   distinct([...selectedRunIds, ...pendingSelectedRunIds], "selected run");
   const runLabels =
-    v.runLabels === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(object(v.runLabels)).map(([runId, label]) => [
-            id(runId),
-            text(label, "run label"),
-          ]),
-        );
+    v.runLabels === undefined ? undefined : validateRunLabels(v.runLabels);
   return {
     version: 2,
     id: id(v.id),

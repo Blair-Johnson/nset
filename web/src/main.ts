@@ -171,8 +171,10 @@ async function pollServerViews() {
       currentWorkspaceId &&
       currentRoute().view === "charts"
     ) {
+      // A direct-link load may finish while the list request is in flight.
+      // Refresh the current toolbar, not the workspace captured before awaiting.
       const workspace =
-        active?.workspace ??
+        serverWorkspace?.workspace ??
         library.views.find((v) => v.id === currentWorkspaceId);
       if (workspace) workspaceToolbar(workspace);
     }
@@ -1128,9 +1130,12 @@ function workspaceToolbar(workspace: Workspace) {
   const shared = serverWorkspace?.workspace === workspace;
   const availableViews = [
     ...library.views.map((v) => ({ ...v, server: false })),
-    ...serverViews.map((v) => ({ ...v, server: true })),
+    ...serverViews
+      .filter((v) => !shared || v.id !== workspace.id)
+      .map((v) => ({ ...v, server: true })),
   ];
-  if (shared && !availableViews.some((v) => v.server && v.id === workspace.id))
+  // Use the active draft's name and experiment, not a potentially newer summary.
+  if (shared)
     availableViews.push({
       ...workspace,
       revision: serverWorkspace!.revision,
@@ -1147,9 +1152,23 @@ function workspaceToolbar(workspace: Workspace) {
     o.value = view.id;
     views.append(o);
   }
+  if (
+    shared &&
+    !library.views.some((v) => v.experimentId === workspace.experimentId)
+  ) {
+    // A direct link need not have a local view yet. Create the ordinary
+    // experiment Overview only if the user chooses to leave the shared view.
+    const overview = element("option", "", "Overview");
+    overview.value = "";
+    views.prepend(overview);
+  }
   views.value = workspace.id;
   views.onchange = () => {
     scrollPositions.set(workspace.id, window.scrollY);
+    if (shared && !views.value) {
+      navigate(workspace.experimentId, "charts");
+      return;
+    }
     if (
       serverViews.some((v) => v.id === views.value) ||
       (shared && views.value === workspace.id)
@@ -1502,10 +1521,18 @@ function workspaceToolbar(workspace: Workspace) {
 }
 
 // Preview only: the model and grid stay untouched until a valid drop commits.
-let draggedCard: { id: string; workspaceId: string } | undefined;
+let draggedCard:
+  | {
+      id: string;
+      workspaceId: string;
+      header: HTMLElement;
+      workspaceSnapshot: string;
+    }
+  | undefined;
 const dropIndicator = element("div", "card-drop-indicator");
 dropIndicator.setAttribute("aria-hidden", "true");
 function clearCardDrag() {
+  draggedCard?.header.classList.remove("card-reordering");
   draggedCard = undefined;
   dropIndicator.remove();
 }
@@ -1613,7 +1640,13 @@ function renderCharts(workspace: Workspace) {
   const focusedSection = focused?.closest<HTMLElement>(".chart-section");
   const focusedHeader = focused?.closest(".section-heading");
   const focusToggle = focused?.classList.contains("section-toggle");
-  clearCardDrag();
+  // Poll errors and unchanged catalog refreshes must not swallow an active drop.
+  if (
+    draggedCard &&
+    (draggedCard.workspaceId !== workspace.id ||
+      draggedCard.workspaceSnapshot !== JSON.stringify(workspace))
+  )
+    clearCardDrag();
   runDrawer?.update(catalog, workspace.selectedRunIds);
   workspaceToolbar(workspace);
   const dashboard = $("dashboard");
@@ -1826,24 +1859,38 @@ function renderCharts(workspace: Workspace) {
           entry.context = contextKey;
         }
       }
-      // Bind to the title itself, never to image/native pan or card controls.
-      // Refresh this after setSpec too, since edits can rebuild the title.
-      const title = entry.host.querySelector<HTMLElement>("h2,h3");
-      if (title) {
-        title.draggable = true;
-        title.title = "Drag to reorder plots or move to another section";
-        title.ondragstart = (e) => {
-          if (
-            (e.target as Element).closest(
-              "button,input,select,textarea,a,[contenteditable]",
-            )
-          )
+      // The header (including its title) is the handle, not the plot or controls.
+      const cardHeader = entry.host.querySelector<HTMLElement>(".card-header");
+      if (cardHeader) {
+        const isControl = (target: EventTarget | null) =>
+          target instanceof Element &&
+          !!target.closest(
+            "button,input,select,textarea,a,summary,.card-menu,[contenteditable],[role=button]",
+          );
+        cardHeader.classList.add("card-reorder-handle");
+        if (!cardHeader.hasAttribute("draggable")) cardHeader.draggable = true;
+        // A native drag targets the draggable ancestor, not necessarily the
+        // button under the pointer. Disable that ancestor before such a drag.
+        cardHeader.onpointerdown = (event) => {
+          cardHeader.draggable =
+            event.isPrimary && event.button === 0 && !isControl(event.target);
+        };
+        cardHeader.ondragstart = (event) => {
+          if (!cardHeader.draggable || isControl(event.target)) {
+            event.preventDefault();
             return;
+          }
           sectionDrag.cancel();
           clearCardDrag();
-          draggedCard = { id: spec.id, workspaceId: workspace.id };
-          e.dataTransfer?.setData("application/x-nset-card", spec.id);
-          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+          draggedCard = {
+            id: spec.id,
+            workspaceId: workspace.id,
+            header: cardHeader,
+            workspaceSnapshot: JSON.stringify(workspace),
+          };
+          cardHeader.classList.add("card-reordering");
+          event.dataTransfer?.setData("application/x-nset-card", spec.id);
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
         };
       }
       entry.host.classList.toggle("wide", spec.size === "wide");
