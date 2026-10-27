@@ -25,6 +25,12 @@
 .card-header.card-reorder-handle {
   cursor: grab;
   user-select: none;
+  touch-action: none;
+}
+body.chart-dragging,
+body.chart-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 .card-header.card-reordering {
   cursor: grabbing;

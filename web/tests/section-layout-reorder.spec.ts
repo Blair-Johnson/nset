@@ -129,13 +129,28 @@ async function fixture(page: Page, empty = false, extraSection = false) {
       return result;
     };
     state.dragEvents = [];
-    for (const type of ["dragstart", "dragover", "drop", "dragend", "blur"]) {
+    for (const type of [
+      "pointerdown",
+      "pointerup",
+      "pointercancel",
+      "gotpointercapture",
+      "lostpointercapture",
+      "dragstart",
+      "dragover",
+      "drop",
+      "dragend",
+      "blur",
+    ]) {
       document.addEventListener(
         type,
         (event) => {
-          const e = event as DragEvent;
+          const e = event as PointerEvent;
           state.dragEvents.push({
             type,
+            pointerId: e.pointerId,
+            pointerType: e.pointerType,
+            buttons: e.buttons,
+            trusted: e.isTrusted,
             x: e.clientX,
             y: e.clientY,
             target: (e.target as Element)
@@ -192,9 +207,8 @@ async function beginDrag(
   id: string,
   origin: "title" | "header padding" = "title",
 ) {
-  const handle = card(page, id).locator(
-    origin === "title" ? ".card-title" : ".card-header",
-  );
+  const header = card(page, id).locator(".card-header");
+  const handle = origin === "title" ? header.locator(".card-title") : header;
   await handle.scrollIntoViewIfNeeded();
   const r = (await handle.boundingBox())!;
   const x = r.x + (origin === "title" ? Math.min(30, r.width / 2) : 2);
@@ -206,9 +220,39 @@ async function beginDrag(
         { x, y },
       ),
     ).toBe(true);
+  await header.evaluate((node) =>
+    node.addEventListener(
+      "pointerdown",
+      (event) => {
+        (window as any).reorderTest.chartPointer = (
+          event as PointerEvent
+        ).pointerId;
+      },
+      { once: true },
+    ),
+  );
+  await expect(header).toHaveJSProperty("draggable", false);
   await page.mouse.move(x, y);
   await page.mouse.down();
+  await page.mouse.move(x + 2, y + 1);
+  await expect(
+    page.locator(".card-reordering, .card-drop-indicator"),
+  ).toHaveCount(0);
+  expect(
+    await header.evaluate((node) =>
+      node.hasPointerCapture((window as any).reorderTest.chartPointer),
+    ),
+  ).toBe(false);
   await page.mouse.move(x + 20, y + 5, { steps: 5 });
+  await expect(header).toHaveClass(/card-reordering/);
+  await expect(header).toHaveJSProperty("draggable", false);
+  expect(
+    await header.evaluate((node) =>
+      node.hasPointerCapture((window as any).reorderTest.chartPointer),
+    ),
+  ).toBe(true);
+  await expect(page.locator("#dashboard")).not.toHaveClass(/section-dragging/);
+  await expect(card(page, id).locator("canvas")).toBeVisible();
 }
 async function hoverSlot(
   page: Page,
@@ -220,7 +264,6 @@ async function hoverSlot(
   const x = r.x + r.width * (single ? 0.5 : after ? 0.8 : 0.2);
   const y = r.y + r.height * (single ? (after ? 0.8 : 0.2) : 0.35);
   await page.mouse.move(x, y, { steps: 12 });
-  await page.mouse.move(x, y); // HTML5 dragover follows dragenter.
   await expect(page.locator(".card-drop-indicator")).toBeVisible();
 }
 async function move(
@@ -259,7 +302,7 @@ async function identities(page: Page) {
   });
 }
 
-test("native title drag inserts first, middle and last across wrapped rows without reloads", async ({
+test("pointer title drag inserts first, middle and last across wrapped rows without reloads", async ({
   page,
 }, info) => {
   const histories = await fixture(page);
@@ -305,7 +348,6 @@ test("cross-section insertion preserves source identity and supports an empty de
   const grid = section(page, "second").locator(".chart-grid");
   const r = (await grid.boundingBox())!;
   await page.mouse.move(r.x + 100, r.y + 20, { steps: 12 });
-  await page.mouse.move(r.x + 100, r.y + 20);
   await expect(page.locator(".card-drop-indicator")).toBeVisible();
   await capture(page, info, "empty-section-drop");
   await page.mouse.up();
@@ -324,11 +366,26 @@ test("cross-section insertion preserves source identity and supports an empty de
 });
 
 for (const origin of ["header padding", "title"] as const) {
-  test(`native ${origin} drag reorders and moves across sections without rebuilding charts`, async ({
+  test(`pointer ${origin} drag reorders with native dragstart and drop blocked`, async ({
     page,
   }) => {
     const histories = await fixture(page, true);
     const loads = histories();
+    await page.evaluate(() => {
+      // A browser/host that cancels native DnD must not disable chart reordering.
+      const state = (window as any).reorderTest;
+      state.blockedNativeEvents = [];
+      for (const type of ["dragstart", "drop"])
+        document.addEventListener(
+          type,
+          (event) => {
+            state.blockedNativeEvents.push(type);
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          },
+          { capture: true },
+        );
+    });
     await beginDrag(page, "a", origin);
     await hoverSlot(page, "d", true);
     await page.mouse.up();
@@ -338,10 +395,15 @@ for (const origin of ["header padding", "title"] as const) {
     const grid = section(page, "second").locator(".chart-grid");
     const r = (await grid.boundingBox())!;
     await page.mouse.move(r.x + 100, r.y + 20, { steps: 12 });
-    await page.mouse.move(r.x + 100, r.y + 20);
     await expect(page.locator(".card-drop-indicator")).toBeVisible();
     await page.mouse.up();
-    await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
+    await expect(
+      page.locator(".card-reordering, .card-drop-indicator"),
+    ).toHaveCount(0);
+    await expect(card(page, "a").locator(".card-header")).toHaveJSProperty(
+      "draggable",
+      false,
+    );
     expect(await order(page)).toEqual(["b", "c", "d"]);
     expect(await order(page, "second")).toEqual(["a"]);
     expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
@@ -350,12 +412,10 @@ for (const origin of ["header padding", "title"] as const) {
       2,
     );
     expect(
-      await page.evaluate(() =>
-        (window as any).reorderTest.dragEvents
-          .filter((event: any) => event.type === "dragstart")
-          .map((event: any) => event.target),
+      await page.evaluate(
+        () => (window as any).reorderTest.blockedNativeEvents,
       ),
-    ).toEqual(["a", "a"]);
+    ).toEqual([]);
     const persisted = JSON.parse((await saved(page))!);
     expect(
       persisted.views[0].sections.map((s: any) =>
@@ -375,7 +435,7 @@ test("chart headers and titles advertise drag without tooltips while section tit
   const header = card(page, "a").locator(".card-header");
   const title = card(page, "a").locator(".card-title");
   await expect(header).toHaveClass(/card-reorder-handle/);
-  await expect(header).toHaveAttribute("draggable", "true");
+  await expect(header).toHaveJSProperty("draggable", false);
   for (const handle of [header, title]) {
     await expect(handle).toHaveCSS("cursor", "grab");
     await expect(handle).toHaveCSS("user-select", "none");
@@ -435,16 +495,13 @@ test("real mouse drags on chart toolbar controls, nested SVG and menu summary ne
       ).toBe(true);
     await page.mouse.move(x, y);
     await page.mouse.down();
+    await expect(header).toHaveJSProperty("draggable", false);
     await page.mouse.move(x + 20, y + 8, { steps: 5 });
     const destination = (await card(page, "b").boundingBox())!;
     await page.mouse.move(
       destination.x + destination.width * 0.8,
       destination.y + destination.height * 0.35,
       { steps: 12 },
-    );
-    await page.mouse.move(
-      destination.x + destination.width * 0.8,
-      destination.y + destination.height * 0.35,
     );
     await expect(
       page.locator(".card-reordering, .card-drop-indicator"),
@@ -467,7 +524,7 @@ test("real mouse drags on chart toolbar controls, nested SVG and menu summary ne
     );
   }
   expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
-  // Excluding a control gesture must not leave the shared header disabled.
+  // Excluding a control gesture must not disable the next header gesture.
   await beginDrag(page, "a", "header padding");
   await hoverSlot(page, "b", true);
   await page.mouse.up();
@@ -475,46 +532,122 @@ test("real mouse drags on chart toolbar controls, nested SVG and menu summary ne
   expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
 });
 
-test("Escape, invalid targets, no-op and foreign drags clear feedback without saving", async ({
+test("chart Escape, pointercancel, lost capture, blur, outside and no-op drops never save", async ({
+  page,
+}) => {
+  await fixture(page, false, true);
+  const before = await saved(page);
+  for (const reason of [
+    "Escape",
+    "pointercancel",
+    "lostcapture",
+    "blur",
+    "outside",
+    "noop",
+  ]) {
+    await test.step(reason, async () => {
+      await beginDrag(page, "a");
+      await hoverSlot(page, reason === "noop" ? "a" : "d", reason !== "noop");
+      await expectMixedSections(page); // Chart drags never temporarily fold sections.
+      expect(await saved(page)).toBe(before);
+      expect(
+        await page.evaluate(() => (window as any).reorderTest.writes),
+      ).toBe(0);
+      if (reason === "Escape") await page.keyboard.press("Escape");
+      else if (reason === "outside") {
+        await page.mouse.move(10, 10, { steps: 4 });
+        await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
+      } else if (reason !== "noop") {
+        await card(page, "a")
+          .locator(".card-header")
+          .evaluate((header, reason) => {
+            const pointerId = (window as any).reorderTest.chartPointer;
+            // Only the terminal cancellation signal is injected; activation and movement are real mouse input.
+            if (reason === "blur") window.dispatchEvent(new Event("blur"));
+            else if (reason === "pointercancel")
+              header.dispatchEvent(
+                new PointerEvent("pointercancel", {
+                  pointerId,
+                  pointerType: "mouse",
+                  isPrimary: true,
+                  bubbles: true,
+                }),
+              );
+            else header.releasePointerCapture(pointerId);
+          }, reason);
+      }
+      if (reason !== "outside" && reason !== "noop") {
+        // Deliver pending lostpointercapture and prove held-pointer motion cannot revive a cancelled drag.
+        const r = (await card(page, "d").boundingBox())!;
+        await page.mouse.move(r.x + r.width * 0.8 + 2, r.y + r.height * 0.35);
+        await expect(
+          page.locator(".card-reordering, .card-drop-indicator"),
+        ).toHaveCount(0);
+      }
+      await page.mouse.up();
+      await expect(
+        page.locator(".card-reordering, .card-drop-indicator"),
+      ).toHaveCount(0);
+      expect(
+        await card(page, "a")
+          .locator(".card-header")
+          .evaluate((header) =>
+            header.hasPointerCapture((window as any).reorderTest.chartPointer),
+          ),
+      ).toBe(false);
+      await expectMixedSections(page);
+      expect(await order(page)).toEqual(["a", "b", "c", "d"]);
+      expect(await order(page, "second")).toEqual(["e", "f"]);
+      expect(await sectionOrder(page)).toEqual(["first", "second", "third"]);
+      expect(await saved(page)).toBe(before);
+      expect(
+        await page.evaluate(() => (window as any).reorderTest.writes),
+      ).toBe(0);
+      expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
+    });
+  }
+  await move(page, "a", "d", true);
+  expect(await order(page)).toEqual(["b", "c", "d", "a"]);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(1);
+});
+
+test("chart pointer edge scrolling stops on cancellation without saving", async ({
   page,
 }) => {
   await fixture(page);
+  await page.setViewportSize({ width: 1440, height: 700 });
   const before = await saved(page);
-  await beginDrag(page, "d");
-  await hoverSlot(page, "a", false);
+  await beginDrag(page, "a");
+  const scrollBefore = await page.evaluate(() => window.scrollY);
+  const r = (await card(page, "a").boundingBox())!;
+  await page.mouse.move(r.x + r.width / 2, 692, { steps: 8 });
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY), {
+      intervals: [50],
+      timeout: 3000,
+    })
+    .toBeGreaterThan(scrollBefore + 24);
+  await expect(card(page, "a").locator(".card-header")).toHaveClass(
+    /card-reordering/,
+  );
+  expect(await saved(page)).toBe(before);
   await page.keyboard.press("Escape");
   await page.mouse.up();
-  await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
-  await beginDrag(page, "d");
-  await hoverSlot(page, "a", false);
-  await page.mouse.move(10, 10, { steps: 5 });
-  await page.mouse.up();
-  await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
-  await move(page, "a", "a", false);
-  await section(page, "first")
-    .locator(".chart-grid")
-    .evaluate((grid) => {
-      const transfer = new DataTransfer();
-      transfer.setData("application/x-nset-card", "does-not-exist");
-      grid.dispatchEvent(
-        new DragEvent("dragover", {
-          bubbles: true,
-          cancelable: true,
-          dataTransfer: transfer,
-        }),
-      );
-      grid.dispatchEvent(
-        new DragEvent("drop", {
-          bubbles: true,
-          cancelable: true,
-          dataTransfer: transfer,
-        }),
-      );
-    });
-  await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
+  await expect(
+    page.locator(".card-reordering, .card-drop-indicator"),
+  ).toHaveCount(0);
+  const scrollAfter = await page.evaluate(() => window.scrollY);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollAfter);
   expect(await order(page)).toEqual(["a", "b", "c", "d"]);
   expect(await saved(page)).toBe(before);
   expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
+  expect(Object.values(await identities(page)).every(Boolean)).toBe(true);
 });
 
 test("failed storage rolls order back transactionally and next drag still works", async ({
@@ -669,34 +802,29 @@ test.afterEach(async ({ page }, info) => {
   }
 });
 
-test("chart content and controls reject synthetic reorder and keyboard Move up/down remains available", async ({
+test("real plot gestures never reorder and keyboard Move up/down remains available", async ({
   page,
 }) => {
   await fixture(page);
   const before = await saved(page);
-  const types = await card(page, "a").evaluate((host) => {
-    const result: string[][] = [];
-    for (const target of host.querySelectorAll(
-      "canvas,button,input,select,.u-over",
-    )) {
-      const dataTransfer = new DataTransfer();
-      target.dispatchEvent(
-        new DragEvent("dragstart", {
-          bubbles: true,
-          cancelable: true,
-          dataTransfer,
-        }),
-      );
-      result.push([...dataTransfer.types]);
-      target.dispatchEvent(new DragEvent("dragend", { bubbles: true }));
-    }
-    return result;
-  });
-  expect(types.length).toBeGreaterThan(4);
-  expect(types.every((list) => !list.includes("application/x-nset-card"))).toBe(
-    true,
+  const plot = card(page, "a").locator("canvas").first();
+  await plot.scrollIntoViewIfNeeded();
+  const r = (await plot.boundingBox())!;
+  const destination = (await card(page, "b").boundingBox())!;
+  await page.mouse.move(r.x + r.width * 0.25, r.y + r.height * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(
+    destination.x + destination.width * 0.8,
+    destination.y + destination.height * 0.35,
+    { steps: 12 },
   );
+  await expect(
+    page.locator(".card-reordering, .card-drop-indicator"),
+  ).toHaveCount(0);
+  await page.mouse.up();
+  expect(await order(page)).toEqual(["a", "b", "c", "d"]);
   expect(await saved(page)).toBe(before);
+  expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
   await card(page, "a").getByLabel("Chart actions", { exact: true }).focus();
   await page.keyboard.press("Enter");
   await card(page, "a")
@@ -1127,10 +1255,6 @@ test("a changed view cancels an in-flight chart drag instead of applying a stale
     target.x + target.width * 0.8,
     target.y + target.height * 0.35,
   );
-  await page.mouse.move(
-    target.x + target.width * 0.8,
-    target.y + target.height * 0.35,
-  );
   await page.mouse.up();
   expect(await order(page)).toEqual(["a", "b", "c", "d"]);
   expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(1);
@@ -1166,12 +1290,12 @@ test("refresh cannot turn a held toolbar button into a chart drag", async ({
     const r = (await button.boundingBox())!;
     await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
     await page.mouse.down();
-    await expect(header).toHaveAttribute("draggable", "false");
+    await expect(header).toHaveJSProperty("draggable", false);
   } finally {
     release();
   }
   await expect(page.locator("#refresh")).toBeEnabled();
-  await expect(header).toHaveAttribute("draggable", "false");
+  await expect(header).toHaveJSProperty("draggable", false);
   const r = (await card(page, "b").boundingBox())!;
   await page.mouse.move(r.x + r.width * 0.8, r.y + r.height * 0.35, {
     steps: 12,

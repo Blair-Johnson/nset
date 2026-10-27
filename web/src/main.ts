@@ -10,6 +10,7 @@ import { appendRxCatalog } from "./records";
 import "./style.css";
 import "./section-drag.css";
 import { SectionDrag } from "./section-drag";
+import { ChartDrag } from "./chart-drag";
 import { Api, type Run } from "./api";
 import {
   ServerWorkspace,
@@ -394,6 +395,7 @@ const cards = new Map<
 >();
 const sectionNodes = new Map<string, HTMLElement>();
 const sectionDrag = new SectionDrag();
+const chartDrag = new ChartDrag();
 const scrollPositions = new Map<string, number>();
 let previousRoute = "";
 let suspendedDashboard: DocumentFragment | undefined;
@@ -479,6 +481,7 @@ function commitLibrary(mutate: () => void): boolean {
 }
 function disposeCards() {
   sectionDrag.cancel();
+  chartDrag.cancel();
   chartDetails.close(false);
   runDrawer?.destroy();
   runDrawer = undefined;
@@ -491,6 +494,7 @@ function disposeCards() {
 }
 function suspendDashboard() {
   sectionDrag.cancel();
+  chartDrag.cancel();
   chartDetails.close(false);
   if (!currentWorkspaceId || suspendedDashboard) return;
   suspendedFocus = $("page").contains(document.activeElement)
@@ -1521,35 +1525,57 @@ function workspaceToolbar(workspace: Workspace) {
 }
 
 // Preview only: the model and grid stay untouched until a valid drop commits.
-let draggedCard:
-  | {
-      id: string;
-      workspaceId: string;
-      header: HTMLElement;
-      workspaceSnapshot: string;
-    }
-  | undefined;
-const dropIndicator = element("div", "card-drop-indicator");
-dropIndicator.setAttribute("aria-hidden", "true");
-function clearCardDrag() {
-  draggedCard?.header.classList.remove("card-reordering");
-  draggedCard = undefined;
-  dropIndicator.remove();
-}
-document.addEventListener("dragend", clearCardDrag);
-document.addEventListener("drop", clearCardDrag);
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") clearCardDrag();
-});
-document.addEventListener("dragover", (event) => {
+function beginCardDrag(
+  event: PointerEvent,
+  header: HTMLElement,
+  workspace: Workspace,
+  id: string,
+) {
+  if (!event.isPrimary || event.button !== 0) return;
   if (
-    !(event.target instanceof Element) ||
-    !event.target.closest(".chart-grid")
+    event.target instanceof Element &&
+    event.target.closest(
+      "button,input,select,textarea,a,summary,.card-menu,[contenteditable],[role=button]",
+    )
   )
-    dropIndicator.remove();
-});
-window.addEventListener("blur", clearCardDrag);
-window.addEventListener("scroll", () => dropIndicator.remove(), true);
+    return;
+  sectionDrag.cancel();
+  const dashboard = $("dashboard");
+  const snapshot = JSON.stringify(workspace),
+    search = chartSearch;
+  chartDrag.begin(event, header, {
+    valid: () =>
+      activeChartWorkspace(workspace.id) === workspace &&
+      JSON.stringify(workspace) === snapshot &&
+      chartSearch === search,
+    target: (x, y) => {
+      const grid = document
+        .elementFromPoint(x, y)
+        ?.closest<HTMLElement>(".chart-grid");
+      if (!grid || !dashboard.contains(grid) || grid.hidden) return;
+      const sectionId =
+        grid.closest<HTMLElement>(".chart-section")?.dataset.sectionId;
+      if (!sectionId) return;
+      return { ...sectionDropSlot(grid, x, y), sectionId };
+    },
+    drop: (slot) => {
+      const found = locate(workspace, id);
+      const section = workspace.sections.find((s) => s.id === slot.sectionId);
+      if (!found || !section) return;
+      const target = slot.id
+        ? section.cards.findIndex((card) => card.id === slot.id)
+        : 0;
+      if (target < 0) return;
+      let index = target + Number(slot.after);
+      if (found.section === section && found.index < index) index--;
+      if (found.section === section && found.index === index) return;
+      change(workspace, () => {
+        found.section.cards.splice(found.index, 1);
+        section.cards.splice(index, 0, found.card);
+      });
+    },
+  });
+}
 
 function sectionDropSlot(grid: HTMLElement, x: number, y: number) {
   const cells = [
@@ -1640,13 +1666,8 @@ function renderCharts(workspace: Workspace) {
   const focusedSection = focused?.closest<HTMLElement>(".chart-section");
   const focusedHeader = focused?.closest(".section-heading");
   const focusToggle = focused?.classList.contains("section-toggle");
-  // Poll errors and unchanged catalog refreshes must not swallow an active drop.
-  if (
-    draggedCard &&
-    (draggedCard.workspaceId !== workspace.id ||
-      draggedCard.workspaceSnapshot !== JSON.stringify(workspace))
-  )
-    clearCardDrag();
+  // An unchanged refresh keeps the gesture; changed workspace state cancels it.
+  chartDrag.validate();
   runDrawer?.update(catalog, workspace.selectedRunIds);
   workspaceToolbar(workspace);
   const dashboard = $("dashboard");
@@ -1735,53 +1756,6 @@ function renderCharts(workspace: Workspace) {
     header.append(menu);
     const grid = node.querySelector<HTMLElement>("[data-role=section-cards]")!;
     grid.hidden = section.collapsed;
-    const acceptsDrag = (e: DragEvent) =>
-      draggedCard?.workspaceId === workspace.id &&
-      !!locate(workspace, draggedCard.id) &&
-      !!e.dataTransfer?.types.includes("application/x-nset-card");
-    grid.ondragover = (e) => {
-      if (!acceptsDrag(e)) {
-        dropIndicator.remove();
-        return;
-      }
-      e.preventDefault();
-      e.dataTransfer!.dropEffect = "move";
-      const slot = sectionDropSlot(grid, e.clientX, e.clientY);
-      Object.assign(dropIndicator.style, {
-        left: `${slot.left}px`,
-        top: `${slot.top}px`,
-        width: `${slot.width}px`,
-        height: `${slot.height}px`,
-      });
-      document.body.append(dropIndicator);
-    };
-    grid.ondragleave = (e) => {
-      if (!(e.relatedTarget instanceof Node) || !grid.contains(e.relatedTarget))
-        dropIndicator.remove();
-    };
-    grid.ondrop = (e) => {
-      if (!acceptsDrag(e)) {
-        clearCardDrag();
-        return;
-      }
-      e.preventDefault();
-      const id = e.dataTransfer!.getData("application/x-nset-card");
-      const found = id === draggedCard!.id ? locate(workspace, id) : null;
-      const slot = sectionDropSlot(grid, e.clientX, e.clientY);
-      clearCardDrag();
-      if (!found) return;
-      const target = slot.id
-        ? section.cards.findIndex((card) => card.id === slot.id)
-        : 0;
-      if (target < 0) return;
-      let index = target + Number(slot.after);
-      if (found.section === section && found.index < index) index--;
-      if (found.section === section && found.index === index) return;
-      change(workspace, () => {
-        found.section.cards.splice(found.index, 1);
-        section.cards.splice(index, 0, found.card);
-      });
-    };
     for (const [cardIndex, spec] of section.cards.entries()) {
       const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? workspace.selectedRunIds.join(",") : "explicit"}:${labelMode(workspace)}:${JSON.stringify(workspace.runLabels ?? {})}`;
       keep.add(spec.id);
@@ -1862,36 +1836,11 @@ function renderCharts(workspace: Workspace) {
       // The header (including its title) is the handle, not the plot or controls.
       const cardHeader = entry.host.querySelector<HTMLElement>(".card-header");
       if (cardHeader) {
-        const isControl = (target: EventTarget | null) =>
-          target instanceof Element &&
-          !!target.closest(
-            "button,input,select,textarea,a,summary,.card-menu,[contenteditable],[role=button]",
-          );
         cardHeader.classList.add("card-reorder-handle");
-        if (!cardHeader.hasAttribute("draggable")) cardHeader.draggable = true;
-        // A native drag targets the draggable ancestor, not necessarily the
-        // button under the pointer. Disable that ancestor before such a drag.
-        cardHeader.onpointerdown = (event) => {
-          cardHeader.draggable =
-            event.isPrimary && event.button === 0 && !isControl(event.target);
-        };
-        cardHeader.ondragstart = (event) => {
-          if (!cardHeader.draggable || isControl(event.target)) {
-            event.preventDefault();
-            return;
-          }
-          sectionDrag.cancel();
-          clearCardDrag();
-          draggedCard = {
-            id: spec.id,
-            workspaceId: workspace.id,
-            header: cardHeader,
-            workspaceSnapshot: JSON.stringify(workspace),
-          };
-          cardHeader.classList.add("card-reordering");
-          event.dataTransfer?.setData("application/x-nset-card", spec.id);
-          if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-        };
+        cardHeader.draggable = false;
+        cardHeader.ondragstart = (event) => event.preventDefault();
+        cardHeader.onpointerdown = (event) =>
+          beginCardDrag(event, cardHeader, workspace, spec.id);
       }
       entry.host.classList.toggle("wide", spec.size === "wide");
       entry.host.toggleAttribute("data-dimensions", !!spec.layout);
@@ -1946,6 +1895,7 @@ function renderCharts(workspace: Workspace) {
 }
 function applyChartFilter(workspace: Workspace) {
   sectionDrag.cancel();
+  chartDrag.validate();
   const query = chartSearch.trim().toLowerCase();
   let visible = 0;
   for (const section of workspace.sections) {
