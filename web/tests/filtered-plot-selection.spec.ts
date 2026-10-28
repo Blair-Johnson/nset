@@ -127,11 +127,20 @@ async function fixture(page: Page, kind = "native") {
     if (path === "/api/rx/run-filter") {
       state.scans++;
       const mode = state.mode;
-      if (mode === "partial" && !body.cursor) return route.fulfill({ json: {
-        source_generation: "generation",
-        runs: body.runs.map((run: string) => ({ uid: run, conditions: body.conditions.map(() => run === uid(1) ? true : null) })),
-        cursor: "next", diagnostics: { scanned: 1, partial: true },
-      } });
+      if (mode === "partial" && !body.cursor)
+        return route.fulfill({
+          json: {
+            source_generation: "generation",
+            runs: body.runs.map((run: string) => ({
+              uid: run,
+              conditions: body.conditions.map(() =>
+                run === uid(1) ? true : null,
+              ),
+            })),
+            cursor: "next",
+            diagnostics: { scanned: 1, partial: true },
+          },
+        });
       if (mode === "hold" || mode === "partial")
         await new Promise<void>((resolve) => {
           state.release = resolve;
@@ -284,8 +293,9 @@ test("search prunes live charts and persistence; typing keeps focus; both lists 
     .getByRole("checkbox", { name: "Show r1", exact: true })
     .check();
   await expectSelection(page, "native", [1]);
-  await drawer(page)
-    .getByRole("button", { name: "Open run table", exact: true })
+  await page
+    .locator(".workspace-toolbar")
+    .getByRole("button", { name: "Runs", exact: true })
     .click();
   const tableSearch = page.getByLabel("Search runs, parameters or tags", {
     exact: true,
@@ -514,7 +524,9 @@ test("text exclusions during pending Event evidence stay removed after resolutio
   }
 });
 
-test("unchecking the last confirmed match preserves unrelated pending intent", async ({ page }) => {
+test("unchecking the last confirmed match preserves unrelated pending intent", async ({
+  page,
+}) => {
   const state = await fixture(page, "rx");
   state.mode = "partial";
   try {
@@ -522,34 +534,54 @@ test("unchecking the last confirmed match preserves unrelated pending intent", a
     await expect.poll(() => state.scans).toBe(2);
     await expectSelection(page, "rx", [1], [2, 3]);
     await menu.locator("summary").click();
-    await drawer(page).getByRole("checkbox", { name: "Show r1", exact: true }).uncheck();
+    await drawer(page)
+      .getByRole("checkbox", { name: "Show r1", exact: true })
+      .uncheck();
     await expectSelection(page, "rx", [], [2, 3]);
     state.release();
     await expectSelection(page, "rx", [2]);
-  } finally { state.release(); }
+  } finally {
+    state.release();
+  }
 });
 
-test("the main table can explicitly clear pending-only selection", async ({ page }) => {
+test("the main table can explicitly clear pending-only selection", async ({
+  page,
+}) => {
   const state = await fixture(page, "rx");
   state.mode = "error";
   const menu = await presence(page, "event");
   await expectSelection(page, "rx", [], [1, 2, 3]);
   await menu.locator("summary").click();
-  await drawer(page).getByRole("button", { name: "Open run table", exact: true }).click();
+  await page
+    .locator(".workspace-toolbar")
+    .getByRole("button", { name: "Runs", exact: true })
+    .click();
   await expect(page.locator(".selection-count")).toHaveText("0 selected");
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await expect.poll(() => saved(page)).toEqual({ selected: [], pending: [] });
-  await page.getByRole("navigation", { name: "Experiment views" }).getByRole("button", { name: "Charts", exact: true }).click();
-  await drawer(page).getByRole("button", { name: "Clear filters", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Experiment views" })
+    .getByRole("button", { name: "Charts", exact: true })
+    .click();
+  await drawer(page)
+    .getByRole("button", { name: "Clear filters", exact: true })
+    .click();
   await expectSelection(page, "rx", []);
 });
 
 for (const restorePending of [false, true]) {
-  test(`Undo ${restorePending ? "restores cleared pending intent" : "removes pending intent absent from its snapshot"}`, async ({ page }) => {
+  test(`Undo ${restorePending ? "restores cleared pending intent" : "removes pending intent absent from its snapshot"}`, async ({
+    page,
+  }) => {
     const state = await fixture(page, "rx");
     if (!restorePending) {
-      await drawer(page).getByRole("button", { name: "Clear selection", exact: true }).click();
-      await drawer(page).getByRole("checkbox", { name: "Show r1", exact: true }).check();
+      await drawer(page)
+        .getByRole("button", { name: "Clear selection", exact: true })
+        .click();
+      await drawer(page)
+        .getByRole("checkbox", { name: "Show r1", exact: true })
+        .check();
       await expectSelection(page, "rx", [1]);
     }
     state.mode = "hold";
@@ -559,15 +591,24 @@ for (const restorePending of [false, true]) {
       await expectSelection(page, "rx", [], restorePending ? [1, 2, 3] : [1]);
       await menu.locator("summary").click();
       if (restorePending) {
-        await drawer(page).getByRole("button", { name: "Clear selection", exact: true }).click();
+        await drawer(page)
+          .getByRole("button", { name: "Clear selection", exact: true })
+          .click();
         await expectSelection(page, "rx", []);
       }
       await page.getByRole("button", { name: "Undo", exact: true }).click();
       await expectSelection(page, "rx", [], restorePending ? [1, 2, 3] : []);
       state.release();
-      await expect(page.locator(".run-filter-control:visible")).toHaveAttribute("aria-busy", "false");
+      await expect(page.locator(".run-filter-control:visible")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
       await expectSelection(page, "rx", restorePending ? [1, 2] : []);
-      await (await openFilter(page)).getByRole("button", { name: "Clear all", exact: true }).click();
+      await (
+        await openFilter(page)
+      )
+        .getByRole("button", { name: "Clear all", exact: true })
+        .click();
       await expectSelection(page, "rx", restorePending ? [1, 2] : []);
     } finally {
       state.release();

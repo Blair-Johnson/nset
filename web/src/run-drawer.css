@@ -10,7 +10,7 @@
 }
 .run-pane {
   position: sticky;
-  top: 46px;
+  top: var(--run-pane-top, 46px);
   flex: 0 0 var(--run-pane-width, 300px);
   width: var(--run-pane-width, 300px);
   height: var(--run-pane-height, calc(100dvh - 160px));
@@ -460,9 +460,12 @@
   text-overflow: ellipsis;
   font-size: 12px;
 }
-.drawer-run-status {
-  font-size: 9px;
-  background: transparent;
+.run-drawer-row > .run-status-control {
+  justify-self: end;
+  max-width: 118px;
+}
+.run-drawer-row .run-status-error {
+  max-width: 118px;
 }
 .run-drawer-footer {
   justify-content: space-between;

@@ -56,7 +56,9 @@ export function loadRunSearch(id: string): { query: string; status: string } {
     const saved = JSON.parse(localStorage.getItem(preferenceKey(id)) ?? "{}");
     return {
       query: typeof saved?.query === "string" ? saved.query : "",
-      status: ["all", "running", "finished", "failed"].includes(saved?.status)
+      status: ["all", "running", "finished", "failed", "canceled"].includes(
+        saved?.status,
+      )
         ? saved.status
         : "all",
     };

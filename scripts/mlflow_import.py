@@ -46,7 +46,7 @@ MAX_IMAGE_BYTES = 32 * 1024 * 1024
 FLOAT_MAX = sys.float_info.max  # MLflow's SQL store encodes +/-inf as +/-float max
 TAG_PREFIX = "mlflow_import."
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-STATUS = {"FINISHED": "finished", "FAILED": "failed", "KILLED": "failed",
+STATUS = {"FINISHED": "finished", "FAILED": "failed", "KILLED": "canceled",
           "RUNNING": "running", "SCHEDULED": "running"}
 # mlflow.log_image: "<key with / as #><sep>step<sep>N<sep>timestamp<sep>MS<sep><uuid>.png"
 # with sep "+" (MLflow >= 2.16) or "%" (earlier); "+compressed.webp" files are thumbnails.

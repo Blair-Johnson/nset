@@ -448,7 +448,17 @@ async fn finish_pending(ctx: &Compat, key: &str) -> Result<()> {
         ctx.ingest_metrics(id, text(&batch[0])?, metrics).await?;
     }
     if pending["patch"] == true {
-        let status = run["state"].as_str().map(str::to_owned);
+        // Cached protocol state is not an explicit status mutation. Persist the
+        // distinction so metadata retries/recovery cannot reopen terminal runs.
+        // Legacy pending operations did not distinguish an explicit resume from
+        // cached "running"; conservatively do not resume on their replay.
+        let patch_status = pending["patch_status"]
+            .as_bool()
+            .unwrap_or(run["state"].as_str() != Some("running"));
+        let status = run["state"]
+            .as_str()
+            .filter(|_| patch_status)
+            .map(str::to_owned);
         ctx.db
             .patch_run(
                 id.to_owned(),
@@ -573,7 +583,7 @@ async fn upsert(ctx: &Compat, values: &Map<String, Value>) -> Result<Value> {
     ctx.put(
         PENDING,
         &key,
-        json!({"schema":SCHEMA,"run":run,"batches":[],"rows":{},"patch":true}),
+        json!({"schema":SCHEMA,"run":run,"batches":[],"rows":{},"patch":true,"patch_status":values.get("state").is_some_and(Value::is_string)}),
     )
     .await?;
     finish_pending(ctx, &key).await?;
@@ -938,7 +948,7 @@ async fn stream(
     ctx.put(
         PENDING,
         &key,
-        json!({"schema":SCHEMA,"run":run,"batches":batches,"rows":changes,"patch":complete}),
+        json!({"schema":SCHEMA,"run":run,"batches":batches,"rows":changes,"patch":complete,"patch_status":complete}),
     )
     .await?;
     finish_pending(ctx, &key).await?;
@@ -1050,6 +1060,71 @@ mod tests {
         )
         .unwrap();
         Compat::new(db, ingest)
+    }
+
+    #[tokio::test]
+    async fn metadata_and_duplicate_history_cannot_reactivate_terminal_native_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = reopen(directory.path());
+        upsert(
+            &ctx,
+            json!({"name":"r","entityName":"e","modelName":"p","state":"running"})
+                .as_object()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let key = identity("e", "p", "r").unwrap();
+        let run = load(&ctx, &key).await.unwrap();
+        let id = run["native_id"].as_str().unwrap().to_owned();
+        let history = json!({"files":{"wandb-history.jsonl":{"offset":0,"content":["{\"loss\":1,\"_step\":0,\"_timestamp\":1}"]}}});
+        stream(&ctx, "e", "p", "r", history.clone()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ctx.db.catalog().await.unwrap().metric_seq < 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        ctx.db
+            .patch_run(
+                id.clone(),
+                PatchRun {
+                    status: Some("canceled".into()),
+                    params: None,
+                    tags: None,
+                },
+            )
+            .await
+            .unwrap();
+        upsert(&ctx, json!({"name":"r","entityName":"e","modelName":"p","config":"{\"lr\":{\"value\":0.2}}"}).as_object().unwrap()).await.unwrap();
+        assert_eq!(ctx.db.run(id.clone()).await.unwrap().status, "canceled");
+        stream(&ctx, "e", "p", "r", history).await.unwrap();
+        stream(&ctx, "e", "p", "r", json!({"files":{}}))
+            .await
+            .unwrap();
+        assert_eq!(ctx.db.run(id.clone()).await.unwrap().status, "canceled");
+        assert_eq!(ctx.db.catalog().await.unwrap().metric_seq, 1);
+        // Recover a pre-upgrade metadata-only pending operation with cached state.
+        let cached = load(&ctx, &key).await.unwrap();
+        ctx.put(
+            PENDING,
+            &key,
+            json!({"schema":SCHEMA,"run":cached,"batches":[],"rows":{},"patch":true}),
+        )
+        .await
+        .unwrap();
+        finish_pending(&ctx, &key).await.unwrap();
+        assert_eq!(ctx.db.run(id.clone()).await.unwrap().status, "canceled");
+        stream(&ctx, "e", "p", "r", json!({"files":{"wandb-history.jsonl":{"offset":1,"content":["{\"loss\":2,\"_step\":1,\"_timestamp\":2}"]}}})).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ctx.db.run(id.clone()).await.unwrap().status != "running" {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ctx.db.catalog().await.unwrap().metric_seq, 2);
     }
 
     #[tokio::test]

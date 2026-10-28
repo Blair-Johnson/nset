@@ -3,9 +3,11 @@ import { uuid } from "./uuid";
 import "./run-drawer.css";
 import type { Catalog } from "./workspace-types";
 import type { Run } from "./api";
+import { runStatus, type RunStatusChange } from "./run-status";
 import { createRunOrder, runSortState, type RunSortState } from "./run-order";
 import { element } from "./utils";
 import { runColorButton } from "./run-color-picker";
+import { runColor } from "./series-colors";
 import { RunFilterControl, RunFilterSession } from "./run-filter-session";
 import { activeConditions, emptyFilter, type RunFilter } from "./run-filter";
 
@@ -92,9 +94,18 @@ export class RunDrawer {
   private readonly matching = element("span", "muted");
   private readonly rows = new Map<
     string,
-    { root: HTMLElement; check: HTMLInputElement; run: Run }
+    {
+      root: HTMLElement;
+      check: HTMLInputElement;
+      name: HTMLButtonElement;
+      swatch: HTMLElement;
+      color: string;
+      status: ReturnType<typeof runStatus>;
+      run: Run;
+    }
   >();
   private readonly narrow = matchMedia("(max-width: 760px)");
+  private destroyed = false;
   private catalog?: Catalog;
   private order?: ReturnType<typeof createRunOrder>;
   private runs: Run[] = [];
@@ -123,10 +134,10 @@ export class RunDrawer {
       ids: string[],
       clearPending?: boolean,
     ) => void,
-    onTable: () => void,
     private readonly onDetails: (run: Run) => void,
     session?: RunFilterSession,
     private readonly sortState: RunSortState = runSortState(),
+    private readonly onStatus?: RunStatusChange,
   ) {
     this.ownsSession = !session;
     this.session = session ?? new RunFilterSession(state.filter);
@@ -228,7 +239,7 @@ export class RunDrawer {
       this.session.setSearch(state.query, state.status);
     };
     this.status.setAttribute("aria-label", "Filter chart runs by status");
-    for (const value of ["all", "running", "finished", "failed"]) {
+    for (const value of ["all", "running", "finished", "failed", "canceled"]) {
       const option = element(
         "option",
         "",
@@ -264,7 +275,7 @@ export class RunDrawer {
         state.scrollTop = this.list.scrollTop;
     };
     const footer = element("div", "run-drawer-footer");
-    footer.append(this.matching, this.button("Open run table", onTable));
+    footer.append(this.matching);
     this.root.append(heading, searchTools, actions, this.list, footer);
     this.backdrop.onclick = () => this.setOpen(false);
     this.pane.onkeydown = (event) => {
@@ -322,6 +333,7 @@ export class RunDrawer {
         !matches.has(id) ||
         (!!this.state.selectedOnly && !this.selected.has(id));
       if (!row.root.hidden) visible++;
+      else row.status.closeMenu();
     }
     const outside = [...this.selected].filter((id) => !matches.has(id)).length;
     this.count.textContent = `Selected (${this.selected.size})`;
@@ -363,6 +375,8 @@ export class RunDrawer {
   /** Called after mounting; charts and list nodes never move during resizing. */
   mount() {
     if (this.pane.parentElement) this.observer.observe(this.pane.parentElement);
+    const toolbar = this.pane.parentElement?.previousElementSibling;
+    if (toolbar?.matches(".workspace-toolbar")) this.observer.observe(toolbar);
     for (const row of [this.searchTools, this.actions]) {
       this.observer.observe(row);
       this.toolbarObserver.observe(row, {
@@ -429,9 +443,17 @@ export class RunDrawer {
   }
   private measure() {
     if (!this.pane.isConnected) return;
-    const top = Math.max(
+    const toolbar = this.pane.parentElement?.previousElementSibling;
+    const inset = Math.max(
       46,
-      this.pane.parentElement?.getBoundingClientRect().top ?? 46,
+      toolbar?.matches(".workspace-toolbar")
+        ? toolbar.getBoundingClientRect().bottom
+        : 46,
+    );
+    this.pane.style.setProperty("--run-pane-top", `${inset}px`);
+    const top = Math.max(
+      inset,
+      this.pane.parentElement?.getBoundingClientRect().top ?? inset,
     );
     this.pane.style.setProperty(
       "--run-pane-height",
@@ -489,6 +511,7 @@ export class RunDrawer {
       this.previousFocus = document.activeElement as HTMLElement;
     if (!open && this.root.isConnected && !this.root.hidden)
       this.state.scrollTop = this.list.scrollTop;
+    if (!open) for (const row of this.rows.values()) row.status.closeMenu();
     this.state.open = open;
     this.root.hidden = !open;
     this.pane.classList.toggle("is-collapsed", !open);
@@ -528,6 +551,7 @@ export class RunDrawer {
     } else if (focus) this.toggle.focus({ preventScroll: true });
   }
   update(catalog: Catalog, selectedIds: string[]) {
+    if (this.destroyed) return;
     this.selected = new Set(selectedIds);
     if (catalog !== this.catalog) {
       this.catalog = catalog;
@@ -539,6 +563,7 @@ export class RunDrawer {
       const keep = new Set(runs.map((run) => run.id));
       for (const [id, row] of this.rows)
         if (!keep.has(id)) {
+          row.status.destroy();
           row.root.remove();
           this.rows.delete(id);
         }
@@ -555,27 +580,63 @@ export class RunDrawer {
                 ? [...this.selected, run.id]
                 : [...this.selected].filter((id) => id !== run.id),
             );
-          row = { root, check, run };
+          const name = this.button(run.name, () => {
+            const current = this.rows.get(run.id)?.run;
+            if (current) this.onDetails(current);
+          });
+          name.className = "text-link drawer-run-name";
+          const swatch = runSwatch(catalog, run.id);
+          const status = runStatus(
+            run,
+            this.onStatus
+              ? async (current, status) => {
+                  const saved = await this.onStatus!(current, status);
+                  if (!this.destroyed && this.catalog)
+                    this.update(
+                      {
+                        ...this.catalog,
+                        runs: this.catalog.runs.map((candidate) =>
+                          candidate.id === saved.id ? saved : candidate,
+                        ),
+                      },
+                      [...this.selected],
+                    );
+                  return saved;
+                }
+              : undefined,
+            true,
+          );
+          status
+            .querySelector(".run-status-label")
+            ?.classList.add("drawer-run-status");
+          row = {
+            root,
+            check,
+            name,
+            swatch,
+            color: runColor(catalog, run.id),
+            status,
+            run,
+          };
+          root.append(swatch, check, name, status);
           this.rows.set(run.id, row);
+          this.list.append(root);
+        }
+        const color = runColor(catalog, run.id);
+        if (row.color !== color) {
+          const focused = row.swatch.contains(document.activeElement);
+          const swatch = runSwatch(catalog, run.id);
+          row.swatch.replaceWith(swatch);
+          row.swatch = swatch;
+          row.color = color;
+          if (focused)
+            swatch.querySelector("button")?.focus({ preventScroll: true });
         }
         row.run = run;
         row.check.setAttribute("aria-label", `Show ${run.name}`);
-        const name = this.button(run.name, () => this.onDetails(run));
-        name.className = "text-link drawer-run-name";
-        name.title = run.name;
-        const status = element(
-          "span",
-          `drawer-run-status status-${run.status}`,
-          run.rx?.state ?? run.status,
-        );
-        status.title = run.rx?.state ?? run.status;
-        row.root.replaceChildren(
-          runSwatch(catalog, run.id),
-          row.check,
-          name,
-          status,
-        );
-        this.list.append(row.root);
+        row.name.textContent = run.name;
+        row.name.title = run.name;
+        row.status.updateRun(run);
       }
       this.session.setRuns(
         runs,
@@ -615,6 +676,9 @@ export class RunDrawer {
     this.list.scrollTop = this.state.scrollTop;
   }
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    for (const row of this.rows.values()) row.status.destroy();
     this.filterControl.destroy();
     if (this.ownsSession) this.session.destroy();
     this.finishResize(true);

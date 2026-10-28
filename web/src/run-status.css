@@ -1,0 +1,123 @@
+.run-status-control {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+  vertical-align: middle;
+}
+.run-status-control .run-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 8%, var(--surface, #fff));
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.run-status-control .status-running,
+.run-status-menu .status-running {
+  color: var(--info, #87c4f7);
+}
+.run-status-control .status-finished,
+.run-status-menu .status-finished {
+  color: var(--success, #8bc7a2);
+}
+.run-status-control .status-failed,
+.run-status-menu .status-failed {
+  color: var(--danger, #f29a9a);
+}
+.run-status-control .status-canceled,
+.run-status-menu .status-canceled {
+  color: var(--muted, #727986);
+}
+.run-status-control .run-status-pill:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.run-status-control .run-status-pill[aria-busy="true"] {
+  cursor: progress;
+}
+.run-status-control .run-status-pill:not(:disabled):hover {
+  background: color-mix(in srgb, currentColor 14%, var(--surface, #fff));
+}
+.run-status-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+}
+.run-status-chevron svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+.run-status-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 4px;
+  min-width: 126px;
+  border: 1px solid var(--border, #d8dde5);
+  border-radius: 7px;
+  background: var(--surface, #fff);
+  color: var(--text, #242a33);
+  box-shadow: 0 5px 18px #0002;
+}
+.run-status-menu .run-status-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.run-status-option::after {
+  content: "";
+  width: 14px;
+  margin-left: auto;
+  padding-left: 10px;
+}
+.run-status-option[aria-checked="true"]::after {
+  content: "✓";
+}
+.run-status-menu .run-status-option:hover,
+.run-status-menu .run-status-option:focus {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.run-status-pill:focus-visible,
+.run-status-option:focus-visible {
+  outline: 2px solid var(--accent, #7dd3b0);
+  outline-offset: 2px;
+}
+.run-status-error {
+  max-width: 260px;
+  color: var(--danger, #f29a9a);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.run-status-control [hidden] {
+  display: none !important;
+}
+
+.run-status-pill > .run-status-label {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+}

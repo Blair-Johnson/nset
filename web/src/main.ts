@@ -546,6 +546,36 @@ function navigate(experimentId = "", view = "runs") {
 function openRun(run: Run) {
   navigate(run.experiment_id, `runs/${encodeURIComponent(run.id)}`);
 }
+function changeRunStatus(run: Run, status: Run["status"]): Promise<Run> {
+  return saveRunPatch(run, { status });
+}
+async function saveRunPatch(
+  run: Run,
+  patch: Parameters<Api["patchRun"]>[1],
+): Promise<Run> {
+  if (run.rx) throw new Error("External runs are read-only.");
+  const generation = catalogGeneration;
+  const before = catalog.runs.find((r) => r.id === run.id);
+  const updated = await api.patchRun(run.id, patch);
+  if (generation !== catalogGeneration || !connected)
+    throw new DOMException("Connection changed", "AbortError");
+  const current = catalog.runs.find((r) => r.id === run.id);
+  // A later live update may have arrived before this request's response.
+  const resolved =
+    current &&
+    (current.updated_at > updated.updated_at ||
+      (current.updated_at === updated.updated_at && current !== before))
+      ? current
+      : updated;
+  liveCatalogInstalled(
+    {
+      ...catalog,
+      runs: catalog.runs.map((r) => (r.id === run.id ? resolved : r)),
+    },
+    true,
+  );
+  return resolved;
+}
 function chartFollowsSelection(spec: ChartSpec): boolean {
   return spec.records
     ? !spec.records.runUids.length
@@ -858,25 +888,19 @@ function renderPage() {
             catalog,
             api,
             signal: detailRequest.signal,
-            onBack: () => navigate(experiment.id),
+            onStatus: changeRunStatus,
             onCharts: () => {
               if (updateSelection(workspace, [run.id], true))
                 navigate(experiment.id, "charts");
             },
-            onTags: async (patch) => {
-              const generation = catalogGeneration;
-              const updated = await api.patchRun(run.id, { tags: patch });
-              if (generation !== catalogGeneration || !connected)
-                return updated;
-              catalog = {
-                ...catalog,
-                runs: catalog.runs.map((r) => (r.id === run.id ? updated : r)),
-              };
-              refreshRunFilterSessions();
-              return updated;
-            },
+            onTags: (patch) => saveRunPatch(run, { tags: patch }),
           })
         : element("p", "", "Run not found");
+      if (run) {
+        const handle = detail as ReturnType<typeof renderRunDetail>;
+        liveTable = handle;
+        cleanupRunTable = () => handle.destroy();
+      }
       // Same switcher as the other experiment pages; neither view is current.
       const switcher = viewSwitch(experiment.id, null);
       if (run) detail.querySelector(".run-detail-header")?.prepend(switcher);
@@ -897,6 +921,7 @@ function renderPage() {
         filters,
         () => workspace.selectedRunIds,
         () => !!workspace.pendingSelectedRunIds?.length,
+        changeRunStatus,
       );
       cleanupRunTable = () => table.destroy();
       liveTable = table;
@@ -964,10 +989,10 @@ function renderPage() {
           experiment.id,
           drawerState,
           (ids, clearPending) => updateSelection(workspace, ids, clearPending),
-          () => navigate(experiment.id),
           openRun,
           filterSessionFor(experiment.id),
           runStateFor(experiment.id),
+          changeRunStatus,
         );
         layout.append(runDrawer.backdrop, runDrawer.pane, grid);
         $("page").append(tools, layout);

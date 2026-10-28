@@ -70,10 +70,20 @@ async function fixture(page: Page) {
               }),
             );
           },
-          (run) =>
-            host.replaceChildren(
-              renderRunDetail(run, { onBack: show, onCharts: show }),
-            ),
+          (run) => {
+            // This component fixture supplies its own shell navigation.
+            const wrapper = document.createElement("div");
+            const switcher = document.createElement("nav");
+            switcher.className = "view-switch";
+            const runsButton = document.createElement("button");
+            runsButton.type = "button";
+            runsButton.setAttribute("aria-label", "Runs");
+            runsButton.textContent = "Runs";
+            runsButton.onclick = show;
+            switcher.append(runsButton);
+            wrapper.append(switcher, renderRunDetail(run, { onCharts: show }));
+            host.replaceChildren(wrapper);
+          },
           state,
         ),
       );
@@ -193,7 +203,13 @@ test("column state survives detail/export and Charts return; removal never chang
   await download.saveAs(path);
   const { readFile } = await import("node:fs/promises");
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual(params);
-  await page.getByRole("button", { name: "← Runs", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "← Runs", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .locator(".view-switch")
+    .getByRole("button", { name: "Runs", exact: true })
+    .click();
   await expect(
     page.locator("tbody tr").first().locator(".parameter-cell"),
   ).toHaveText(["0", "0.001"]);
@@ -307,7 +323,13 @@ test("existing shell routes retain columns, search, sort, page and selection", a
     .getByRole("button", { name: "Candidate 050", exact: true })
     .click();
   await expect(page).toHaveURL(/\/runs\/run-50$/);
-  await page.getByRole("button", { name: "← Runs", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "← Runs", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .locator(".view-switch")
+    .getByRole("button", { name: "Runs", exact: true })
+    .click();
   await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("searchbox", {

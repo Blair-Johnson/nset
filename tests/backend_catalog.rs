@@ -339,7 +339,7 @@ async fn catalog_uses_one_snapshot_during_atomic_cross_table_writes() {
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO runs VALUES(?1,?1,?1,'running','{}','{}',?2,?2)",
+                "INSERT INTO runs(id,experiment_id,name,status,params,tags,created_at,updated_at) VALUES(?1,?1,?1,'running','{}','{}',?2,?2)",
                 rusqlite::params![id, generation],
             )
             .unwrap();

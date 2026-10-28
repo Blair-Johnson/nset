@@ -33,18 +33,8 @@
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.run-detail-status {
-  font-size: 11px;
-  color: var(--muted);
-}
-.run-detail-status.running {
-  color: #87c4f7;
-}
-.run-detail-status.finished {
-  color: #8bc7a2;
-}
-.run-detail-status.failed {
-  color: #f29a9a;
+.run-detail-header > .run-status-control {
+  flex: 0 1 auto;
 }
 .run-detail-metadata {
   display: flex;

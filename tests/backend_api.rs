@@ -911,3 +911,70 @@ async fn image_timestamp_defaults_when_omitted() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
+
+#[tokio::test]
+async fn run_patch_accepts_all_four_statuses_without_exposing_internal_generation() {
+    let app = TestApp::new();
+    let id = app.run().await;
+    let url = format!("/api/runs/{id}");
+    for status in ["finished", "failed", "canceled", "running"] {
+        let (code, run) = app.json("PATCH", &url, json!({"status":status})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(run["status"], status);
+        assert!(run.get("status_generation").is_none());
+        assert_eq!(app.json("GET", &url, Value::Null).await.1["status"], status);
+    }
+    // Invalid strings reach domain validation; non-strings fail JSON extraction.
+    for (invalid, expected) in [
+        (json!("cancelled"), StatusCode::BAD_REQUEST),
+        (json!("CANCELED"), StatusCode::BAD_REQUEST),
+        (json!("unknown"), StatusCode::BAD_REQUEST),
+        (Value::Null, StatusCode::UNPROCESSABLE_ENTITY),
+        (json!(1), StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        assert_eq!(
+            app.json("PATCH", &url, json!({"status":invalid})).await.0,
+            expected,
+            "status={invalid}"
+        );
+        assert_eq!(
+            app.json("GET", &url, Value::Null).await.1["status"],
+            "running"
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_and_rejected_http_observations_do_not_reactivate() {
+    let app = TestApp::new();
+    let id = app.run().await;
+    let url = format!("/api/runs/{id}");
+    assert_eq!(
+        app.json("PATCH", &url, json!({"status":"canceled"}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.json("POST", &format!("{url}/metrics"), json!({"metrics":[]}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.raw(
+            "POST",
+            &format!("{url}/images?key=sample&step=0"),
+            vec![],
+            "image/png",
+            Some("test-secret")
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        app.json("GET", &url, Value::Null).await.1["status"],
+        "canceled"
+    );
+}

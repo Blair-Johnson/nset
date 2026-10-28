@@ -23,7 +23,7 @@ use tokio::{
 };
 
 pub const JOURNAL_FILENAME: &str = "ingest.sqlite3";
-const JOURNAL_VERSION: i64 = 1;
+const JOURNAL_VERSION: i64 = 2;
 const PROJECTION_ERROR: &str = "materialization failed; pending data retained; retrying";
 const CORRUPT_ERROR: &str = "journal entry invalid; pending data retained; repair required";
 
@@ -187,7 +187,16 @@ fn preflight_inbox(conn: &Connection) -> Result<()> {
         true,
     )
     .map_err(|_| invalid_entry())?;
-    crate::db::require_unique(conn, "inbox", &["run_id", "batch_id"]).map_err(|_| invalid_entry())
+    crate::db::require_unique(conn, "inbox", &["run_id", "batch_id"])
+        .map_err(|_| invalid_entry())?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_error)?;
+    if version >= 2 {
+        crate::db::require_table(conn, "inbox", "status_generation", &["seq"], true)
+            .map_err(|_| invalid_entry())?;
+    }
+    Ok(())
 }
 
 fn open_journal(directory: &Path) -> Result<Connection> {
@@ -248,9 +257,17 @@ fn open_journal(directory: &Path) -> Result<Connection> {
             accepted INTEGER NOT NULL CHECK(accepted BETWEEN 1 AND 10000),
             accepted_at INTEGER NOT NULL CHECK(accepted_at BETWEEN 0 AND 9007199254740991),
             state TEXT NOT NULL CHECK(state IN ('pending','applied')), last_error TEXT,
+            status_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(status_generation)='integer' AND status_generation>=0),
             UNIQUE(run_id,batch_id),
             CHECK((state='pending' AND payload IS NOT NULL) OR (state='applied' AND payload IS NULL)));
             CREATE INDEX inbox_pending ON inbox(state,seq);").map_err(storage_error)?;
+        tx.pragma_update(None, "user_version", JOURNAL_VERSION)
+            .map_err(storage_error)?;
+    } else if version == 1 {
+        preflight_inbox(&tx)?;
+        // Legacy pending work predates every status-generation patch. Preserve
+        // its receipt, payload, identity and sequence; never infer order by time.
+        tx.execute_batch("ALTER TABLE inbox ADD COLUMN status_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(status_generation)='integer' AND status_generation>=0);").map_err(storage_error)?;
         tx.pragma_update(None, "user_version", JOURNAL_VERSION)
             .map_err(storage_error)?;
     } else if version != JOURNAL_VERSION {
@@ -268,6 +285,7 @@ fn open_journal(directory: &Path) -> Result<Connection> {
 
 struct Entry {
     seq: i64,
+    status_generation: i64,
     receipt: IngestReceipt,
     digest: Vec<u8>,
     payload: Option<Vec<u8>>,
@@ -275,6 +293,7 @@ struct Entry {
 fn entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
         seq: row.get(0)?,
+        status_generation: row.get(8)?,
         receipt: IngestReceipt {
             run_id: row.get(1)?,
             batch_id: row.get(2)?,
@@ -292,7 +311,8 @@ fn entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         payload: row.get(7)?,
     })
 }
-const ENTRY_COLUMNS: &str = "seq,run_id,batch_id,state,accepted,accepted_at,digest,payload";
+const ENTRY_COLUMNS: &str =
+    "seq,run_id,batch_id,state,accepted,accepted_at,digest,payload,status_generation";
 fn lookup(conn: &Connection, run: &str, batch: &str) -> Result<Option<Entry>> {
     conn.query_row(
         &format!("SELECT {ENTRY_COLUMNS} FROM inbox WHERE run_id=? AND batch_id=?"),
@@ -305,7 +325,10 @@ fn lookup(conn: &Connection, run: &str, batch: &str) -> Result<Option<Entry>> {
 fn verified(entry: &Entry) -> Result<Option<MetricBatch>> {
     validate_id(&entry.receipt.batch_id).map_err(|_| invalid_entry())?;
     safe(entry.receipt.accepted_at).map_err(|_| invalid_entry())?;
-    if entry.digest.len() != 32 || !(1..=10_000).contains(&entry.receipt.accepted) {
+    if entry.status_generation < 0
+        || entry.digest.len() != 32
+        || !(1..=10_000).contains(&entry.receipt.accepted)
+    {
         return Err(invalid_entry());
     }
     match (entry.receipt.state.as_str(), &entry.payload) {
@@ -330,6 +353,16 @@ impl DurableIngest {
     pub fn open(directory: &Path, db: Database, options: IngestOptions) -> Result<Self> {
         options.validate()?;
         let mut intake = open_journal(directory)?;
+        // BEGIN IMMEDIATE on intake reserves both journal and query DB writers.
+        // We only READ the attached DB: its lock orders acceptance against status
+        // patches through journal commit, without a cross-file write transaction.
+        // The projector must NOT attach it: it awaits the query writer actor.
+        intake
+            .execute(
+                "ATTACH DATABASE ? AS query_db",
+                [db.path.to_string_lossy().as_ref()],
+            )
+            .map_err(storage_error)?;
         let projector = open_journal(directory)?;
         let control = Arc::new(Control {
             stop: Mutex::new(false),
@@ -416,7 +449,7 @@ impl DurableIngest {
         let hash = digest(&payload);
         let limits = self.0.limits;
         let control = self.0.control.clone();
-        self.call(move |conn, runtime, db| {
+        self.call(move |conn, _, _| {
             // All capacity and dedup decisions share the commit's write lock.
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage_error)?;
             if let Some(prior) = lookup(&tx, &run_id, &batch_id)? {
@@ -424,14 +457,16 @@ impl DurableIngest {
                 if hash != prior.digest { return Err(ApiError(StatusCode::CONFLICT, "batch id already used with different metrics")); }
                 return Ok(prior.receipt);
             }
-            runtime.block_on(db.run(run_id.clone()))?;
+            let status_generation: i64 = tx.query_row(
+                "SELECT status_generation FROM query_db.runs WHERE id=?", [&run_id], |row| row.get(0))
+                .optional().map_err(storage_error)?.ok_or_else(ApiError::missing)?;
             let (pending, bytes): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM inbox WHERE state='pending'", [], |r| Ok((r.get(0)?,r.get(1)?))).map_err(storage_error)?;
             if pending as usize >= limits.0 || (bytes as u64).checked_add(payload.len() as u64).is_none_or(|n| n > limits.1) {
                 return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "durable journal capacity reached; retry later"));
             }
             let accepted_at = now();
             safe(accepted_at)?;
-            tx.execute("INSERT INTO inbox(run_id,batch_id,digest,payload,accepted,accepted_at,state) VALUES(?,?,?,?,?,?,'pending')", params![run_id,batch_id,hash,payload,count as i64,accepted_at]).map_err(storage_error)?;
+            tx.execute("INSERT INTO inbox(run_id,batch_id,digest,payload,accepted,accepted_at,state,status_generation) VALUES(?,?,?,?,?,?,'pending',?)", params![run_id,batch_id,hash,payload,count as i64,accepted_at,status_generation]).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
             control.wake.notify_one();
             Ok(IngestReceipt { run_id, batch_id, state: "pending".into(), accepted: count, accepted_at })
@@ -515,6 +550,7 @@ fn project_one(conn: &mut Connection, runtime: &Runtime, db: &Database) -> Resul
                 next.receipt.batch_id.clone(),
                 next.digest.clone(),
                 next.receipt.accepted_at,
+                next.status_generation,
                 batch,
             ))
             .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, PROJECTION_ERROR))?;

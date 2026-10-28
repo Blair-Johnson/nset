@@ -15,6 +15,7 @@ const paths = {
   "actual-size": "M7 9l2-1.5V16M15 9l2-1.5V16M12 10.5v.01M12 14.5v.01",
   previous: "M15 6l-6 6 6 6",
   next: "M9 6l6 6-6 6",
+  "chevron-down": "M6 9l6 6 6-6",
   play: "M8 5.5v13l10.5-6.5z",
   pause: "M8 5v14M16 5v14",
   more: "M5 12h.01M12 12h.01M19 12h.01",

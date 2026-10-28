@@ -17,6 +17,8 @@ Scalar logging is durable by default. `log_metrics` and `log_batch` return `{"ac
 
 `run.finish()` and run-context exit flush before marking the run finished (or failed if training raises). Delivery timeout raises `DeliveryTimeoutError`; permanent HTTP rejection raises `DeliveryError`. Data remains local and the run is not marked complete. An existing training exception stays primary, with a failure note. A subsequent status-request error can leave status uncertain, but scalars are already accepted.
 
+Run statuses are `running`, `finished`, `failed`, and `canceled`. Use `run.finish(status="canceled")` to flush and mark a run canceled. Canceled does not terminate training. Fresh metric or image observations accepted by the server after a terminal status update return the run to `running`; retries of the same durable batch ID, projection of previously accepted backlog, and metadata-only updates do not. Direct scalar appends and image uploads have no retry identity: submitting them again creates new observations and can reactivate the run.
+
 Use `with Client(...) as client:` or `client.close()` to drain and stop delivery. The default wait is 30 seconds; change it with `Client(..., flush_timeout=60)` or `timeout=60` on `flush`, `finish`, or `close` (0–300 seconds). Timed-out close does not wait indefinitely on network workers. Local filesystem operations still depend on the OS and disk.
 
 ### Recovery and limits

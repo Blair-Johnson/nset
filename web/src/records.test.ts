@@ -374,3 +374,45 @@ test("an initially unavailable rx source preserves native catalog and exposes it
   assert.ok(result.experiments.includes(native));
   assert.equal(result.rx?.error, "source unavailable");
 });
+
+test("rx canceled state remains distinct from failed while preserving read-only identity", async () => {
+  const states = ["canceled", "failed", "succeeded", "active", "queued"];
+  const api = new Api(
+    () => "test",
+    async () =>
+      new Response(
+        JSON.stringify({
+          source: { id: "rx:test", name: "repo", readonly: true },
+          runs: states.map((state, i) => ({
+            id: String(i + 1),
+            run_uid: `uid${i}`,
+            state,
+            alias: null,
+            config: null,
+            argv: "[]",
+            created_at: "2026-01-01T00:00:00Z",
+            started_at: null,
+            finished_at: null,
+            exit_code: null,
+          })),
+          next_after: null,
+          high_water: "5",
+          source_generation: "g1",
+        }),
+      ),
+  );
+  const result = await appendRxCatalog(api, {
+    experiments: [],
+    runs: [],
+    series: [],
+  });
+  assert.deepEqual(
+    result.runs.map((r) => r.status),
+    ["canceled", "failed", "finished", "running", "running"],
+  );
+  assert.deepEqual(
+    result.runs.map((r) => r.rx?.state),
+    states,
+  );
+  assert.equal(result.runs[0].id, "rx:test:uid0");
+});

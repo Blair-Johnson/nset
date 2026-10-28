@@ -22,6 +22,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .unwrap();
         let run = rt.block_on(async {
@@ -429,7 +430,7 @@ fn corrupt_payload_is_retained_and_blocks_later_projection() {
 #[test]
 fn journal_schema_corruption_and_option_guards_preserve_existing_files() {
     let f = Fixture::new();
-    for version in [2, i32::MAX] {
+    for version in [3, i32::MAX] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(JOURNAL_FILENAME);
         let conn = Connection::open(&path).unwrap();
@@ -739,5 +740,345 @@ fn opening_and_last_handle_drop_inside_current_thread_runtime_does_not_deadlock(
     assert_eq!(
         f.points().iter().map(|p| (p.0, p.2)).collect::<Vec<_>>(),
         vec![(1, 2.5), (2, 3.5)]
+    );
+}
+
+fn status_patch(status: &str) -> nset::models::PatchRun {
+    serde_json::from_value(serde_json::json!({"status":status})).unwrap()
+}
+
+#[test]
+fn status_generation_fences_backlog_across_restart_and_equal_timestamps() {
+    for terminal in ["finished", "failed", "canceled"] {
+        let f = Fixture::new();
+        let ingest = f.open(true);
+        f.rt.block_on(ingest.submit(f.run.clone(), "backlog".into(), batch()))
+            .unwrap();
+        let patched =
+            f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch(terminal)))
+                .unwrap();
+        // Deterministic same-ms tie: the generation, NOT accepted_at, decides.
+        f.journal()
+            .execute("UPDATE inbox SET accepted_at=?", [patched.updated_at])
+            .unwrap();
+        let retry =
+            f.rt.block_on(ingest.submit(f.run.clone(), "backlog".into(), batch()))
+                .unwrap();
+        assert_eq!(retry.accepted_at, patched.updated_at);
+        assert_eq!(
+            f.journal()
+                .query_row("SELECT status_generation FROM inbox", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(ingest);
+        let Fixture { dir, db, rt, run } = f;
+        drop(db);
+        let db = Database::open(dir.path()).unwrap();
+        let f = Fixture { dir, db, rt, run };
+        let ingest = f.open(false);
+        f.until(|| f.status(&ingest).pending_batches == 0);
+        assert_eq!(f.points().len(), 2);
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            terminal
+        );
+        let cursor = f.db.live().cursor();
+        f.rt.block_on(ingest.submit(f.run.clone(), "backlog".into(), batch()))
+            .unwrap();
+        assert_eq!(cursor, f.db.live().cursor());
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            terminal
+        );
+        drop(ingest);
+
+        let ingest = f.open(true);
+        f.rt.block_on(ingest.submit(f.run.clone(), "fresh".into(), batch()))
+            .unwrap();
+        // Fresh acceptance still works with exactly the same millisecond.
+        f.journal()
+            .execute(
+                "UPDATE inbox SET accepted_at=? WHERE batch_id='fresh'",
+                [patched.updated_at],
+            )
+            .unwrap();
+        // Metadata after acceptance must not invalidate the generation.
+        f.rt.block_on(f.db.patch_run(
+            f.run.clone(),
+            serde_json::from_value(serde_json::json!({"tags":{"note":"metadata"}})).unwrap(),
+        ))
+        .unwrap();
+        drop(ingest);
+        let cursor = f.db.live().cursor();
+        let ingest = f.open(false);
+        f.until(|| f.status(&ingest).pending_batches == 0);
+        assert_eq!(f.points().len(), 4);
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            "running"
+        );
+        let hints = f.rt.block_on(f.db.live().poll(cursor)).unwrap();
+        assert!(
+            hints
+                .changes
+                .iter()
+                .any(|hint| matches!(hint, nset::live::Change::Catalog))
+        );
+        f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch("canceled")))
+            .unwrap();
+        let cursor = f.db.live().cursor();
+        f.rt.block_on(ingest.submit(f.run.clone(), "fresh".into(), batch()))
+            .unwrap();
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            "canceled"
+        );
+        assert_eq!(cursor, f.db.live().cursor());
+        assert!(
+            f.rt.block_on(ingest.submit(
+                f.run.clone(),
+                "empty".into(),
+                MetricBatch { metrics: vec![] }
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            "canceled"
+        );
+    }
+}
+
+#[test]
+fn reasserting_terminal_status_fences_work_accepted_since_the_previous_patch() {
+    let f = Fixture::new();
+    let ingest = f.open(true);
+    f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch("canceled")))
+        .unwrap();
+    f.rt.block_on(ingest.submit(f.run.clone(), "between".into(), batch()))
+        .unwrap();
+    f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch("canceled")))
+        .unwrap();
+    drop(ingest);
+    let ingest = f.open(false);
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "canceled"
+    );
+}
+
+#[test]
+fn already_committed_projection_cannot_reactivate_on_journal_completion_retry() {
+    let f = Fixture::new();
+    let ingest = f.open(true);
+    f.rt.block_on(ingest.submit(f.run.clone(), "replay".into(), batch()))
+        .unwrap();
+    drop(ingest);
+    f.journal().execute_batch("CREATE TRIGGER completion_failure BEFORE UPDATE OF state ON inbox WHEN NEW.state='applied' BEGIN SELECT RAISE(FAIL,'retry'); END;").unwrap();
+    let ingest = f.open(false);
+    f.until(|| f.points().len() == 2 && f.status(&ingest).last_error.is_some());
+    f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch("canceled")))
+        .unwrap();
+    drop(ingest);
+    f.journal()
+        .execute_batch("DROP TRIGGER completion_failure")
+        .unwrap();
+    let cursor = f.db.live().cursor();
+    let ingest = f.open(false);
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(f.points().len(), 2);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "canceled"
+    );
+    assert_eq!(cursor, f.db.live().cursor());
+}
+
+#[test]
+fn legacy_journal_migration_retains_pending_payload_and_its_old_generation() {
+    let f = Fixture::new();
+    let ingest = f.open(true);
+    let receipt =
+        f.rt.block_on(ingest.submit(f.run.clone(), "legacy".into(), batch()))
+            .unwrap();
+    drop(ingest);
+    let conn = f.journal();
+    conn.execute_batch("ALTER TABLE inbox DROP COLUMN status_generation; PRAGMA user_version=1;")
+        .unwrap();
+    let payload: Vec<u8> = conn
+        .query_row("SELECT payload FROM inbox", [], |r| r.get(0))
+        .unwrap();
+    f.rt.block_on(f.db.patch_run(f.run.clone(), status_patch("canceled")))
+        .unwrap();
+    let ingest = f.open(true);
+    assert_eq!(
+        f.rt.block_on(ingest.receipt(f.run.clone(), "legacy".into()))
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        conn.query_row("SELECT payload FROM inbox", [], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap(),
+        payload
+    );
+    assert_eq!(
+        conn.query_row("SELECT status_generation FROM inbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(ingest);
+    let ingest = f.open(false);
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(f.points().len(), 2);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "canceled"
+    );
+}
+
+#[test]
+fn concurrent_status_patch_and_acceptance_have_a_persisted_total_order() {
+    for iteration in 0..8 {
+        let f = Fixture::new();
+        let ingest = f.open(true);
+        std::thread::scope(|scope| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let gate = barrier.clone();
+            let db = &f.db;
+            let id = f.run.clone();
+            let patcher = scope.spawn(move || {
+                gate.wait();
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(db.patch_run(id, status_patch("canceled")))
+                    .unwrap();
+            });
+            barrier.wait();
+            f.rt.block_on(ingest.submit(f.run.clone(), format!("race-{iteration}"), batch()))
+                .unwrap();
+            patcher.join().unwrap();
+        });
+        let generation: i64 = f
+            .journal()
+            .query_row("SELECT status_generation FROM inbox", [], |r| r.get(0))
+            .unwrap();
+        assert!([0, 1].contains(&generation));
+        assert_eq!(
+            f.query()
+                .query_row("SELECT status_generation FROM runs", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(ingest);
+        let ingest = f.open(false);
+        f.until(|| f.status(&ingest).pending_batches == 0);
+        let expected = if generation == 1 {
+            "running"
+        } else {
+            "canceled"
+        };
+        assert_eq!(
+            f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+            expected
+        );
+    }
+}
+
+#[test]
+fn acceptance_waits_for_an_inflight_status_transaction_before_capturing_generation() {
+    let f = Fixture::new();
+    let ingest = f.open(true);
+    let conn = f.query();
+    // Hold precisely the transaction boundary used by patch_run. WAL readers
+    // could still see generation zero, but intake must not acknowledge it.
+    conn.execute_batch(
+        "BEGIN IMMEDIATE; UPDATE runs SET status='canceled',status_generation=status_generation+1;",
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let service = &ingest;
+        let id = f.run.clone();
+        let worker = scope.spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            started_tx.send(()).unwrap();
+            let result = runtime.block_on(service.submit(id, "lock-boundary".into(), batch()));
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let premature = done_rx.recv_timeout(Duration::from_millis(100));
+        // Release before asserting so a failing test cannot strand the worker.
+        conn.execute_batch("COMMIT").unwrap();
+        assert!(matches!(
+            premature,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+    });
+    assert_eq!(
+        f.journal()
+            .query_row("SELECT status_generation FROM inbox", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(ingest);
+    let ingest = f.open(false);
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "running"
+    );
+}
+
+#[test]
+fn upgrading_both_databases_does_not_reactivate_a_legacy_terminal_run() {
+    let f = Fixture::new();
+    let ingest = f.open(true);
+    f.rt.block_on(ingest.submit(f.run.clone(), "pre-upgrade".into(), batch()))
+        .unwrap();
+    drop(ingest);
+    // Recreate the absence of ordering information in both pre-upgrade schemas.
+    f.journal()
+        .execute_batch("ALTER TABLE inbox DROP COLUMN status_generation; PRAGMA user_version=1;")
+        .unwrap();
+    let Fixture { dir, db, rt, run } = f;
+    drop(db);
+    let conn = Connection::open(dir.path().join("nset.sqlite3")).unwrap();
+    conn.execute_batch("ALTER TABLE runs DROP COLUMN status_generation; UPDATE runs SET status='finished'; PRAGMA user_version=4;").unwrap();
+    drop(conn);
+    let db = Database::open(dir.path()).unwrap();
+    let f = Fixture { dir, db, rt, run };
+    let ingest = f.open(false);
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(f.points().len(), 2);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "finished"
+    );
+    f.rt.block_on(ingest.submit(f.run.clone(), "post-upgrade".into(), batch()))
+        .unwrap();
+    f.until(|| f.status(&ingest).pending_batches == 0);
+    assert_eq!(
+        f.rt.block_on(f.db.run(f.run.clone())).unwrap().status,
+        "running"
     );
 }

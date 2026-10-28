@@ -302,6 +302,31 @@ h3 {
   min-width: 0;
   padding: 6px 14px 40px;
 }
+/* Only the runs route owns a viewport-height shell. Charts and details keep
+   their normal document scrolling; menus remain outside the rows' clip. */
+#app:has(> #main > #page > .run-browser) {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+#app:has(> #main > #page > .run-browser) > .app-header {
+  flex: none;
+}
+#main:has(> #page > .run-browser),
+#main > #page:has(> .run-browser) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+#main:has(> #page > .run-browser) {
+  padding-bottom: 10px;
+}
+#main > #page > .run-browser {
+  flex: 1;
+  height: auto;
+}
 .breadcrumb {
   display: flex;
   align-items: center;
@@ -432,12 +457,25 @@ h3 {
   display: flex;
   flex-direction: column;
   height: calc(100dvh - var(--run-browser-top, 46px) - 10px);
-  min-height: 260px;
+  min-height: 0;
+  min-width: 0;
+}
+.run-browser > .table-toolbar,
+.run-browser > .table-footer {
+  flex: none;
+}
+.run-browser .table-toolbar {
+  gap: 6px 10px;
+}
+.run-browser .table-footer {
+  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 .run-browser .run-table-scroll {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
+  overscroll-behavior: contain;
 }
 .table-footer {
   display: flex;
@@ -463,9 +501,58 @@ h3 {
   display: none;
 }
 .run-table {
+  table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
   white-space: nowrap;
+}
+.run-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-table th:not(:first-child) {
+  padding-right: 14px;
+}
+.run-table .parameter-cell,
+.run-table .parameter-header .sort-button {
+  max-width: none;
+}
+.run-table .sort-button {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.column-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 4px;
+  border-left: 1px solid var(--control-border);
+}
+.column-resize-handle:hover,
+.column-resize-handle:focus-visible {
+  background: var(--selected);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.run-table.is-column-resizing,
+.run-table.is-column-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 .run-table th {
   position: sticky;
@@ -482,12 +569,16 @@ h3 {
 }
 .run-table th:nth-child(2),
 .run-table td:nth-child(2) {
-  min-width: 220px;
-  max-width: 240px;
-  width: 240px;
   position: sticky;
   left: 36px;
   border-right: 1px solid var(--border);
+}
+.run-table.run-name-unpinned th:nth-child(2),
+.run-table.run-name-unpinned td:nth-child(2) {
+  left: auto;
+}
+.run-table.run-name-unpinned td:nth-child(2) {
+  position: static;
 }
 .run-table td:nth-child(-n + 2) {
   z-index: 1;
@@ -496,8 +587,17 @@ h3 {
 .run-table th:nth-child(-n + 2) {
   z-index: 3;
 }
+.run-table .run-identity {
+  min-width: 0;
+}
 .run-table .run-link {
-  max-width: 200px;
+  min-width: 0;
+  max-width: none;
+  flex: 1;
+  text-align: left;
+}
+.run-table .run-swatch {
+  flex: none;
 }
 .run-table tbody tr:hover td:nth-child(-n + 2) {
   background: var(--surface-hover);
@@ -514,9 +614,6 @@ h3 {
   .run-table th:nth-child(2),
   .run-table td:nth-child(2) {
     left: auto;
-    min-width: 180px;
-    max-width: 180px;
-    width: 180px;
     border-right: 0;
   }
   .run-table th:nth-child(2) {
@@ -525,9 +622,6 @@ h3 {
   .run-table td:nth-child(2) {
     position: static;
     background: transparent;
-  }
-  .run-table .run-link {
-    max-width: 140px;
   }
 }
 .run-link,
@@ -729,11 +823,16 @@ h3 {
   flex: none;
 }
 .workspace-toolbar {
+  position: sticky;
+  top: 46px;
+  z-index: 25;
+  background: var(--bg);
+  box-shadow: 0 -6px var(--bg);
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 36px;
-  margin-bottom: 6px;
+  min-height: 42px;
+  padding-bottom: 6px;
   flex-wrap: wrap;
 }
 .workspace-toolbar #view-select {

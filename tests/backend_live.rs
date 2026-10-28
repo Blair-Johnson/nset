@@ -474,7 +474,7 @@ async fn catalog_image_compat_and_poll_abort_reset_contract() {
         .unwrap();
     assert_eq!(
         f.poll(&cursor).await["changes"],
-        json!([{"kind":"image","runId":f.run,"key":"preview"}])
+        json!([{"kind":"image","runId":f.run,"key":"preview"},{"kind":"catalog"}])
     );
     assert_eq!(
         f.state.db.images(f.run.clone(), None).await.unwrap()[0].id,

@@ -92,7 +92,8 @@ class MlflowImportTest(unittest.TestCase):
         runs = {r["name"]: r for r in api.request("GET", "/api/runs")["runs"]}
         run = runs["baseline"]
         self.assertEqual(run["status"], "finished")
-        self.assertEqual(runs["gone"]["status"], "failed")
+        self.assertEqual(runs["gone"]["status"], "canceled")
+        self.assertEqual(runs["gone"]["tags"]["mlflow_import.status"], "KILLED")
         self.assertEqual(run["params"], {"lr": 0.001, "layers": 4, "opt": "adam", "amp": True})
         self.assertEqual(run["tags"]["team"], "rf")
         self.assertEqual(run["tags"]["mlflow_import.run_id"], RUN)
@@ -112,7 +113,10 @@ class MlflowImportTest(unittest.TestCase):
 
         # Second pass: nothing new is created and verification still passes.
         self.assertEqual(self.run_import("--other-images"), 0)
-        self.assertEqual(len(api.request("GET", "/api/runs")["runs"]), 2)
+        imported_runs = api.request("GET", "/api/runs")["runs"]
+        self.assertEqual(len(imported_runs), 2)
+        self.assertEqual({r["name"]: r["status"] for r in imported_runs},
+                         {"baseline": "finished", "gone": "canceled"})
         self.assertEqual(len(api.request("GET", f"/api/runs/{run['id']}/images")["images"]), 3)
         again = api.request("GET", f"/api/runs/{run['id']}/metrics", query={"key": "loss", "limit": 1})
         self.assertEqual(again["total"], 12_345)

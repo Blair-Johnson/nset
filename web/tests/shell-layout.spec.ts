@@ -74,6 +74,219 @@ async function charts(page: Page) {
   await page.locator(".dashboard-cell canvas").first().waitFor();
 }
 
+async function scrollableCharts(page: Page) {
+  await charts(page);
+  await page.evaluate(() => {
+    const key = "nset.workspaces.v2";
+    const library: WorkspaceLibrary = JSON.parse(localStorage.getItem(key)!);
+    const section = library.views[0].sections[0];
+    library.views[0].sections = Array.from({ length: 3 }, (_, index) => ({
+      ...structuredClone(section),
+      id: `scroll-section-${index}`,
+      cards: section.cards.map((card) => ({
+        ...structuredClone(card),
+        id: `${card.id}-${index}`,
+        layout: { width: card.layout?.width ?? 480, height: 420 },
+      })),
+    }));
+    localStorage.setItem(key, JSON.stringify(library));
+  });
+  await page.reload();
+  await page.locator(".dashboard-cell canvas").first().waitFor();
+}
+
+async function scrollPastHeader(page: Page) {
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const toolbar = page.locator(".workspace-toolbar");
+  const initial = (await toolbar.boundingBox())!;
+  const control = toolbar.getByRole("button", { name: "Runs", exact: true });
+  const initialControl = (await control.boundingBox())!;
+  await expect(toolbar).toHaveCSS("padding-bottom", "6px");
+  await expect(toolbar).toHaveCSS("margin-bottom", "0px");
+  for (const offset of [1, 3, 6, 450, 0, 450]) {
+    await page.evaluate((y) => window.scrollTo(0, y), offset);
+    await expect
+      .poll(() => toolbar.boundingBox())
+      .toMatchObject({
+        y: initial.y,
+        height: initial.height,
+      });
+    await expect
+      .poll(() => control.boundingBox())
+      .toMatchObject({
+        y: initialControl.y,
+        height: initialControl.height,
+      });
+    await expect
+      .poll(() =>
+        toolbar.evaluate((node) => {
+          const box = node.getBoundingClientRect();
+          const background = getComputedStyle(node).backgroundColor;
+          return (
+            document.elementFromPoint(box.right - 2, box.bottom - 3) === node &&
+            background !== "transparent" &&
+            background !== "rgba(0, 0, 0, 0)"
+          );
+        }),
+      )
+      .toBe(true);
+  }
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBeGreaterThan(400);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const toolbar = document
+          .querySelector(".workspace-toolbar")!
+          .getBoundingClientRect();
+        const header = document
+          .querySelector(".app-header")!
+          .getBoundingClientRect();
+        return Math.abs(toolbar.top - header.bottom - 6);
+      }),
+    )
+    .toBeLessThanOrEqual(1);
+}
+
+test("sticky toolbar menus and Runs navigation retain chart and drawer state after scrolling", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  const histories = await fixture(page);
+  await scrollableCharts(page);
+  await page.getByLabel("Find runs", { exact: true }).fill("Run 00");
+  await page
+    .getByRole("button", { name: "Zoom in", exact: true })
+    .first()
+    .click();
+  const canvas = await page
+    .locator(".dashboard-cell canvas")
+    .first()
+    .elementHandle();
+  const before = await savedLibrary(page);
+  const requests = histories();
+  await scrollPastHeader(page);
+  const toolbar = page.locator(".workspace-toolbar");
+  await expect(
+    toolbar.getByLabel("View actions", { exact: true }),
+  ).toBeInViewport();
+  await toolbar.getByLabel("View actions", { exact: true }).click();
+  await toolbar
+    .getByRole("button", { name: "Save view as…", exact: true })
+    .click();
+  await page
+    .locator("dialog[open]")
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  const runsButton = toolbar.getByRole("button", { name: "Runs", exact: true });
+  await expect(runsButton).toBeInViewport();
+  await expect(
+    page.getByRole("button", { name: "Open run table", exact: true }),
+  ).toHaveCount(0);
+  await runsButton.click();
+  await expect(page).toHaveURL(/#\/experiments\/dense\/runs$/);
+  await expect(
+    page.getByLabel("Search runs, parameters or tags", { exact: true }),
+  ).toHaveValue("Run 00");
+  await expect(
+    page.getByRole("checkbox", { name: `Select ${runs[0].name}`, exact: true }),
+  ).toBeChecked();
+  await page
+    .getByRole("navigation", { name: "Experiment views" })
+    .getByRole("button", { name: "Charts", exact: true })
+    .click();
+  await expect(page.locator(".run-drawer")).toBeVisible();
+  await expect(page.getByLabel("Find runs", { exact: true })).toHaveValue(
+    "Run 00",
+  );
+  await expect(
+    page.getByRole("button", { name: "Previous view", exact: true }).first(),
+  ).toBeEnabled();
+  expect(
+    await page
+      .locator(".dashboard-cell canvas")
+      .first()
+      .evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  expect(await savedLibrary(page)).toEqual(before);
+  expect(histories()).toBe(requests);
+});
+
+test("desktop drawer stays below the sticky toolbar and inside the viewport after wrapping and resizing", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await fixture(page);
+  await scrollableCharts(page);
+  const initialHeight = (await page
+    .locator(".workspace-toolbar")
+    .boundingBox())!.height;
+  for (const width of [1440, 850, 1440]) {
+    await page.setViewportSize({ width, height: 800 });
+    await scrollPastHeader(page);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const toolbar = document
+            .querySelector(".workspace-toolbar")!
+            .getBoundingClientRect();
+          const drawer = document
+            .querySelector(".run-drawer")!
+            .getBoundingClientRect();
+          return (
+            Math.abs(drawer.top - toolbar.bottom) <= 1 &&
+            drawer.bottom <= innerHeight
+          );
+        }),
+      )
+      .toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    if (width === 850)
+      expect(
+        (await page.locator(".workspace-toolbar").boundingBox())!.height,
+      ).toBeGreaterThan(initialHeight);
+  }
+});
+
+test("390px sticky toolbar does not overflow and the scrolled run modal still dismisses", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await fixture(page);
+  await scrollableCharts(page);
+  await scrollPastHeader(page);
+  const expand = page.getByRole("button", {
+    name: "Expand run list",
+    exact: true,
+  });
+  await expect(
+    page
+      .locator(".workspace-toolbar")
+      .getByRole("button", { name: "Runs", exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expand.click();
+  const modal = page.getByRole("dialog", { name: "Chart runs" });
+  await expect(modal).toBeVisible();
+  await expect(page.getByLabel("Find runs", { exact: true })).toBeFocused();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeHidden();
+  await expect(expand).toBeFocused();
+  await expand.click();
+  await page
+    .locator(".run-drawer-backdrop")
+    .click({ position: { x: 380, y: 500 } });
+  await expect(modal).toBeHidden();
+  await expect(expand).toBeFocused();
+});
 for (const width of [1440, 390]) {
   test(`run drawer toggle keeps its closed size when open at ${width}px`, async ({
     page,
@@ -168,7 +381,7 @@ test("60-run drawer retains checkbox identity, focus, filter, scroll and open st
   ).toBeLessThanOrEqual(140);
   expect(
     (await page.locator(".workspace-toolbar").boundingBox())!.height,
-  ).toBeLessThanOrEqual(40);
+  ).toBeLessThanOrEqual(46);
   const choice = drawer.getByRole("checkbox", {
     name: `Show ${runs[42].name}`,
     exact: true,

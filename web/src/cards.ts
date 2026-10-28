@@ -839,9 +839,38 @@ export class ChartCard {
       line.setAttribute(key, value);
     swatch.append(line);
     const text = element("span", "card-series-label");
-    text.append(
-      element("span", "card-legend-name", identity?.name ?? series.run.name),
-    );
+    const name = identity?.name ?? series.run.name;
+    const run =
+      surface === "hover"
+        ? undefined
+        : this.context.catalog.runs.find(
+            (run) => run.id === (identity?.runId ?? series.run.id),
+          );
+    // Hover follows the pointer and is deliberately pointer-transparent. Only
+    // stable readouts expose links; route by the real run, never its alias or
+    // the synthetic ID used to distinguish multiple metrics from that run.
+    if (surface !== "hover" && run) {
+      const link = element("a", "card-legend-name", name);
+      link.href = `#/experiments/${encodeURIComponent(run.experiment_id)}/runs/${encodeURIComponent(run.id)}`;
+      link.draggable = false;
+      // Keep native navigation (including modifier/middle clicks), without
+      // letting name activation toggle a series, fold, or start a card drag.
+      for (const type of [
+        "pointerdown",
+        "mousedown",
+        "click",
+        "auxclick",
+        "dblclick",
+      ])
+        link.addEventListener(type, (event) => event.stopPropagation());
+      link.addEventListener("dragstart", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      text.append(link);
+    } else {
+      text.append(element("span", "card-legend-name", name));
+    }
     if (identity?.metric) {
       if (surface === "hover") {
         const separator = element("span", "card-hover-separator", " / ");

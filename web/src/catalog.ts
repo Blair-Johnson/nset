@@ -107,7 +107,11 @@ export async function fetchCatalog(
   const runs: Run[] = list(data.runs).map((value) => {
     assertCatalogEntry(value);
     const r = record(value);
-    if (!["running", "finished", "failed"].includes(r.status as string))
+    if (
+      !["running", "finished", "failed", "canceled"].includes(
+        r.status as string,
+      )
+    )
       throw new Error("Invalid run status.");
     const run: Run = {
       id: text(r.id),

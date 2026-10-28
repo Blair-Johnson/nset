@@ -141,7 +141,6 @@ async function fixture(
         renderRunDetail(run, {
           api: new Api(() => "fixture-token"),
           signal: controller.signal,
-          onBack: () => {},
           onTags: async (patch: Record<string, unknown>) => {
             (window as any).__patch = patch;
             return { ...run, tags: { ...run.tags, ...patch } };

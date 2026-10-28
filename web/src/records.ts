@@ -611,9 +611,11 @@ export async function appendRxCatalog(
         status:
           r.state === "succeeded"
             ? "finished"
-            : ["active", "queued"].includes(r.state)
-              ? "running"
-              : "failed",
+            : r.state === "canceled"
+              ? "canceled"
+              : ["active", "queued"].includes(r.state)
+                ? "running"
+                : "failed",
         params: {
           "rx recorded state": r.state,
           "rx config summary": r.config,

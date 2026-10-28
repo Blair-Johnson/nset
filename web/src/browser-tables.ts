@@ -1,10 +1,12 @@
 import type { Catalog } from "./workspace-types";
 import type { Experiment, Run } from "./api";
+import { runStatus, type RunStatusChange } from "./run-status";
 import { element } from "./utils";
 import { runSwatch } from "./run-drawer";
 import { runColor } from "./series-colors";
 import { RunFilterControl, RunFilterSession } from "./run-filter-session";
 import { parameterLabel } from "./run-table-fields";
+import { RunTableColumns } from "./run-table-columns";
 import { createRunOrder, runSortState, type RunSortState } from "./run-order";
 
 export interface TableState extends RunSortState {
@@ -14,6 +16,7 @@ export interface TableState extends RunSortState {
   metrics: string[] | null;
   parameters?: string[];
   columnQuery?: string;
+  columnWidths?: Record<string, number>;
 }
 export const tableState = (): TableState => ({
   query: "",
@@ -21,6 +24,7 @@ export const tableState = (): TableState => ({
   ...runSortState(),
   page: 0,
   metrics: null,
+  columnWidths: {},
 });
 export const timeLabel = (time: number) =>
   !Number.isFinite(new Date(time).getTime())
@@ -300,6 +304,7 @@ export function runTable(
   session?: RunFilterSession,
   getSelection?: () => string[],
   hasPendingSelection?: () => boolean,
+  onStatus?: RunStatusChange,
 ): HTMLElement & { updateCatalog(next: Catalog): void; destroy(): void } {
   const host = element("section", "browser-panel");
   const filterSession = session ?? new RunFilterSession();
@@ -307,6 +312,7 @@ export function runTable(
   state.query = filterSession.query;
   state.status = filterSession.status;
   let destroyed = false;
+  const statusControls = new Map<string, ReturnType<typeof runStatus>>();
   let renderedRows: Run[] = [];
   let renderedPending = false;
   let renderedError = "";
@@ -349,6 +355,7 @@ export function runTable(
     ["running", "Running"],
     ["finished", "Finished"],
     ["failed", "Failed"],
+    ["canceled", "Canceled"],
   ]) {
     const option = element("option", "", label);
     option.value = value;
@@ -492,6 +499,7 @@ export function runTable(
   wrap.setAttribute("aria-label", "Scrollable runs table");
   const table = element("table", "data-table run-table");
   table.setAttribute("aria-label", "Runs");
+  const columnLayout = new RunTableColumns(table, (state.columnWidths ??= {}));
   const head = element("thead");
   const body = element("tbody");
   table.append(head, body);
@@ -519,13 +527,11 @@ export function runTable(
   wrap.addEventListener("scroll", updateBelow, { passive: true });
   const observer = new ResizeObserver(updateBelow);
   observer.observe(wrap);
-  // Fill exactly to the bottom of the viewport from wherever the panel starts.
+  // Embedded tables use a measured fallback. The production runs route uses
+  // the flex shell in style.css, which also accounts for banners and wrapping.
   const fit = () => {
-    if (!host.isConnected) {
-      window.removeEventListener("resize", fit);
-      return;
-    }
-    const top = host.getBoundingClientRect().top + window.scrollY;
+    if (!host.isConnected) return;
+    const top = host.getBoundingClientRect().top;
     host.style.setProperty("--run-browser-top", `${Math.max(0, top)}px`);
   };
   window.addEventListener("resize", fit);
@@ -563,11 +569,17 @@ export function runTable(
       active instanceof HTMLButtonElement && head.contains(active)
         ? active.dataset.sortKey
         : undefined;
+    const focusedResize =
+      active instanceof HTMLElement &&
+      active.classList.contains("column-resize-handle")
+        ? active.dataset.columnKey
+        : undefined;
     const focusedButton =
       active instanceof HTMLButtonElement && body.contains(active)
         ? {
             runId: active.closest<HTMLTableRowElement>("tr")?.dataset.runId,
             color: active.classList.contains("run-color-button"),
+            status: !!active.closest(".run-status-control"),
           }
         : undefined;
     let restoreFocus: HTMLElement | undefined;
@@ -596,6 +608,7 @@ export function runTable(
     ]);
     if (headerSignature !== renderedHeader) {
       renderedHeader = headerSignature;
+      columnLayout.setFields(headerFields.map(([key]) => key));
       head.replaceChildren();
       const header = element("tr");
       const choose = element("th");
@@ -642,7 +655,9 @@ export function runTable(
           th.classList.add("parameter-header");
           control.title = `Parameter ${label}`;
         }
-        th.append(control);
+        const resize = columnLayout.handle(key, label);
+        if (focusedResize === key) restoreFocus = resize;
+        th.append(control, resize);
         header.append(th);
       }
       head.append(header);
@@ -658,7 +673,15 @@ export function runTable(
     const bodySignature = JSON.stringify([
       headerFields,
       pageRows.map((run) => [
-        run,
+        // Status and updated_at do not require rebuilding any row controls.
+        {
+          ...run,
+          status: undefined,
+          updated_at: undefined,
+          rx: run.rx
+            ? { sourceId: run.rx.sourceId, uid: run.rx.uid }
+            : undefined,
+        },
         selection.has(run.id),
         runColor(catalog, run.id),
         state.metrics!.map((key) => summaries.get(run.id)?.get(key)),
@@ -670,6 +693,17 @@ export function runTable(
     ]);
     if (bodySignature !== renderedBody) {
       renderedBody = bodySignature;
+      const renderedIds = new Set(pageRows.map((run) => run.id));
+      for (const [id, control] of statusControls) {
+        if (!renderedIds.has(id)) {
+          control.destroy();
+          statusControls.delete(id);
+        } else {
+          // Detaching a popover hides it natively; keep its menu state in sync.
+          // The control itself retains pending saves and errors across redraws.
+          control.closeMenu();
+        }
+      }
       body.replaceChildren();
       for (const run of pageRows) {
         const tr = element("tr");
@@ -706,13 +740,31 @@ export function runTable(
             : link;
         name.append(identity);
         const stateCell = cell("");
-        stateCell.append(
-          element(
-            "span",
-            `status status-${run.status}`,
-            run.status[0].toUpperCase() + run.status.slice(1),
-          ),
-        );
+        let control = statusControls.get(run.id);
+        if (!control) {
+          control = runStatus(
+            run,
+            onStatus
+              ? async (current, status) => {
+                  const saved = await onStatus(current, status);
+                  if (!destroyed)
+                    view.updateCatalog({
+                      ...catalog,
+                      runs: catalog.runs.map((candidate) =>
+                        candidate.id === saved.id ? saved : candidate,
+                      ),
+                    });
+                  return saved;
+                }
+              : undefined,
+          );
+          statusControls.set(run.id, control);
+        }
+        if (focusedButton?.runId === run.id && focusedButton.status)
+          restoreFocus =
+            control.querySelector<HTMLButtonElement>(".run-status-pill") ??
+            undefined;
+        stateCell.append(control);
         tr.append(
           td,
           name,
@@ -749,6 +801,7 @@ export function runTable(
         body.append(tr);
       }
     }
+    for (const run of pageRows) statusControls.get(run.id)?.updateRun(run);
     pagination(pager, rows.length, state, render);
     const shown = Math.min(pageSize, rows.length - state.page * pageSize);
     const summaryText = [
@@ -762,6 +815,11 @@ export function runTable(
     setText(summary, summaryText);
     cancelAnimationFrame(belowFrame);
     belowFrame = requestAnimationFrame(updateBelow);
+    if (focusedButton?.status && !active?.isConnected && !restoreFocus)
+      restoreFocus =
+        body.querySelector<HTMLButtonElement>(
+          ".run-status-pill:not(:disabled)",
+        ) ?? status;
     restoreFocus?.focus({ preventScroll: true });
     wrap.scrollTop = scrollTop;
     wrap.scrollLeft = scrollLeft;
@@ -803,7 +861,7 @@ export function runTable(
   });
   filterSlot.append(filterControl.root);
   render();
-  return Object.assign(host, {
+  const view = Object.assign(host, {
     updateCatalog(next: Catalog) {
       if (destroyed) return;
       catalog = next;
@@ -834,8 +892,11 @@ export function runTable(
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      for (const control of statusControls.values()) control.destroy();
+      statusControls.clear();
       filterControl.destroy();
       if (!session) filterSession.destroy();
+      columnLayout.destroy();
       observer.disconnect();
       wrap.removeEventListener("scroll", updateBelow);
       window.removeEventListener("resize", fit);
@@ -843,4 +904,5 @@ export function runTable(
       cancelAnimationFrame(belowFrame);
     },
   });
+  return view;
 }

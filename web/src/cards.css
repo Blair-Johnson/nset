@@ -805,6 +805,19 @@ body.chart-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+a.card-legend-name {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.card-legend-name:hover {
+  text-decoration: underline;
+}
+a.card-legend-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  text-decoration: underline;
+}
 .card-legend .card-series-semantic .card-legend-name {
   color: var(--text);
 }

@@ -516,7 +516,6 @@ test("shell exposes rx beside native data, saves a record chart, and hides run m
     };
     document.body.replaceChildren(
       renderRunDetail(run, {
-        onBack() {},
         onTags: async () => {
           throw new Error("must not mutate rx");
         },

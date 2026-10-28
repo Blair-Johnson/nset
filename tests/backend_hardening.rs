@@ -18,11 +18,11 @@ fn schema(connection: &Connection) -> Vec<(String, Option<String>)> {
 }
 
 #[test]
-fn fresh_database_is_version_four() {
+fn fresh_database_is_version_five() {
     let directory = tempfile::tempdir().unwrap();
     let _db = Database::open(directory.path()).unwrap();
     let connection = Connection::open(directory.path().join("nset.sqlite3")).unwrap();
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
     assert_eq!(version(&connection), SCHEMA_VERSION);
     for table in [
         "experiments",
@@ -208,7 +208,7 @@ fn incompatible_known_schemas_are_rejected_before_persistent_changes() {
     original
         .execute_batch(
             "INSERT INTO experiments VALUES('exp','existing',1);
-        INSERT INTO runs VALUES('run','exp','existing','running','{}','{}',1,1);",
+        INSERT INTO runs(id,experiment_id,name,status,params,tags,created_at,updated_at) VALUES('run','exp','existing','running','{}','{}',1,1);",
         )
         .unwrap();
     for (claimed_version, damage) in [

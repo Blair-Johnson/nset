@@ -18,7 +18,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
@@ -75,6 +75,7 @@ pub struct Database {
     readers: Arc<Vec<Actor>>,
     next_reader: Arc<AtomicUsize>,
     images: Arc<PathBuf>,
+    pub(crate) path: Arc<PathBuf>,
     live: Live,
 }
 fn setup(connection: &Connection) -> Result<()> {
@@ -124,6 +125,14 @@ fn require_run(connection: &Connection, id: &str) -> Result<()> {
         return Err(ApiError::missing());
     }
     Ok(())
+}
+// Synchronous writes are accepted in this transaction. Durable projection may
+// only reactivate the generation captured at journal acceptance, never backlog.
+fn reactivate_run(connection: &Connection, id: &str, generation: Option<i64>) -> Result<bool> {
+    Ok(connection.execute(
+        "UPDATE runs SET status='running' WHERE id=? AND status IN ('finished','failed','canceled') AND (? IS NULL OR status_generation=?)",
+        params![id, generation, generation],
+    )? > 0)
 }
 fn image_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Image> {
     Ok(Image {
@@ -314,10 +323,77 @@ fn preflight_schema(connection: &Connection) -> Result<i64> {
             ));
         }
     }
+    if version >= 5 {
+        require_table(connection, "runs", "status_generation", &["id"], false)?;
+    }
     Ok(version)
 }
 
+// Rebuild only the legacy status CHECK, retaining extension columns, indexes,
+// triggers and rowids. Never rename the old parent: child FKs must keep "runs".
+fn migrate_run_status(connection: &Connection) -> Result<()> {
+    let sql: String = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='runs'",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy = "CHECK(status IN ('running','finished','failed'))";
+    if sql.contains(legacy) {
+        let objects = connection.prepare(
+            "SELECT sql FROM sqlite_schema WHERE tbl_name='runs' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let columns = connection
+            .prepare("SELECT name FROM pragma_table_xinfo('runs') WHERE hidden=0 ORDER BY cid")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let columns = columns
+            .iter()
+            .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (_, definition) = sql
+            .split_once('(')
+            .ok_or_else(|| ApiError::internal("invalid runs schema"))?;
+        let temporary = format!("runs_status_{}", Uuid::new_v4().simple());
+        connection.execute_batch(&format!(
+            "CREATE TABLE {temporary} ({}; INSERT INTO {temporary}(rowid,{columns}) SELECT rowid,{columns} FROM runs; DROP TABLE runs; ALTER TABLE {temporary} RENAME TO runs;",
+            definition.replacen(legacy, "CHECK(status IN ('running','finished','failed','canceled'))", 1)))?;
+        for sql in objects {
+            connection.execute_batch(&sql)?;
+        }
+    }
+    let has_generation: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('runs') WHERE name='status_generation')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_generation {
+        // No reliable acceptance/status order exists for pre-generation data.
+        // Fence legacy journal entries (generation zero) for existing runs;
+        // genuinely new intake captures one. New runs still default to zero.
+        connection.execute_batch("ALTER TABLE runs ADD COLUMN status_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(status_generation)='integer' AND status_generation>=0); UPDATE runs SET status_generation=1;")?;
+    }
+    Ok(())
+}
+
 fn initialize_schema(connection: &mut Connection) -> Result<()> {
+    // SQLite's parent-table rebuild requires FK enforcement disabled outside the
+    // transaction. Restore both connection settings even if the migration fails.
+    let legacy: bool =
+        connection.pragma_query_value(None, "legacy_alter_table", |row| row.get(0))?;
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    connection.pragma_update(None, "legacy_alter_table", "ON")?;
+    let result = initialize_schema_transaction(connection);
+    let restored = connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .and_then(|_| connection.pragma_update(None, "legacy_alter_table", legacy));
+    result?;
+    restored?;
+    Ok(())
+}
+
+fn initialize_schema_transaction(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // Recheck under the write lock. Version zero also covers the original,
     // unversioned schema: IF NOT EXISTS preserves its tables, indexes and data.
@@ -326,7 +402,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
         tx.execute_batch("
             CREATE TABLE IF NOT EXISTS experiments(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL REFERENCES experiments(id), name TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('running','finished','failed')), params TEXT NOT NULL, tags TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('running','finished','failed','canceled')), params TEXT NOT NULL, tags TEXT NOT NULL,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS runs_experiment ON runs(experiment_id,created_at);
             CREATE TABLE IF NOT EXISTS metrics(seq INTEGER PRIMARY KEY AUTOINCREMENT CHECK(seq<=9007199254740991), run_id TEXT NOT NULL REFERENCES runs(id),
@@ -370,6 +446,19 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
                 updated_at INTEGER NOT NULL CHECK(updated_at BETWEEN 0 AND 9007199254740991),
                 workspace TEXT NOT NULL);",
         )?;
+    }
+    if version < 5 {
+        migrate_run_status(&tx)?;
+        if tx
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+        {
+            return Err(ApiError::internal(
+                "foreign key violation during schema migration",
+            ));
+        }
     }
     if version < SCHEMA_VERSION {
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -484,6 +573,7 @@ impl Database {
             readers: Arc::new(readers),
             next_reader: Arc::new(AtomicUsize::new(0)),
             images: Arc::new(images),
+            path: Arc::new(path),
             live: Live::new(),
         })
     }
@@ -854,7 +944,8 @@ impl Database {
         let live = self.live();
         self.writer
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let found = tx
                     .query_row(
                         "SELECT id,name,created_at FROM experiments WHERE name=?",
@@ -905,7 +996,8 @@ impl Database {
         let live = self.live();
         self.writer
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let run = insert_run(&tx, input)?;
                 tx.commit()?;
                 live.publish(Change::Catalog);
@@ -923,16 +1015,17 @@ impl Database {
         if patch
             .status
             .as_ref()
-            .is_some_and(|s| !["running", "finished", "failed"].contains(&s.as_str()))
+            .is_some_and(|s| !["running", "finished", "failed", "canceled"].contains(&s.as_str()))
         {
             return Err(ApiError::bad("invalid run status"));
         }
         let live = self.live();
         self.writer
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let mut run = get_run(&tx, &id)?;
                 let prior = (run.status.clone(), run.params.clone(), run.tags.clone());
+                let explicit_status = patch.status.is_some();
                 if let Some(status) = patch.status {
                     run.status = status;
                 }
@@ -950,16 +1043,21 @@ impl Database {
                     }
                 }
                 if prior == (run.status.clone(), run.params.clone(), run.tags.clone()) {
+                    if explicit_status {
+                        tx.execute("UPDATE runs SET status_generation=status_generation+1 WHERE id=?", [&id])?;
+                        tx.commit()?;
+                    }
                     return Ok(run);
                 }
                 run.updated_at = now();
                 tx.execute(
-                    "UPDATE runs SET status=?,params=?,tags=?,updated_at=? WHERE id=?",
+                    "UPDATE runs SET status=?,params=?,tags=?,updated_at=?,status_generation=status_generation+? WHERE id=?",
                     params![
                         run.status,
                         serde_json::to_string(&run.params).map_err(ApiError::internal)?,
                         serde_json::to_string(&run.tags).map_err(ApiError::internal)?,
                         run.updated_at,
+                        i64::from(explicit_status),
                         id
                     ],
                 )?;
@@ -979,7 +1077,8 @@ impl Database {
         let live = self.live();
         self.writer
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 require_run(&tx, &id)?;
                 let count = batch.metrics.len();
                 let time = now();
@@ -999,11 +1098,16 @@ impl Database {
                         record_metric(&mut changes, tx.last_insert_rowid(), metric, time);
                     }
                 }
+                let reactivated = count > 0 && reactivate_run(&tx, &id, None)?;
                 if count > 0 {
                     tx.execute("UPDATE runs SET updated_at=? WHERE id=?", params![time, id])?;
                 }
                 tx.commit()?;
-                live.publish_batch(metric_changes(id, changes, time));
+                let mut hints = metric_changes(id, changes, time);
+                if reactivated {
+                    hints.push(Change::Catalog);
+                }
+                live.publish_batch(hints);
                 Ok(count)
             })
             .await
@@ -1016,6 +1120,7 @@ impl Database {
         batch_id: String,
         digest: Vec<u8>,
         accepted_at: i64,
+        status_generation: i64,
         batch: MetricBatch,
     ) -> Result<()> {
         fn storage_error(_: rusqlite::Error) -> ApiError {
@@ -1028,7 +1133,7 @@ impl Database {
         safe(accepted_at)?;
         let live = self.live();
         self.writer.call(move |conn| {
-            let tx = conn.transaction().map_err(storage_error)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage_error)?;
             let receipt: Option<(Vec<u8>, i64, i64)> = tx.query_row(
                 "SELECT digest,accepted,accepted_at FROM ingest_receipts WHERE run_id=? AND batch_id=?",
                 params![id, batch_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
@@ -1053,10 +1158,13 @@ impl Database {
                     record_metric(&mut changes, tx.last_insert_rowid(), metric, accepted_at);
                 }
             }
+            let reactivated = reactivate_run(&tx, &id, Some(status_generation))?;
             tx.execute("UPDATE runs SET updated_at=MAX(updated_at,?) WHERE id=?", params![accepted_at,id]).map_err(storage_error)?;
             let run_updated_at: i64 = tx.query_row("SELECT updated_at FROM runs WHERE id=?", [&id], |row| row.get(0)).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
-            live.publish_batch(metric_changes(id, changes, run_updated_at));
+            let mut hints = metric_changes(id, changes, run_updated_at);
+            if reactivated { hints.push(Change::Catalog); }
+            live.publish_batch(hints);
             Ok(())
         }).await
     }
@@ -1163,7 +1271,8 @@ impl Database {
         let live = self.live();
         self.writer
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 require_run(&tx, &run_id)?;
                 let id = Uuid::new_v4().to_string();
                 let filename = format!("{id}.image");
@@ -1183,7 +1292,7 @@ impl Database {
                 temp.write_all(&bytes)?;
                 temp.as_file().sync_all()?;
                 temp.persist_noclobber(&path).map_err(ApiError::internal)?;
-                let indexed = (|| -> Result<()> {
+                let indexed = (|| -> Result<bool> {
                     sync_image_directory(&directory)?;
                     tx.execute(
                         "INSERT INTO images VALUES(?,?,?,?,?,?,?,?)",
@@ -1198,23 +1307,31 @@ impl Database {
                             filename
                         ],
                     )?;
+                    let reactivated = reactivate_run(&tx, &image.run_id, None)?;
                     tx.execute(
                         "UPDATE runs SET updated_at=? WHERE id=?",
                         params![now(), image.run_id],
                     )?;
                     tx.commit()?;
-                    Ok(())
+                    Ok(reactivated)
                 })();
-                if let Err(error) = indexed {
-                    if let Err(cleanup) = std::fs::remove_file(path) {
-                        tracing::error!(%cleanup,"failed to remove unindexed image");
+                let reactivated = match indexed {
+                    Ok(reactivated) => reactivated,
+                    Err(error) => {
+                        if let Err(cleanup) = std::fs::remove_file(path) {
+                            tracing::error!(%cleanup,"failed to remove unindexed image");
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-                live.publish(Change::Image {
+                };
+                let mut hints = vec![Change::Image {
                     run_id: image.run_id.clone(),
                     key: image.key.clone(),
-                });
+                }];
+                if reactivated {
+                    hints.push(Change::Catalog);
+                }
+                live.publish_batch(hints);
                 Ok(image)
             })
             .await
@@ -1288,6 +1405,16 @@ mod tests {
         let db = Database::open(directory.path()).unwrap();
         let (experiment, _) = db.create_experiment("cancel-live".into()).await.unwrap();
         let run = db.create_run(new_run(&experiment.id)).await.unwrap();
+        db.patch_run(
+            run.id.clone(),
+            PatchRun {
+                status: Some("canceled".into()),
+                params: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
         let live = db.live();
         let cursor = live.cursor();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -1333,7 +1460,15 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(db.catalog().await.unwrap().metric_seq, 1);
+        assert!(
+            response
+                .changes
+                .iter()
+                .any(|hint| matches!(hint, Change::Catalog))
+        );
+        let catalog = db.catalog().await.unwrap();
+        assert_eq!(catalog.metric_seq, 1);
+        assert_eq!(catalog.runs[0].status, "running");
     }
 
     #[tokio::test]
@@ -1374,7 +1509,7 @@ mod tests {
                 value: 1.0,
             }],
         };
-        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, batch.clone())
+        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, 0, batch.clone())
             .await
             .unwrap();
         let first = live.poll(cursor).await.unwrap();
@@ -1388,12 +1523,12 @@ mod tests {
             }
         ));
         let cursor = live.cursor();
-        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, batch.clone())
+        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, 0, batch.clone())
             .await
             .unwrap();
         assert_eq!(cursor, live.cursor());
         assert!(
-            db.apply_ingest(run, "batch".into(), vec![2], 2, batch)
+            db.apply_ingest(run, "batch".into(), vec![2], 2, 0, batch)
                 .await
                 .is_err()
         );
@@ -1417,6 +1552,7 @@ mod tests {
                 batch_id.into(),
                 vec![1],
                 accepted_at,
+                0,
                 MetricBatch {
                     metrics: vec![MetricInput {
                         key: "loss".into(),
@@ -1440,6 +1576,7 @@ mod tests {
                 batch_id.into(),
                 vec![1],
                 accepted_at,
+                0,
                 MetricBatch {
                     metrics: vec![MetricInput {
                         key: "loss".into(),

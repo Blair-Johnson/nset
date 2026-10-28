@@ -4,6 +4,36 @@ from nset_client import Client
 
 
 class ClientTests(IsolatedClientTestCase):
+    def test_finish_canceled_flushes_before_forwarding_status(self):
+        from unittest.mock import ANY, Mock, call, patch
+        from nset_client import Run
+        client = self.client(token="test")
+        run = Run(client, {"id": "test-id", "status": "running"})
+        response = {"id": run.id, "status": "canceled"}
+        calls = Mock()
+        with patch.object(run, "flush") as flush, \
+             patch.object(client.http, "request", return_value=response) as update:
+            calls.attach_mock(flush, "flush")
+            calls.attach_mock(update, "update")
+            self.assertEqual(run.finish(status="canceled"), response)
+            self.assertEqual(calls.mock_calls, [
+                call.flush(timeout=ANY),
+                call.update("PATCH", run.path, {"status": "canceled"}),
+            ])
+        self.assertEqual(run.data, response)
+
+    def test_finish_canceled_does_not_update_status_when_flush_fails(self):
+        from unittest.mock import patch
+        from nset_client import Run
+        client = self.client(token="test")
+        run = Run(client, {"id": "test-id", "status": "running"})
+        with patch.object(run, "flush", side_effect=TimeoutError("pending scalars")), \
+             patch.object(client.http, "request") as update:
+            with self.assertRaisesRegex(TimeoutError, "pending scalars"):
+                run.finish(status="canceled")
+            update.assert_not_called()
+        self.assertEqual(run.data["status"], "running")
+
     def test_context_preserves_training_error_when_status_update_fails(self):
         from unittest.mock import Mock
         from nset_client import Run

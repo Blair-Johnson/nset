@@ -9,7 +9,7 @@ export interface Run {
   id: string;
   experiment_id: string;
   name: string;
-  status: "running" | "finished" | "failed";
+  status: "running" | "finished" | "failed" | "canceled";
   params: Record<string, unknown>;
   tags: Record<string, unknown>;
   created_at: number;
@@ -157,10 +157,10 @@ export class Api {
     }
     return response.json();
   }
-  /** Merge tags into a run; a null value removes that tag. */
+  /** Update status and/or merge tags; a null tag value removes that tag. */
   async patchRun(
     id: string,
-    patch: { tags?: Record<string, unknown> },
+    patch: { status?: Run["status"]; tags?: Record<string, unknown> },
   ): Promise<Run> {
     const response = await this.fetcher(`/api/runs/${encodeURIComponent(id)}`, {
       method: "PATCH",

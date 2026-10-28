@@ -51,11 +51,14 @@ writes `<work-dir>/import-report.json`. It exits nonzero if any series count dif
 |---|---|
 | Experiment | Experiment with the same name; deleted ones get a ` (deleted in MLflow)` suffix |
 | Run name, params, tags | Run name, params, tags. Numeric and boolean params become JSON numbers/booleans (`--raw-params` keeps strings) |
-| Run status | `FINISHED` -> finished; `FAILED`/`KILLED` -> failed; others -> running |
+| Run status | `FINISHED` -> finished; `FAILED` -> failed; `KILLED` -> canceled; others -> running |
 | Run ids, times, user, lifecycle | `mlflow_import.*` tags (`run_id`, `start_time`, `end_time`, `status`, `lifecycle_stage`, ...) |
 | Metric history | Scalar series with the original step, timestamp, and value |
 | `mlflow.log_image` | Images with the original key, step, and timestamp (thumbnails skipped) |
 | Other PNG/JPEG/WebP artifacts | With `--other-images`: images keyed `artifacts/<path>` at step 0 |
+
+New imports map `KILLED` to `canceled`. Existing imported databases are not migrated
+automatically; explicitly re-running the importer reapplies the source status mapping.
 
 Not imported: other artifacts (configs, pickles, CSVs, models), datasets/inputs,
 traces, evaluations, prompts, and the model registry. Their counts by extension

@@ -58,9 +58,6 @@ async function fixture(page: Page, large = false, detail = false) {
         main.append(
           renderRunDetail(run, {
             catalog: { experiments: [], runs: [run], series: [] },
-            onBack: () => {
-              (window as any).__back = true;
-            },
           }),
         );
       } else {
@@ -203,7 +200,7 @@ test("390px layout wraps full long values without global overflow", async ({
   });
 });
 
-test("dedicated page has separate tags, full timestamps and routing callbacks", async ({
+test("dedicated page has separate tags and full timestamps without redundant navigation", async ({
   page,
 }) => {
   await fixture(page, false, true);
@@ -217,11 +214,12 @@ test("dedicated page has separate tags, full timestamps and routing callbacks", 
     "datetime",
     "2023-11-14T22:13:20.000Z",
   );
-  await page.getByRole("button", { name: "← Runs", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "← Runs", exact: true }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Charts", exact: true }),
   ).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).__back)).toBe(true);
   await expect(page.locator("[data-run-color-id='run-1']")).toBeVisible();
   await page.evaluate(() =>
     window.addEventListener("nset:run-colors-changed", () => {
