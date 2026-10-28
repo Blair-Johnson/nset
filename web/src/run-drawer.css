@@ -464,6 +464,23 @@
   justify-self: end;
   max-width: 118px;
 }
+/* Drawer-only text treatment; retain the shared status menu and state logic. */
+.run-drawer .run-status-control .run-status-pill,
+.run-drawer .run-status-control .run-status-pill:not(:disabled):hover {
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 11px;
+}
+.run-drawer .run-status-control .run-status-pill:not(:disabled):hover {
+  text-decoration: underline;
+}
+.run-drawer .run-status-chevron {
+  display: none;
+}
 .run-drawer-row .run-status-error {
   max-width: 118px;
 }

@@ -44,11 +44,13 @@ export interface MetricPage {
   snapshot: number;
   total: number;
 }
+export type MetricPolicy = "all" | "latest-per-step";
 export interface MetricTailRequest {
   runId: string;
   key: string;
   after: number;
   snapshot?: number;
+  policy?: MetricPolicy;
 }
 export interface MetricSnapshot {
   points: Point[];
@@ -181,26 +183,33 @@ export class Api {
     }
     return response.json();
   }
+  /** Raw history by default; chart callers explicitly select latest-per-step. */
   async metrics(
     run: string,
     key: string,
     signal: AbortSignal,
     onProgress: (loaded: number, total: number) => void = () => {},
+    policy: MetricPolicy = "all",
   ): Promise<Point[]> {
-    return (await this.metricsSnapshot(run, key, signal, onProgress)).points;
+    return (await this.metricsSnapshot(run, key, signal, onProgress, policy))
+      .points;
   }
   async metricsSnapshot(
     run: string,
     key: string,
     signal: AbortSignal,
     onProgress: (loaded: number, total: number) => void = () => {},
+    policy: MetricPolicy = "all",
   ): Promise<MetricSnapshot> {
+    if (policy !== "all" && policy !== "latest-per-step")
+      throw new MetricProtocolError("Invalid metric history policy.");
     const points: Point[] = [];
     let after: number | undefined,
       snapshot: number | undefined,
       total: number | undefined;
     do {
       const query = new URLSearchParams({ key, limit: "50000" });
+      if (policy !== "all") query.set("policy", policy);
       if (after !== undefined) query.set("after", String(after));
       if (snapshot !== undefined) query.set("snapshot", String(snapshot));
       const page = await this.json<MetricPage>(
@@ -268,6 +277,9 @@ export class Api {
         !ref.key.trim() ||
         ref.key.length > 8192 ||
         !safeCursor(ref.after) ||
+        (ref.policy !== undefined &&
+          ref.policy !== "all" &&
+          ref.policy !== "latest-per-step") ||
         (ref.snapshot !== undefined &&
           (!safeCursor(ref.snapshot) || ref.snapshot < ref.after)) ||
         seen.has(id(ref))

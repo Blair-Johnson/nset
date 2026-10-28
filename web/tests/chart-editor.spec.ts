@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 
 type FixtureOptions = {
   empty?: boolean;
+  records?: boolean;
   explicit?: boolean;
   image?: boolean;
   delayed?: boolean;
@@ -113,6 +114,14 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
           { runId: "r1", key: "train/loss", kind: "metric" },
           { runId: "r2", key: "eval/loss", kind: "metric" },
         ],
+      };
+    if (options.records)
+      card.records = {
+        sourceId: "fixture",
+        runUids: [],
+        x: "step",
+        ys: ["loss"],
+        filters: { any: false, conditions: [] },
       };
     Object.assign(card.config, options.config);
     const state: any = {
@@ -328,7 +337,10 @@ test("isolated draft, Cancel/Escape, focus return and live full-history preview"
     .fill("Draft only");
   await section(page, "Appearance");
   await dialog(page)
-    .getByRole("slider", { name: "Smoothing strength" })
+    .getByRole("checkbox", { name: "Enable smoothing", exact: true })
+    .check();
+  await dialog(page)
+    .getByRole("spinbutton", { name: "Smoothing sigma (steps)", exact: true })
     .fill("50");
   expect((await state(page)).card).toEqual((await state(page)).original);
   await dialog(page)
@@ -498,7 +510,10 @@ test("settings reuse loaded full histories; source changes and close cancel pend
   ).toBeVisible();
   await section(page, "Appearance");
   await dialog(page)
-    .getByRole("slider", { name: "Smoothing strength" })
+    .getByRole("checkbox", { name: "Enable smoothing", exact: true })
+    .check();
+  await dialog(page)
+    .getByRole("spinbutton", { name: "Smoothing sigma (steps)", exact: true })
     .fill("50");
   await dialog(page)
     .getByLabel("Between observations", { exact: true })
@@ -534,7 +549,9 @@ test("image sources have no misleading numeric controls and no metric loads", as
   await fixture(page, { image: true });
   for (const name of ["X axis options", "Y axis options"])
     await expect(dialog(page).getByText(name, { exact: true })).toBeHidden();
-  await expect(dialog(page).getByLabel("Y scale", { exact: true })).toHaveCount(0);
+  await expect(dialog(page).getByLabel("Y scale", { exact: true })).toHaveCount(
+    0,
+  );
   expect(await dialog(page).locator(".ce-source-list input").count()).toBe(1);
   await expect(
     dialog(page).getByRole("checkbox", { name: /eval\/samples —/ }),
@@ -548,7 +565,10 @@ test("image sources have no misleading numeric controls and no metric loads", as
     dialog(page).getByLabel("Card width", { exact: true }),
   ).toHaveCount(0);
   await expect(
-    dialog(page).getByRole("slider", { name: "Smoothing strength" }),
+    dialog(page).getByRole("spinbutton", {
+      name: "Smoothing sigma (steps)",
+      exact: true,
+    }),
   ).toHaveCount(0);
   expect((await state(page)).loads).toHaveLength(0);
 });
@@ -564,7 +584,9 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
   // Essentials are open sections; each axis carries its own options fold;
   // everything else lives in closed folds whose header summarizes state.
   expect(
-    await dialog(page).locator(".ce-settings > section.ce-panel > h3").allTextContents(),
+    await dialog(page)
+      .locator(".ce-settings > section.ce-panel > h3")
+      .allTextContents(),
   ).toEqual(["Chart", "Y axis", "X axis"]);
   expect(
     await dialog(page)
@@ -573,7 +595,9 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
   ).toEqual(["Smoothing", "Appearance"]);
   expect(
     await dialog(page)
-      .locator(".ce-settings details.ce-fold, .ce-settings details.ce-axis-options")
+      .locator(
+        ".ce-settings details.ce-fold, .ce-settings details.ce-axis-options",
+      )
       .evaluateAll((folds) => folds.map((f) => (f as HTMLDetailsElement).open)),
   ).toEqual([false, false, false, false]);
   // Axis options sit inside their own axis section.
@@ -589,11 +613,13 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
             node.closest("section.ce-panel")?.querySelector("h3")?.textContent,
         ),
     ).toBe(heading);
-  for (const state of await dialog(page).locator(".ce-fold-state").allTextContents())
+  for (const state of await dialog(page)
+    .locator(".ce-fold-state")
+    .allTextContents())
     expect(state.trim()).not.toBe("");
   for (const label of ["Chart title", "Plot type", "Runs", "X"])
     await expect(dialog(page).getByLabel(label, { exact: true })).toBeVisible();
-  for (const label of ["Y scale", "Smoothing strength", "Line width"])
+  for (const label of ["Y scale", "Smoothing sigma (steps)", "Line width"])
     await expect(dialog(page).getByLabel(label, { exact: true })).toBeHidden();
   await openFolds(page);
   await expect(
@@ -604,7 +630,7 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
     "Y axis title",
     "X scale",
     "Y bounds",
-    "Smoothing strength",
+    "Smoothing sigma (steps)",
     "Between observations",
     "Line width",
     "Point size",
@@ -616,8 +642,8 @@ test("single settings scroll, persistent preview/actions, keyboard access and 39
         .getByLabel(label, { exact: true })
         .evaluate(
           (node) =>
-            node.closest("details")?.parentElement?.closest("details")?.className ??
-            null,
+            node.closest("details")?.parentElement?.closest("details")
+              ?.className ?? null,
         ),
       label,
     ).toBe(null);
@@ -665,7 +691,9 @@ test("style presets and individual overrides stay synchronized without touching 
   await section(page, "Appearance");
   const defaults = dialog(page).locator(".ce-default-style");
   const observationsShown = () =>
-    page.evaluate(() => (window as any).__editor.rendered?.chart.series[2]?.show);
+    page.evaluate(
+      () => (window as any).__editor.rendered?.chart.series[2]?.show,
+    );
   await defaults
     .getByLabel("Curve style", { exact: true })
     .selectOption("none");
@@ -921,7 +949,9 @@ test("plot type uses concrete names and preserves sources and interpolation acro
     .poll(async () => (await state(page)).plots.at(-1)?.config.style.fill)
     .toBe(0.15);
   // Leaving scatter turns its points off; a line overlay is a separate choice.
-  expect((await state(page)).plots.at(-1).config.style.markers.show).toBe(false);
+  expect((await state(page)).plots.at(-1).config.style.markers.show).toBe(
+    false,
+  );
   await type.selectOption("step");
   await expect
     .poll(async () => (await state(page)).plots.at(-1)?.config.style.path)
@@ -1103,93 +1133,136 @@ test("source and style choices retain keyboard focus, irrelevant advanced errors
   expect((await state(page)).saved).toHaveLength(1);
 });
 
-test("visible None–More slider matches shared dashboard semantics and saves endpoints", async ({
+test("numeric Gaussian bandwidth uses coordinate units, validates positive sigma, and remembers Off", async ({
   page,
 }) => {
   await fixture(page);
-  await section(page, "Appearance");
-  const slider = dialog(page).getByRole("slider", {
-    name: "Smoothing strength",
+  const enabled = dialog(page).getByRole("checkbox", {
+    name: "Enable smoothing",
+    exact: true,
   });
-  await expect(slider).toBeVisible();
-  await expect(slider).toHaveAttribute("min", "0");
-  await expect(slider).toHaveAttribute("max", "100");
-  await expect(slider).toHaveValue("0");
-  await expect(slider).toHaveAttribute("aria-valuetext", "None");
-  await expect(
-    dialog(page).getByLabel("Smooth the curve", { exact: true }),
-  ).toHaveCount(0);
-  await expect(dialog(page).locator(".ce-smoothing-endpoints")).toHaveText(
-    "NoneMore",
-  );
-  expect(await dialog(page).innerText()).not.toMatch(
-    /α|EMA|coefficient|canonical|smoothingStrength|strengthToAlpha/i,
-  );
-  for (const strength of [50, 100, 0, 25.5, 100]) {
-    const shared = await page.evaluate(async (strength) => {
-      const { strengthToSmoothing } =
-        await import("/src/dashboard-controls.ts");
-      return strengthToSmoothing(strength);
-    }, strength);
-    await slider.fill(String(strength));
-    await expect
-      .poll(async () => {
-        const config = (await state(page)).plots.at(-1)?.config;
-        return config && { smoothing: config.smoothing, alpha: config.alpha };
-      })
-      .toEqual(shared);
-    await expect(slider).toHaveAttribute(
-      "aria-valuetext",
-      strength === 0
-        ? "None"
-        : strength === 100
-          ? "More"
-          : `${Math.round(strength)}%`,
-    );
-  }
-  expect((await state(page)).card).toEqual((await state(page)).original);
-  expect((await state(page)).loads).toHaveLength(1);
+  const sigma = dialog(page).getByRole("spinbutton", {
+    name: "Smoothing sigma (steps)",
+    exact: true,
+  });
+  await expect(sigma).toHaveValue("1");
+  await expect(sigma).toBeDisabled();
+  await enabled.check();
+  await sigma.fill("125.25");
+  await expect
+    .poll(async () => (await state(page)).plots.at(-1)?.config.smoothingSigma)
+    .toBe(125.25);
+  await sigma.fill("0");
+  await expect(sigma).toHaveAttribute("aria-invalid", "true");
+  await sigma.fill("0.25");
+  await enabled.uncheck();
+  await expect(sigma).toBeDisabled();
   await dialog(page)
     .getByRole("button", { name: "Save changes", exact: true })
     .click();
   expect((await state(page)).saved[0].config).toMatchObject({
-    smoothing: true,
-    alpha: 0.01,
+    smoothing: false,
+    smoothingSigma: 0.25,
   });
 });
 
-for (const [smoothing, alpha] of [
+for (const [smoothing, smoothingSigma] of [
   [false, 0.1],
   [true, 1],
-  [true, 0.1],
+  [true, 500],
   [true, 0.001],
-  [true, 0.19],
 ] as const) {
-  test(`saved smoothing ${smoothing}/${alpha} projects without rewriting the stored value`, async ({
+  test(`saved sigma ${smoothing}/${smoothingSigma} is displayed without rewriting`, async ({
     page,
   }) => {
-    await fixture(page, { config: { smoothing, alpha } });
-    const expected = await page.evaluate(
-      async (config) => {
-        const { smoothingToStrength } =
-          await import("/src/dashboard-controls.ts");
-        return smoothingToStrength(config);
-      },
-      { smoothing, alpha },
-    );
-    const slider = dialog(page).getByRole("slider", {
-      name: "Smoothing strength",
+    await fixture(page, { config: { smoothing, smoothingSigma } });
+    const sigma = dialog(page).getByRole("spinbutton", {
+      name: "Smoothing sigma (steps)",
+      exact: true,
     });
-    expect(Number(await slider.inputValue())).toBeCloseTo(expected, 10);
+    await expect(sigma).toHaveValue(String(smoothingSigma));
+    if (smoothing) await expect(sigma).toBeEnabled();
+    else await expect(sigma).toBeDisabled();
     await dialog(page)
       .getByRole("button", { name: "Save changes", exact: true })
       .click();
     expect((await state(page)).saved[0].config).toMatchObject({
       smoothing,
-      alpha,
+      smoothingSigma,
     });
   });
 }
+
+test("smoothing unit label follows the scalar X transform and its base", async ({
+  page,
+}) => {
+  await fixture(page);
+  await dialog(page)
+    .getByLabel("X", { exact: true })
+    .selectOption("param:relative");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (seconds)", { exact: true }),
+  ).toBeVisible();
+  await dialog(page).getByLabel("X scale", { exact: true }).selectOption("log");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (decades)", { exact: true }),
+  ).toBeVisible();
+  await dialog(page)
+    .getByLabel("X log base", { exact: true })
+    .selectOption("2");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+  ).toBeVisible();
+});
+
+test("XY join transforms are separate from the displayed metric-X scale", async ({
+  page,
+}) => {
+  await fixture(page);
+  await expect(
+    dialog(page).getByLabel("Join scale", { exact: true }),
+  ).toHaveCount(0);
+  await dialog(page)
+    .getByLabel("X", { exact: true })
+    .selectOption("key:eval/accuracy");
+  await dialog(page)
+    .getByLabel("Join scale", { exact: true })
+    .selectOption("log");
+  await dialog(page)
+    .getByLabel("Join log base", { exact: true })
+    .selectOption("2");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+  ).toBeVisible();
+  await dialog(page)
+    .getByLabel("X scale", { exact: true })
+    .selectOption("asinh");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+  ).toBeVisible();
+  await dialog(page)
+    .getByLabel("Matched at", { exact: true })
+    .selectOption("relative");
+  await dialog(page)
+    .getByLabel("Join scale", { exact: true })
+    .selectOption("asinh");
+  await dialog(page)
+    .getByLabel("Join asinh threshold (seconds)", { exact: true })
+    .fill("2.5");
+  await expect(
+    dialog(page).getByLabel("Smoothing sigma (asinh units)", { exact: true }),
+  ).toBeVisible();
+  await dialog(page)
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  expect((await state(page)).saved[0].config).toMatchObject({
+    axis: "relative",
+    xScale: "asinh",
+    joinScale: "asinh",
+    joinLog: 2,
+    joinAsinh: 2.5,
+  });
+});
 
 test("all three X axes reset incompatible bounds and preview relative to each run start", async ({
   page,
@@ -1310,7 +1383,10 @@ for (const resize of [false, true]) {
     );
     const before = (await state(page)).renderCount;
     await dialog(page)
-      .getByRole("slider", { name: "Smoothing strength" })
+      .getByRole("checkbox", { name: "Enable smoothing", exact: true })
+      .check();
+    await dialog(page)
+      .getByRole("spinbutton", { name: "Smoothing sigma (steps)", exact: true })
       .fill("50");
     await expect
       .poll(async () => (await state(page)).renderCount)
@@ -1364,9 +1440,9 @@ test("default style edits survive axis clones, preview, save and reopen", async 
       .getByRole("button", { name: "Edit loss chart", exact: true })
       .click();
     await openFolds(page);
-    await expect(
-      dialog(page).getByLabel("X", { exact: true }),
-    ).toHaveValue(`param:${axis}`);
+    await expect(dialog(page).getByLabel("X", { exact: true })).toHaveValue(
+      `param:${axis}`,
+    );
     await expect(
       dialog(page).getByLabel("Line width", { exact: true }),
     ).toHaveValue(width);
@@ -1779,7 +1855,9 @@ test("reused scalar preview reports current unavailable-source warnings", async 
   await dialog(page)
     .getByRole("checkbox", { name: /old\/loss/ })
     .click();
-  await expect(dialog(page).getByRole("checkbox", { name: /old\/loss/ })).toHaveCount(0);
+  await expect(
+    dialog(page).getByRole("checkbox", { name: /old\/loss/ }),
+  ).toHaveCount(0);
   await dialog(page)
     .getByRole("checkbox", { name: /eval\/accuracy —/ })
     .check();
@@ -1810,7 +1888,10 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
     await dialog(page).getByLabel("Y minimum", { exact: true }).fill("0.1");
     await dialog(page).getByLabel("Y maximum", { exact: true }).fill("1000");
     await dialog(page)
-      .getByRole("slider", { name: "Smoothing strength" })
+      .getByRole("checkbox", { name: "Enable smoothing", exact: true })
+      .check();
+    await dialog(page)
+      .getByRole("spinbutton", { name: "Smoothing sigma (steps)", exact: true })
       .fill("50");
     await expect
       .poll(async () => (await state(page)).plots.at(-1).config.yMax)
@@ -1843,8 +1924,11 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
         dialog(page).getByLabel("Y scale", { exact: true }),
       ).toHaveValue(original.config.yScale);
       await expect(
-        dialog(page).getByRole("slider", { name: "Smoothing strength" }),
-      ).toHaveValue("0");
+        dialog(page).getByRole("spinbutton", {
+          name: "Smoothing sigma (steps)",
+          exact: true,
+        }),
+      ).toHaveValue("1");
     } else {
       const saved = (await state(page)).saved[0];
       expect(saved.source).toEqual({
@@ -1855,7 +1939,7 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
       expect(saved.config.yMin).toBe(0.1);
       expect(saved.config.yMax).toBe(1000);
       expect(saved.config.smoothing).toBe(expected.smoothing);
-      expect(saved.config.alpha).toBe(expected.alpha);
+      expect(saved.config.smoothingSigma).toBe(expected.smoothingSigma);
       // Emulate the host persisting its successful Save result before reopening.
       await page.evaluate(() => {
         const state = (window as any).__editor;
@@ -1871,7 +1955,10 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
         dialog(page).getByLabel("Y maximum", { exact: true }),
       ).toHaveValue("1000");
       await expect(
-        dialog(page).getByRole("slider", { name: "Smoothing strength" }),
+        dialog(page).getByRole("spinbutton", {
+          name: "Smoothing sigma (steps)",
+          exact: true,
+        }),
       ).toHaveValue("50");
       await expect(status()).toHaveText("1 curve(s) · 301 observations");
       expect((await state(page)).card).toEqual(saved);
@@ -1879,7 +1966,9 @@ test("full editor journey cancels unchanged, then saves exact sources, range, an
   }
 });
 
-test("scrolling inside the editor never scrolls the page behind it", async ({ page }) => {
+test("scrolling inside the editor never scrolls the page behind it", async ({
+  page,
+}) => {
   await fixture(page, { many: true });
   await page.evaluate(() => {
     const filler = document.createElement("div");
@@ -1888,7 +1977,9 @@ test("scrolling inside the editor never scrolls the page behind it", async ({ pa
     window.scrollTo(0, 0);
   });
   expect(
-    await page.evaluate(() => document.documentElement.scrollHeight > innerHeight * 2),
+    await page.evaluate(
+      () => document.documentElement.scrollHeight > innerHeight * 2,
+    ),
   ).toBe(true);
   const settings = dialog(page).locator(".ce-settings");
   const targets = [
@@ -1905,11 +1996,37 @@ test("scrolling inside the editor never scrolls the page behind it", async ({ pa
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
   }
   // The settings column itself still scrolls.
-  const [scrollH, clientH] = await settings.evaluate((n) => [n.scrollHeight, n.clientHeight]);
+  const [scrollH, clientH] = await settings.evaluate((n) => [
+    n.scrollHeight,
+    n.clientHeight,
+  ]);
   if (scrollH > clientH + 10) {
     await settings.hover();
     await page.mouse.wheel(0, 300);
-    await expect.poll(() => settings.evaluate((n) => n.scrollTop)).toBeGreaterThan(0);
+    await expect
+      .poll(() => settings.evaluate((n) => n.scrollTop))
+      .toBeGreaterThan(0);
   }
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
+test("paired records do not offer coordinate smoothing", async ({ page }) => {
+  await fixture(page, { records: true });
+  await expect(
+    dialog(page).getByRole("checkbox", {
+      name: "Enable smoothing",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(
+    dialog(page).getByText(
+      "Paired records have no independent coordinate for smoothing.",
+    ),
+  ).toBeVisible();
+  await expect(
+    dialog(page).getByRole("spinbutton", { name: /Smoothing sigma/ }),
+  ).toHaveCount(0);
+  await expect(
+    dialog(page).getByLabel("Join scale", { exact: true }),
+  ).toHaveCount(0);
 });

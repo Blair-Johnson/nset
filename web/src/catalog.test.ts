@@ -367,11 +367,11 @@ test("watch deduplicates shared X/Y refs and coalesces dirty series in one batch
   assert.equal(changes, 1);
   assert.deepEqual(
     (await store.load(ref("x"))).map((p) => p.seq),
-    [1, 9],
+    [9],
   );
   assert.deepEqual(
     (await store.load(ref("y"))).map((p) => p.step),
-    [1, 1],
+    [1],
   );
   stop();
   stopShared();
@@ -398,7 +398,7 @@ test("dirty hints racing initial loads and catchup survive publication", async (
   await tick();
   assert.deepEqual(
     (await store.load(ref("a"))).map((p) => p.seq),
-    [1, 7, 12],
+    [12],
   );
   stop();
   store.clear();
@@ -417,7 +417,7 @@ test("dirty inactive caches wait for demand and evicted histories start fresh", 
   const fresh = store.load(ref("a"));
   await wait();
   tails[0].resolve(tailResult(tails[0], 5));
-  assert.equal((await fresh).length, 2);
+  assert.equal((await fresh).length, 1);
   const b = store.load(ref("b"));
   calls[1].resolve(points);
   await b;
@@ -456,7 +456,7 @@ test("hidden tabs suspend and abort tails but leave initial loads intact", async
   await tick();
   assert.deepEqual(
     (await store.load(ref("a"))).map((p) => p.seq),
-    [1, 7],
+    [7],
   );
   stop();
   store.clear();
@@ -513,7 +513,7 @@ test("failed catchup retains the complete prefix and retries with backoff", asyn
   await tick();
   assert.deepEqual(
     (await store.load(ref("a"))).map((p) => p.seq),
-    [1, 8],
+    [8],
   );
   assert.equal(statuses.at(-1), null);
   stop();
@@ -586,7 +586,7 @@ test("auth failures retain dirtiness but do not automatically retry", async () =
   tails[1].resolve(tailResult(tails[1], 3));
   assert.deepEqual(
     (await retry).map((point) => point.seq),
-    [1, 3],
+    [3],
   );
   stop();
   store.clear();
@@ -623,7 +623,89 @@ test("a final dirty series recovers after a long outage without fresh hints", as
   await tick();
   assert.deepEqual(
     (await store.load(ref("a"))).map((p) => p.seq),
-    [1, 9],
+    [9],
   );
   assert.equal(calls.length, 1);
+});
+
+test("initial chart projection chooses greatest seq, not timestamp or value", async () => {
+  const { api, calls } = deferredApi(),
+    store = new MetricStore(api);
+  const old = { seq: 1, step: 4, timestamp: 100, value: 100 };
+  const other = { seq: 2, step: 9, timestamp: 200, value: 5 };
+  const winner = { seq: 3, step: 4, timestamp: -100, value: -10 };
+  const raw = [old, other, winner];
+  const loaded = store.load(ref("a"));
+  calls[0].resolve(raw);
+  assert.deepEqual(await loaded, [other, winner]);
+  assert.deepEqual(raw, [old, other, winner]);
+  assert.deepEqual(await store.load(ref("a")), [other, winner]);
+  assert.equal(calls.length, 1);
+  store.clear();
+});
+
+test("chart policy pins paged history and merges late old-step tails without reload", async () => {
+  const old = { seq: 1, step: 1, timestamp: 100, value: 10 };
+  const later = { seq: 4, step: 9, timestamp: 200, value: 20 };
+  const correction = { seq: 12, step: 1, timestamp: -100, value: -10 };
+  const gets: URLSearchParams[] = [];
+  const tails: import("./api").MetricTailRequest[][] = [];
+  const api = new Api(
+    () => "",
+    async (url, init) => {
+      if (init?.method === "POST") {
+        const { series } = JSON.parse(String(init.body));
+        tails.push(series);
+        const first = tails.length === 1;
+        return Response.json({
+          series: [
+            {
+              runId: "run",
+              key: "a",
+              snapshot: first ? 15 : 30,
+              points: first ? [correction] : [],
+              next_after: null,
+            },
+          ],
+        });
+      }
+      gets.push(new URL(String(url), "http://local").searchParams);
+      return Response.json({
+        points: gets.length === 1 ? [old] : [later],
+        total: 2,
+        snapshot: 10,
+        next_after: gets.length === 1 ? 1 : null,
+      });
+    },
+  );
+  const store = new MetricStore(api);
+  const stop = store.watch([ref("a")], () => {});
+  try {
+    const displayed = await store.load(ref("a"));
+    assert.deepEqual(displayed, [old, later]);
+    assert.deepEqual(
+      gets.map((q) => q.get("policy")),
+      ["latest-per-step", "latest-per-step"],
+    );
+    assert.equal(gets[1].get("snapshot"), "10");
+    store.markDirty();
+    assert.deepEqual(await store.load(ref("a")), [later, correction]);
+    assert.deepEqual(displayed, [old, later]);
+    assert.equal(tails[0][0].after, 10);
+    assert.equal(tails[0][0].policy, "latest-per-step");
+    store.markDirty();
+    assert.deepEqual(await store.load(ref("a")), [later, correction]);
+    assert.equal(tails[1][0].after, 15);
+    store.markDirty();
+    await store.load(ref("a"));
+    assert.equal(tails[2][0].after, 30);
+    const shared = store.watch([ref("a")], () => {});
+    await store.load(ref("a"));
+    shared();
+    assert.equal(gets.length, 2);
+    assert.equal(tails.length, 3);
+  } finally {
+    stop();
+    store.clear();
+  }
 });

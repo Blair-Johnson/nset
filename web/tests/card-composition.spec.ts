@@ -21,6 +21,7 @@ async function fixture(page: Page, bottom = false) {
   await page.setViewportSize({ width: 1800, height: 1000 });
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/views") return route.fulfill({ json: { views: [] } });
     if (path === "/api/catalog")
       return route.fulfill({
         json: threeRuns({
@@ -151,12 +152,14 @@ async function fixture(page: Page, bottom = false) {
     s.viewport = c.plot.viewport();
     s.pins = { ...c.pins };
   });
+  const dashboard = page.locator("#dashboard");
   if (bottom)
-    await page.evaluate(() =>
-      window.scrollTo(0, document.documentElement.scrollHeight),
-    );
+    await dashboard.evaluate((node) => node.scrollTo(0, node.scrollHeight));
   await frames(page, 4);
-  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(1000);
+  expect(await dashboard.evaluate((node) => node.scrollTop)).toBeGreaterThan(
+    1000,
+  );
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   return () => histories;
 }
 
@@ -168,7 +171,7 @@ async function frames(page: Page, count = 3) {
 
 async function geometry(page: Page) {
   await frames(page, 4);
-  return page.evaluate(() => {
+  const measurement = await page.evaluate(() => {
     const s = (window as any).resizeTest,
       c = s.cards["resize-13"];
     const rect = (el: Element) => {
@@ -204,9 +207,12 @@ async function geometry(page: Page) {
       samePlot: s.plot === c.plot.chart,
       sameNavigation: s.navigation === c.plot.navigation,
       sameData: s.data === c.data,
-      scroll: scrollY,
+      scroll: document.getElementById("dashboard")!.scrollTop,
+      windowScroll: window.scrollY,
     };
   });
+  expect(measurement.windowScroll).toBe(0);
+  return measurement;
 }
 
 async function capture(page: Page, info: TestInfo, name: string) {
@@ -268,7 +274,7 @@ for (const direction of ["grow", "shrink"] as const)
     }, direction);
     await page
       .locator(`${target} .card-resize-handle`)
-      .scrollIntoViewIfNeeded();
+      .evaluate((node) => node.scrollIntoView({ block: "center" }));
     await frames(page);
     const before = await geometry(page);
     const handle = page.locator(`${target} .card-resize-handle`),
@@ -306,7 +312,8 @@ for (const direction of ["grow", "shrink"] as const)
             return [el.dataset.cardId, r.x, r.y, r.width, r.height];
           }),
           layout: { ...c.spec.layout },
-          scroll: scrollY,
+          scroll: document.getElementById("dashboard")!.scrollTop,
+          windowScroll: window.scrollY,
         });
         if (s.recording) requestAnimationFrame(sample);
       };
@@ -344,6 +351,7 @@ for (const direction of ["grow", "shrink"] as const)
       expect(frame.siblings).toEqual(evidence.frames[0].siblings);
       expect(frame.layout).toEqual(before.layout);
       expect(frame.scroll).toBe(before.scroll);
+      expect(frame.windowScroll).toBe(0);
     }
     expect(preview.card.width - before.card.width).toBe(
       direction === "grow" ? 180 : -180,
@@ -353,7 +361,7 @@ for (const direction of ["grow", "shrink"] as const)
       path: info.outputPath(`${direction}-preview.png`),
     });
     await page.mouse.up();
-    const after = await capture(page, info, `${direction}-committed`);
+    const after = await geometry(page);
     await frames(page, 6);
     const committedFrames = await page.evaluate(() => {
       const s = (window as any).resizeTest;
@@ -369,6 +377,7 @@ for (const direction of ["grow", "shrink"] as const)
       expect(frame.layout).toEqual(after.layout);
       expect(frame.target).toEqual({ x: after.card.x, y: after.card.y });
       expect(frame.siblings).toEqual(committedFrames[0].siblings);
+      expect(frame.windowScroll).toBe(0);
     }
     expect(after.layout.width).toBe(
       before.layout.width + (direction === "grow" ? 180 : -180),
@@ -384,6 +393,9 @@ for (const direction of ["grow", "shrink"] as const)
         after.sameNavigation,
     ).toBe(true);
     expect(await page.locator(".card-resizing-slot").count()).toBe(0);
+    // Element screenshots may scroll a wrapped card into view; record them only
+    // after the frame-stability assertions have finished.
+    await capture(page, info, `${direction}-committed`);
   });
 
 test("log/log three-run folds preserve the canvas and resize persists only base height", async ({
@@ -422,7 +434,9 @@ test("log/log three-run folds preserve the canvas and resize persists only base 
   expect(crossing.plot).toEqual(normal.plot);
   expect(crossing.viewport).toEqual(normal.viewport);
   const h = card.locator(".card-resize-handle");
-  await h.scrollIntoViewIfNeeded();
+  // Keep this pure size check away from the panel's auto-scroll edge.
+  await h.evaluate((node) => node.scrollIntoView({ block: "center" }));
+  await frames(page);
   const box = (await h.boundingBox())!;
   await page.mouse.move(box.x + 10, box.y + 10);
   await page.mouse.down();
@@ -434,7 +448,13 @@ test("log/log three-run folds preserve the canvas and resize persists only base 
   expect(resized.viewport).toEqual(normal.viewport);
   await card.getByRole("button", { name: "Clear cursors" }).click();
   const cleared = await geometry(page);
-  expect(cleared.pins).toEqual({ a: null, b: null, threshold: null, yA: null, yB: null });
+  expect(cleared.pins).toEqual({
+    a: null,
+    b: null,
+    threshold: null,
+    yA: null,
+    yB: null,
+  });
   expect(cleared.viewport).toEqual(resized.viewport);
   await card.getByText("Show legend", { exact: true }).click();
   const closed = await geometry(page);

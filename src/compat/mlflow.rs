@@ -404,6 +404,7 @@ async fn history(ctx: &Compat, run: &Value, key: &str) -> Result<Vec<Value>> {
             .metrics(
                 run["native_id"].as_str().unwrap().to_owned(),
                 MetricQuery {
+                    policy: Default::default(),
                     key: key.to_owned(),
                     after,
                     snapshot,

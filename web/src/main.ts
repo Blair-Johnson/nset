@@ -402,6 +402,14 @@ const sectionNodes = new Map<string, HTMLElement>();
 const sectionDrag = new SectionDrag();
 const chartDrag = new ChartDrag();
 const scrollPositions = new Map<string, number>();
+function pageScrollTop(): number {
+  return document.getElementById("dashboard")?.scrollTop ?? window.scrollY;
+}
+function scrollPageTo(top: number): void {
+  const dashboard = document.getElementById("dashboard");
+  if (dashboard) dashboard.scrollTo(0, top);
+  else window.scrollTo(0, top);
+}
 let previousRoute = "";
 let suspendedDashboard: DocumentFragment | undefined;
 let suspendedFocus: HTMLElement | undefined;
@@ -828,7 +836,7 @@ function renderPage() {
   disposeRunTable();
   activeEditor?.close();
   activeEditor = undefined;
-  if (previousRoute) scrollPositions.set(previousRoute, window.scrollY);
+  if (previousRoute) scrollPositions.set(previousRoute, pageScrollTop());
   const route = currentRoute();
   scheduleServerPoll();
   if (route.serverId && serverWorkspace?.workspace.id !== route.serverId) {
@@ -1004,9 +1012,7 @@ function renderPage() {
     }
   }
   if (routeChanged)
-    requestAnimationFrame(() =>
-      window.scrollTo(0, scrollPositions.get(key) ?? 0),
-    );
+    requestAnimationFrame(() => scrollPageTo(scrollPositions.get(key) ?? 0));
 }
 function editCard(workspace: Workspace, card: ChartSpec, add = false) {
   activeEditor?.close();
@@ -1156,6 +1162,17 @@ async function confirmRemoval(
 
 function workspaceToolbar(workspace: Workspace) {
   const host = $("workspace-toolbar");
+  const settings = dashboardSettings(workspace);
+  const signature = settings.smoothingSignature ?? "mixed";
+  const smoothingMax =
+    host.dataset.smoothingSignature === signature
+      ? Number(
+          host.querySelector<HTMLInputElement>(
+            '[aria-label="Dashboard smoothing"]',
+          )?.max ?? 0,
+        )
+      : undefined;
+  host.dataset.smoothingSignature = signature;
   const focused = host.contains(document.activeElement)
     ? document.activeElement?.getAttribute("aria-label")
     : null;
@@ -1203,7 +1220,7 @@ function workspaceToolbar(workspace: Workspace) {
   }
   views.value = workspace.id;
   views.onchange = () => {
-    scrollPositions.set(workspace.id, window.scrollY);
+    scrollPositions.set(workspace.id, pageScrollTop());
     if (shared && !views.value) {
       navigate(workspace.experimentId, "charts");
       return;
@@ -1224,7 +1241,7 @@ function workspaceToolbar(workspace: Workspace) {
     if (shared) navigate(workspace.experimentId, "charts");
     else renderPage();
     requestAnimationFrame(() =>
-      window.scrollTo(0, scrollPositions.get(views.value) ?? 0),
+      scrollPageTo(scrollPositions.get(views.value) ?? 0),
     );
   };
   const search = element("input");
@@ -1535,7 +1552,6 @@ function workspaceToolbar(workspace: Workspace) {
     group.append(naming);
     host.append(group);
   }
-  const settings = dashboardSettings(workspace);
   if (settings.count) {
     const apply = (controls: DashboardControls) =>
       change(workspace, () => {
@@ -1545,8 +1561,11 @@ function workspaceToolbar(workspace: Workspace) {
       createDashboardControls({
         axis: settings.axis,
         smoothing: settings.smoothing,
+        smoothingMax,
+        smoothingUnit: settings.smoothingUnit,
+        smoothingSignature: settings.smoothingSignature,
         onAxis: (axis) => apply({ axis }),
-        onSmoothing: (smoothingStrength) => apply({ smoothingStrength }),
+        onSmoothing: (smoothingSigma) => apply({ smoothingSigma }),
       }),
     );
   }

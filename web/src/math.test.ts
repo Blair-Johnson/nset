@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canonicalize, ema, makeInterpolator, type Interpolation, type Point, type XY } from './math.ts';
+import { canonicalize, latestPerStep, makeInterpolator, type Interpolation, type Point, type XY } from './math.ts';
 
 function near(actual: number | null, expected: number, tolerance = 2e-14): void {
   assert.notEqual(actual, null);
@@ -17,7 +17,7 @@ test('canonicalize: ascending selected axis, greatest seq wins, no mutation', ()
   const source = [point(6, 2, 30, 6), point(7, 0, 20, 7), point(5, 2, 10, 5), point(4, 1, 20, 4)];
   const before = structuredClone(source);
   assert.deepEqual(canonicalize(source, 'step'), [[0, 7], [1, 4], [2, 6]]);
-  assert.deepEqual(canonicalize(source, 'timestamp'), [[10, 5], [20, 7], [30, 6]]);
+  assert.deepEqual(canonicalize(source, 'timestamp'), [[20, 7], [30, 6]]);
   assert.deepEqual(source, before);
   assert.deepEqual(canonicalize([], 'step'), []);
   assert.deepEqual(canonicalize([point(2, 0, 0, 1), point(2, 0, 0, 9)], 'step'), [[0, 9]]);
@@ -31,24 +31,6 @@ test('canonicalize validates all rows, including discarded and unselected fields
     }
   }
   assert.throws(() => canonicalize([], 'bad' as 'step'), RangeError);
-});
-
-test('EMA uses the full observation sequence, not x distance or viewport', () => {
-  const source: XY[] = [[-2, -4], [0, 4], [9, 0], [100, 8]];
-  assert.deepEqual(ema(source, 0.5), [[-2, -4], [0, 0], [9, 0], [100, 4]]);
-  assert.deepEqual(ema(source, 1), source);
-  assert.notEqual(ema(source, 1)[0], source[0]);
-  assert.deepEqual(ema([], 0.2), []);
-  assert.deepEqual(ema([[0, -2]], 0.2), [[0, -2]]);
-  assert.deepEqual(source, [[-2, -4], [0, 4], [9, 0], [100, 8]]);
-  assert.equal(ema(source, 0.5)[3][1], 4);
-  assert.equal(ema(source.slice(2), 0.5)[1][1], 4);
-  assert.notEqual(ema(source, 0.5)[2][1], ema(source.slice(1), 0.5)[1][1]);
-});
-
-test('EMA rejects invalid alpha and keeps extreme opposite signs finite', () => {
-  for (const alpha of [0, -1, 1.0001, NaN, Infinity]) assert.throws(() => ema([], alpha), RangeError);
-  assert.deepEqual(ema([[0, -Number.MAX_VALUE], [1, Number.MAX_VALUE]], 0.5), [[0, -Number.MAX_VALUE], [1, 0]]);
 });
 
 for (const kind of kinds) {
@@ -118,7 +100,6 @@ for (const kind of kinds) {
     }
     for (const bad of [[[0, 1], [0, 2]], [[1, 1], [0, 2]]] as XY[][]) {
       assert.throws(() => makeInterpolator(bad, kind), RangeError);
-      assert.throws(() => ema(bad, 0.5), RangeError);
     }
     assert.throws(() => makeInterpolator([[-Number.MAX_VALUE, 0], [Number.MAX_VALUE, 1]], kind), /width/);
   });
@@ -232,11 +213,7 @@ test('affine PCHIP honors subnormal queries and threshold roots exactly', () => 
   }
 });
 
-test('EMA nonfinite inputs and unrepresentable endpoint derivatives fail explicitly', () => {
-  for (const value of [NaN, Infinity, -Infinity]) {
-    assert.throws(() => ema([[value, 1]], 0.5), RangeError);
-    assert.throws(() => ema([[0, value]], 0.5), RangeError);
-  }
+test('unrepresentable endpoint derivatives fail explicitly', () => {
   assert.throws(() => makeInterpolator([[0, 0], [0.5, 8e307], [1, 0]], 'pchip'), /endpoint derivative/);
 });
 
@@ -297,4 +274,28 @@ test('relative irregular-grid PCHIP keeps independently known interpolation and 
   near(curve.at(5500), 349 / 624);
   near(curve.at(7000), 509 / 312);
   near(curve.crossings(509 / 312).points[0], 7000);
+});
+
+
+test('latestPerStep: highest sequence then last tie; survivors keep input order and are copied', () => {
+  const source = [point(9, 2, 100, 1), point(8, 1, 100, 2), point(9, 2, 200, 3),
+    point(7, 0, 300, 4), point(6, 0, 400, 5)];
+  const before = structuredClone(source);
+  const latest = latestPerStep(source);
+  assert.deepEqual(latest, [source[1], source[2], source[3]]);
+  assert.notEqual(latest[0], source[1]);
+  assert.deepEqual(source, before);
+  assert.deepEqual(latestPerStep([]), []);
+  for (const field of ['seq', 'step', 'timestamp', 'value'] as const) {
+    assert.throws(() => latestPerStep([{ ...source[0], [field]: NaN }, source[2]]), RangeError);
+  }
+});
+
+test('reposts at a later timestamp replace their old step before coordinate winner selection', () => {
+  const source = [point(1, 0, 100, 10), point(2, 1, 200, 20), point(3, 0, 300, 30)];
+  assert.deepEqual(canonicalize(source, 'timestamp'), [[200, 20], [300, 30]]);
+  assert.deepEqual(canonicalize(source, 'relative', 100), [[100, 20], [200, 30]]);
+  // A coordinate tie between surviving steps still takes highest seq/last input.
+  const ties = [point(5, 0, 100, 5), point(5, 1, 100, 6), point(5, 0, 100, 7)];
+  assert.deepEqual(canonicalize(ties, 'timestamp'), [[100, 7]]);
 });

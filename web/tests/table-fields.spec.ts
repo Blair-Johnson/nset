@@ -239,7 +239,7 @@ test("column state survives detail/export and Charts return; removal never chang
   ).toEqual([]);
 });
 
-test("existing shell routes retain columns, search, sort, page and selection", async ({
+test("existing shell routes retain columns, search, sort, all rows and selection", async ({
   page,
 }, info) => {
   const runs = Array.from({ length: 120 }, (_, i) => ({
@@ -302,7 +302,7 @@ test("existing shell routes retain columns, search, sort, page and selection", a
   await page
     .getByRole("button", { name: "validation/loss · latest", exact: true })
     .click();
-  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.locator("tbody tr")).toHaveCount(120);
   await page
     .getByRole("checkbox", { name: "Select Candidate 050", exact: true })
     .check();
@@ -330,7 +330,10 @@ test("existing shell routes retain columns, search, sort, page and selection", a
     .locator(".view-switch")
     .getByRole("button", { name: "Runs", exact: true })
     .click();
-  await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();
+  await expect(page.locator("tbody tr")).toHaveCount(120);
+  await expect(
+    page.getByRole("button", { name: /^(Next|Previous)$/ }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("searchbox", {
       name: "Search runs, parameters or tags",
@@ -343,7 +346,7 @@ test("existing shell routes retain columns, search, sort, page and selection", a
       .locator(".."),
   ).toHaveAttribute("aria-sort", "ascending");
   await expect(
-    page.locator("tbody tr").first().locator(".parameter-cell"),
+    page.locator('tbody tr[data-run-id="run-50"]').locator(".parameter-cell"),
   ).toHaveText(["50", "0.05"]);
   await page.getByRole("button", { name: "View charts", exact: true }).click();
   await page.locator(".dashboard-cell canvas").first().waitFor();
@@ -351,12 +354,15 @@ test("existing shell routes retain columns, search, sort, page and selection", a
     .locator(".view-switch")
     .getByRole("button", { name: "Runs", exact: true })
     .click();
-  await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();
+  await expect(page.locator("tbody tr")).toHaveCount(120);
+  await expect(
+    page.getByRole("button", { name: /^(Next|Previous)$/ }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("checkbox", { name: "Select Candidate 050", exact: true }),
   ).toBeChecked();
   await expect(
-    page.locator("tbody tr").first().locator(".parameter-cell"),
+    page.locator('tbody tr[data-run-id="run-50"]').locator(".parameter-cell"),
   ).toHaveText(["50", "0.05"]);
   await page.getByText("Columns", { exact: true }).click();
   await expect(search).toHaveValue("lr");

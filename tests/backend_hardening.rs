@@ -180,6 +180,7 @@ async fn version_one_migrates_receipts_without_recreating_legacy_objects() {
         .metrics(
             run.id,
             nset::models::MetricQuery {
+                policy: Default::default(),
                 key: "loss".into(),
                 after: None,
                 snapshot: None,

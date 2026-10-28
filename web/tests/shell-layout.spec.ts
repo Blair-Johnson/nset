@@ -95,8 +95,11 @@ async function scrollableCharts(page: Page) {
   await page.locator(".dashboard-cell canvas").first().waitFor();
 }
 
-async function scrollPastHeader(page: Page) {
-  await page.evaluate(() => window.scrollTo(0, 0));
+async function scrollChartsUnderToolbar(page: Page) {
+  const dashboard = page.locator(".dashboard");
+  await dashboard.evaluate((node) => node.scrollTo(0, 0));
+  const header = page.locator(".app-header");
+  const initialHeader = (await header.boundingBox())!;
   const toolbar = page.locator(".workspace-toolbar");
   const initial = (await toolbar.boundingBox())!;
   const control = toolbar.getByRole("button", { name: "Runs", exact: true });
@@ -104,7 +107,9 @@ async function scrollPastHeader(page: Page) {
   await expect(toolbar).toHaveCSS("padding-bottom", "6px");
   await expect(toolbar).toHaveCSS("margin-bottom", "0px");
   for (const offset of [1, 3, 6, 450, 0, 450]) {
-    await page.evaluate((y) => window.scrollTo(0, y), offset);
+    await dashboard.evaluate((node, y) => node.scrollTo(0, y), offset);
+    await expect.poll(() => header.boundingBox()).toEqual(initialHeader);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
     await expect
       .poll(() => toolbar.boundingBox())
       .toMatchObject({
@@ -132,7 +137,7 @@ async function scrollPastHeader(page: Page) {
       .toBe(true);
   }
   await expect
-    .poll(() => page.evaluate(() => window.scrollY))
+    .poll(() => dashboard.evaluate((node) => node.scrollTop))
     .toBeGreaterThan(400);
   await expect
     .poll(() =>
@@ -149,6 +154,106 @@ async function scrollPastHeader(page: Page) {
     .toBeLessThanOrEqual(1);
 }
 
+for (const width of [1440, 390]) {
+  test(`chart and drawer wheel scrolling leave the app shell static at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await fixture(page);
+    await scrollableCharts(page);
+    const dashboard = page.locator(".dashboard");
+    const header = page.locator(".app-header");
+    const toolbar = page.locator(".workspace-toolbar");
+    const initialHeader = (await header.boundingBox())!;
+    const initialToolbar = (await toolbar.boundingBox())!;
+    const shellIsStatic = async () => {
+      await expect.poll(() => header.boundingBox()).toEqual(initialHeader);
+      await expect.poll(() => toolbar.boundingBox()).toEqual(initialToolbar);
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
+      expect(
+        await page.evaluate(() => {
+          const root = document.documentElement;
+          return root.scrollHeight - root.clientHeight;
+        }),
+      ).toBeLessThanOrEqual(1);
+    };
+    await expect(dashboard).toHaveCSS("overflow-y", "auto");
+    await expect(dashboard).toHaveCSS("overscroll-behavior-y", "contain");
+    const box = (await dashboard.boundingBox())!;
+    expect(
+      Math.abs(box.y - initialToolbar.y - initialToolbar.height),
+    ).toBeLessThanOrEqual(1);
+    // Wheel over the heading, not the plot's interactive canvas.
+    await page.mouse.move(box.x + box.width / 2, box.y + 16);
+    await page.mouse.wheel(0, 500);
+    await expect
+      .poll(() => dashboard.evaluate((node) => node.scrollTop))
+      .toBeGreaterThan(100);
+    await shellIsStatic();
+    await page.mouse.wheel(0, -5000);
+    await expect
+      .poll(() => dashboard.evaluate((node) => node.scrollTop))
+      .toBe(0);
+    await page.mouse.wheel(0, -500);
+    // Allow boundary wheel delivery; native physical rubber-band is a manual check.
+    await page.waitForTimeout(150);
+    await shellIsStatic();
+    await page.mouse.wheel(0, 5000);
+    await expect
+      .poll(async () => {
+        // Firefox can limit a single wheel event; actually reach the boundary.
+        await page.mouse.wheel(0, 5000);
+        return dashboard.evaluate((node) =>
+          Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop),
+        );
+      })
+      .toBeLessThanOrEqual(1);
+    await page.mouse.wheel(0, 500);
+    await page.waitForTimeout(150);
+    await shellIsStatic();
+
+    const chartScroll = await dashboard.evaluate((node) => node.scrollTop);
+    if (width === 390) {
+      await page
+        .getByRole("button", { name: "Expand run list", exact: true })
+        .click();
+      await expect(
+        page.getByRole("dialog", { name: "Chart runs" }),
+      ).toBeVisible();
+    }
+    const list = page.locator(".run-drawer-list");
+    await list.evaluate((node) => node.scrollTo(0, 0));
+    const listBox = (await list.boundingBox())!;
+    await page.mouse.move(
+      listBox.x + listBox.width / 2,
+      listBox.y + listBox.height / 2,
+    );
+    await page.mouse.wheel(0, 500);
+    await expect
+      .poll(() => list.evaluate((node) => node.scrollTop))
+      .toBeGreaterThan(100);
+    await page.mouse.wheel(0, -5000);
+    await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBe(0);
+    await page.mouse.wheel(0, -500);
+    await page.waitForTimeout(150);
+    expect(await dashboard.evaluate((node) => node.scrollTop)).toBe(
+      chartScroll,
+    );
+    await shellIsStatic();
+    if (width === 390) {
+      await page.keyboard.press("Escape");
+      await expect(
+        page.getByRole("dialog", { name: "Chart runs" }),
+      ).toBeHidden();
+      await expect(
+        page.getByRole("button", { name: "Expand run list", exact: true }),
+      ).toBeFocused();
+      expect(await dashboard.evaluate((node) => node.scrollTop)).toBe(
+        chartScroll,
+      );
+    }
+  });
+}
 test("sticky toolbar menus and Runs navigation retain chart and drawer state after scrolling", async ({
   page,
 }) => {
@@ -166,7 +271,7 @@ test("sticky toolbar menus and Runs navigation retain chart and drawer state aft
     .elementHandle();
   const before = await savedLibrary(page);
   const requests = histories();
-  await scrollPastHeader(page);
+  await scrollChartsUnderToolbar(page);
   const toolbar = page.locator(".workspace-toolbar");
   await expect(
     toolbar.getByLabel("View actions", { exact: true }),
@@ -184,8 +289,13 @@ test("sticky toolbar menus and Runs navigation retain chart and drawer state aft
   await expect(
     page.getByRole("button", { name: "Open run table", exact: true }),
   ).toHaveCount(0);
+  const dashboard = page.locator("#dashboard");
+  const chartScroll = await dashboard.evaluate((node) => node.scrollTop);
+  expect(chartScroll).toBeGreaterThan(400);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await runsButton.click();
   await expect(page).toHaveURL(/#\/experiments\/dense\/runs$/);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await expect(
     page.getByLabel("Search runs, parameters or tags", { exact: true }),
   ).toHaveValue("Run 00");
@@ -197,6 +307,11 @@ test("sticky toolbar menus and Runs navigation retain chart and drawer state aft
     .getByRole("button", { name: "Charts", exact: true })
     .click();
   await expect(page.locator(".run-drawer")).toBeVisible();
+  await expect(dashboard).toBeVisible();
+  await expect
+    .poll(() => dashboard.evaluate((node) => node.scrollTop))
+    .toBe(chartScroll);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.getByLabel("Find runs", { exact: true })).toHaveValue(
     "Run 00",
   );
@@ -224,7 +339,7 @@ test("desktop drawer stays below the sticky toolbar and inside the viewport afte
     .boundingBox())!.height;
   for (const width of [1440, 850, 1440]) {
     await page.setViewportSize({ width, height: 800 });
-    await scrollPastHeader(page);
+    await scrollChartsUnderToolbar(page);
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -257,7 +372,7 @@ test("390px sticky toolbar does not overflow and the scrolled run modal still di
   await page.setViewportSize({ width: 390, height: 844 });
   await fixture(page);
   await scrollableCharts(page);
-  await scrollPastHeader(page);
+  await scrollChartsUnderToolbar(page);
   const expand = page.getByRole("button", {
     name: "Expand run list",
     exact: true,
@@ -356,7 +471,10 @@ test("dense tables have no selection tint, preserve hover/focus, and route to de
   ).toBeLessThanOrEqual(40);
   expect((await row.boundingBox())!.y).toBeLessThanOrEqual(160);
   await expect(page.locator(".row-subtitle")).toHaveCount(0);
-  await expect(page.locator(".run-table [data-run-color-id]")).toHaveCount(50);
+  await expect(page.locator(".run-table tbody tr[data-run-id]")).toHaveCount(
+    60,
+  );
+  await expect(page.locator(".run-table [data-run-color-id]")).toHaveCount(60);
   await page.screenshot({
     path: info.outputPath("dense-table-desktop.png"),
     fullPage: true,
@@ -464,9 +582,19 @@ test("run detail and table navigation retain dashboard canvas, zoom and drawer s
     .getByRole("button", { name: "Zoom in", exact: true })
     .first()
     .click();
-  await page
-    .getByRole("separator", { name: "Resize run list", exact: true })
-    .press("End");
+  const separator = page.getByRole("separator", {
+    name: "Resize run list",
+    exact: true,
+  });
+  const maximum = await page
+    .locator(".workspace-layout")
+    .evaluate((node) => node.clientWidth / 2);
+  await expect(separator).toHaveAttribute("aria-valuemax", String(maximum));
+  await separator.press("End");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(maximum)),
+  );
   await page.getByLabel("Find runs", { exact: true }).fill("Run 00");
   const before = histories();
   await page
@@ -491,7 +619,15 @@ test("run detail and table navigation retain dashboard canvas, zoom and drawer s
     "Run 00",
   );
   expect(histories()).toBe(before);
-  expect((await page.locator(".run-drawer").boundingBox())!.width).toBe(600);
+  await expect(separator).toHaveAttribute("aria-valuemax", String(maximum));
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(maximum)),
+  );
+  expect((await page.locator(".run-drawer").boundingBox())!.width).toBeCloseTo(
+    maximum,
+    0,
+  );
 });
 
 test("color events refresh existing cards without reloading histories or losing zoom", async ({
@@ -1016,32 +1152,57 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
       expect(Math.abs(control.top - controls[0].top)).toBeLessThanOrEqual(1);
     }
   }
+  const maximum = await page
+    .locator(".workspace-layout")
+    .evaluate((node) => node.clientWidth / 2);
+  await expect(separator).toHaveAttribute("aria-valuemax", String(maximum));
   await separator.press("End");
-  await expect(separator).toHaveAttribute("aria-valuenow", "600");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(maximum)),
+  );
+  expect((await drawer.boundingBox())!.width).toBeCloseTo(maximum, 0);
   await separator.press("ArrowRight");
-  await expect(separator).toHaveAttribute("aria-valuenow", "600");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(maximum)),
+  );
   await separator.press("Shift+ArrowLeft");
-  await expect(separator).toHaveAttribute("aria-valuenow", "550");
+  const steppedWidth = Math.max(minimum, maximum - 50);
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(steppedWidth)),
+  );
+  const draggedWidth = Math.max(minimum, steppedWidth - 150);
   const edge = (await separator.boundingBox())!;
   await page.mouse.move(edge.x + edge.width / 2, edge.y + 30);
   await page.mouse.down();
   await page.mouse.move(edge.x + edge.width / 2 - 150, edge.y + 30);
   await page.mouse.up();
-  await expect(separator).toHaveAttribute("aria-valuenow", "400");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(draggedWidth)),
+  );
   const moved = (await separator.boundingBox())!;
   await page.mouse.move(moved.x + moved.width / 2, moved.y + 30);
   await page.mouse.down();
   await page.mouse.move(moved.x + moved.width / 2 + 50, moved.y + 30);
   await page.keyboard.press("Escape");
   await page.mouse.up();
-  await expect(separator).toHaveAttribute("aria-valuenow", "400");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(draggedWidth)),
+  );
   await expect(drawer).toBeVisible();
   await page.mouse.move(moved.x + moved.width / 2, moved.y + 30);
   await page.mouse.down();
   await page.mouse.move(moved.x + moved.width / 2 + 80, moved.y + 30);
   await separator.dispatchEvent("pointercancel");
   await page.mouse.up();
-  await expect(separator).toHaveAttribute("aria-valuenow", "400");
+  await expect(separator).toHaveAttribute(
+    "aria-valuenow",
+    String(Math.round(draggedWidth)),
+  );
   // Resizing and cancelling gestures must preserve the original 60-run plot.
   expect(
     await page.evaluate(
@@ -1162,7 +1323,7 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
     await expect(drawer.getByLabel("Find runs", { exact: true })).toHaveValue(
       "second",
     );
-    expect((await drawer.boundingBox())!.width).toBe(400);
+    expect((await drawer.boundingBox())!.width).toBeCloseTo(draggedWidth, 0);
   }
   expect(
     await page.evaluate(
@@ -1216,10 +1377,10 @@ test("split-pane edge handle preserves 60-run plots and persists collapse and wi
         .map((run) => run.id)
         .sort(),
     );
-  expect((await drawer.boundingBox())!.width).toBe(400);
+  expect((await drawer.boundingBox())!.width).toBeCloseTo(draggedWidth, 0);
   await page.reload();
   await expect(drawer).toBeVisible();
-  expect((await drawer.boundingBox())!.width).toBe(400);
+  expect((await drawer.boundingBox())!.width).toBeCloseTo(draggedWidth, 0);
   const geometryPath = info.outputPath("split-pane-geometry.json");
   await writeFile(geometryPath, JSON.stringify(geometry, null, 2));
   await info.attach("split-pane-geometry.json", {

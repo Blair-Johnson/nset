@@ -302,8 +302,8 @@ h3 {
   min-width: 0;
   padding: 6px 14px 40px;
 }
-/* Only the runs route owns a viewport-height shell. Charts and details keep
-   their normal document scrolling; menus remain outside the rows' clip. */
+/* The runs route owns a viewport-height shell; menus remain outside the
+   rows' clip. Detail and experiment tables keep normal document scrolling. */
 #app:has(> #main > #page > .run-browser) {
   height: 100dvh;
   display: flex;
@@ -326,6 +326,53 @@ h3 {
 #main > #page > .run-browser {
   flex: 1;
   height: auto;
+}
+/* Charts have two independent scroll surfaces: the dashboard and run list.
+   Keep the app header and toolbar outside both, including at scroll boundaries. */
+html:has(#main > #page > .workspace-layout) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#app:has(> #main > #page > .workspace-layout) {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+#app:has(> #main > #page > .workspace-layout) > .app-header {
+  flex: none;
+}
+#main:has(> #page > .workspace-layout),
+#main > #page:has(> .workspace-layout) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+#main:has(> #page > .workspace-layout) {
+  padding-bottom: 0;
+}
+#page:has(> .workspace-layout) > .workspace-toolbar {
+  flex: none;
+}
+#page > .workspace-layout {
+  flex: 1;
+  min-height: 0;
+}
+#page > .workspace-layout > .dashboard {
+  align-self: stretch;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 40px;
+}
+#page > .workspace-layout > .dashboard > * {
+  flex-shrink: 0;
+}
+@media (max-width: 640px) {
+  #page > .workspace-layout > .dashboard {
+    padding-bottom: 30px;
+  }
 }
 .breadcrumb {
   display: flex;
@@ -446,9 +493,14 @@ h3 {
   width: 36px;
   padding-right: 0;
 }
-/* Keep row identity and column context in the same native scroll viewport. */
+/* The header is a sibling of the actual vertical scroll surface (tbody). */
+.run-table-region {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
 .run-table-scroll {
-  max-height: max(160px, calc(100dvh - 190px));
   isolation: isolate;
 }
 /* The runs page fills the viewport: toolbar, scrolling rows, then a footer
@@ -501,10 +553,46 @@ h3 {
   display: none;
 }
 .run-table {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
   white-space: nowrap;
+}
+/* Explicit roles preserve table semantics when layout uses flex/grid. Both
+   rowgroups share the same pixel tracks, including local user resize widths. */
+.run-table-header {
+  display: block;
+  flex: none;
+  overflow: hidden;
+}
+.run-table-scroll {
+  display: block;
+  width: 100%;
+}
+.run-table tr {
+  display: grid;
+  grid-template-columns: var(--run-table-columns);
+  width: var(--run-table-width);
+}
+.run-table th,
+.run-table td {
+  height: auto;
+  min-height: 32px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.run-table .number-cell,
+.run-table .number-header {
+  justify-content: flex-end;
+}
+.run-table .empty-table {
+  grid-column: 1 / -1;
+  justify-content: center;
 }
 .run-table td {
   overflow: hidden;
@@ -555,8 +643,7 @@ h3 {
   user-select: none;
 }
 .run-table th {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 2;
 }
 .run-table th:first-child,
@@ -571,7 +658,6 @@ h3 {
 .run-table td:nth-child(2) {
   position: sticky;
   left: 36px;
-  border-right: 1px solid var(--border);
 }
 .run-table.run-name-unpinned th:nth-child(2),
 .run-table.run-name-unpinned td:nth-child(2) {
@@ -589,6 +675,7 @@ h3 {
 }
 .run-table .run-identity {
   min-width: 0;
+  width: 100%;
 }
 .run-table .run-link {
   min-width: 0;
@@ -608,9 +695,6 @@ h3 {
     inset 0 -1px var(--accent);
 }
 @media (max-width: 760px) {
-  .run-table-scroll {
-    max-height: max(160px, calc(100dvh - 280px));
-  }
   .run-table th:nth-child(2),
   .run-table td:nth-child(2) {
     left: auto;

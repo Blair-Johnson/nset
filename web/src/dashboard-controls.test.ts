@@ -1,83 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { defaults, validateConfig, type ViewConfig } from "./config";
-import { ema } from "./math";
-import {
-  MIN_SMOOTHING_ALPHA,
-  strengthToAlpha,
-  alphaToStrength,
-  strengthToSmoothing,
-  smoothingToStrength,
-  applyDashboardControls,
-} from "./dashboard-controls";
+import { applyDashboardControls, smoothingValue } from "./dashboard-controls";
 
-test("None to More has identity and finite strongest endpoints", () => {
-  assert.deepEqual(strengthToSmoothing(0), { smoothing: false, alpha: 1 });
-  assert.deepEqual(strengthToSmoothing(100), {
-    smoothing: true,
-    alpha: MIN_SMOOTHING_ALPHA,
-  });
-  assert.equal(strengthToAlpha(50), 0.1);
-  assert.equal(alphaToStrength(1), 0);
-  assert.equal(alphaToStrength(0.01), 100);
-  assert.equal(smoothingToStrength(defaults()), 0);
-});
-
-test("slider increases strictly strengthen EMA, with fractional inverse round-trips", () => {
-  let previousAlpha = 1;
-  let previousOutput = 100;
-  for (let strength = 0.25; strength <= 100; strength += 0.25) {
-    const alpha = strengthToAlpha(strength);
-    assert.ok(alpha > 0 && alpha < previousAlpha);
-    assert.ok(Math.abs(alphaToStrength(alpha) - strength) < 1e-12);
-    assert.ok(
-      Math.abs(smoothingToStrength(strengthToSmoothing(strength)) - strength) <
-        1e-12,
-    );
-    const output = ema(
-      [
-        [0, 0],
-        [1, 100],
-      ],
-      alpha,
-    )[1][1];
-    assert.ok(output < previousOutput);
-    previousAlpha = alpha;
-    previousOutput = output;
+test("sigma is an unbounded positive bandwidth, and zero only disables", () => {
+  assert.equal(smoothingValue(defaults()), 0);
+  for (const sigma of [Number.MIN_VALUE, 0.25, 1, 50, 1000]) {
+    const enabled = applyDashboardControls(defaults(), {
+      smoothingSigma: sigma,
+    });
+    assert.equal(enabled.smoothing, true);
+    assert.equal(smoothingValue(enabled), sigma);
+    const disabled = applyDashboardControls(enabled, { smoothingSigma: 0 });
+    assert.equal(disabled.smoothing, false);
+    assert.equal(disabled.smoothingSigma, sigma);
+    assert.equal(smoothingValue(disabled), 0);
+    assert.deepEqual(applyDashboardControls(disabled, {}), disabled);
   }
 });
 
-test("legacy alpha imports retain semantics until the slider is edited", () => {
-  for (const alpha of [Number.MIN_VALUE, 0.0001, 0.01, 0.2, 0.9, 1]) {
-    for (const smoothing of [true, false]) {
-      const config = validateConfig({ smoothing, alpha });
-      const before = structuredClone(config);
-      const strength = smoothingToStrength(config);
-      assert.equal(strength, smoothing ? alphaToStrength(alpha) : 0);
-      assert.deepEqual(config, before);
-      assert.deepEqual(applyDashboardControls(config, {}), config);
-    }
-  }
-  assert.equal(alphaToStrength(Number.MIN_VALUE), 100);
-  assert.equal(smoothingToStrength({ smoothing: true, alpha: 1 }), 0);
-});
-
-test("invalid slider/coefficient inputs fail explicitly", () => {
-  for (const strength of [NaN, Infinity, -Infinity, -0.1, 100.1]) {
-    assert.throws(() => strengthToAlpha(strength), RangeError);
-    assert.throws(() => strengthToSmoothing(strength), RangeError);
+test("invalid sigma edits fail without mutation; old alpha is rejected", () => {
+  const source = defaults();
+  for (const sigma of [NaN, Infinity, -Infinity, -0.1]) {
     assert.throws(
-      () => applyDashboardControls(defaults(), { smoothingStrength: strength }),
+      () => applyDashboardControls(source, { smoothingSigma: sigma }),
       RangeError,
     );
+    assert.deepEqual(source, defaults());
   }
-  for (const alpha of [NaN, Infinity, -Infinity, 0, -0.1, 1.1]) {
-    assert.throws(() => alphaToStrength(alpha), RangeError);
-    assert.throws(
-      () => smoothingToStrength({ smoothing: false, alpha }),
-      RangeError,
-    );
-  }
+  assert.throws(
+    () => validateConfig({ smoothing: true, alpha: 0.2 }),
+    /unknown setting/,
+  );
 });
 
 const configured = () =>
@@ -94,7 +48,7 @@ const configured = () =>
     yMax: 10,
     interpolation: "pchip",
     smoothing: true,
-    alpha: 0.0001,
+    smoothingSigma: 0.0001,
     runs: { one: { width: 3 } },
     advanced: {
       scales: {
@@ -145,18 +99,18 @@ test("smoothing-only or same-axis edits preserve advanced X settings; combined e
     applyDashboardControls(source, { axis: "timestamp" }),
     source,
   );
-  assert.deepEqual(applyDashboardControls(source, { smoothingStrength: 50 }), {
+  assert.deepEqual(applyDashboardControls(source, { smoothingSigma: 50 }), {
     ...source,
     smoothing: true,
-    alpha: 0.1,
+    smoothingSigma: 50,
   });
   const next = applyDashboardControls(source, {
     axis: "relative",
-    smoothingStrength: 0,
+    smoothingSigma: 0,
   });
   assert.equal(next.axis, "relative");
   assert.equal(next.smoothing, false);
-  assert.equal(next.alpha, 1);
+  assert.equal(next.smoothingSigma, source.smoothingSigma);
   assert.equal(next.xMin, null);
   assert.throws(
     () =>

@@ -611,39 +611,61 @@ test("chart Escape, pointercancel, lost capture, blur, outside and no-op drops n
   expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(1);
 });
 
-test("chart pointer edge scrolling stops on cancellation without saving", async ({
+test("chart edge scrolling stays in the dashboard and stops outside valid drops", async ({
   page,
 }) => {
   await fixture(page);
-  await page.setViewportSize({ width: 1440, height: 700 });
+  const dashboard = page.locator("#dashboard");
+  // Both panel edges are well inside the viewport, not at y=0/innerHeight.
+  await dashboard.evaluate((node) => {
+    node.style.height = "400px";
+    node.style.alignSelf = "start";
+  });
   const before = await saved(page);
+  const windowBefore = await page.evaluate(() => window.scrollY);
   await beginDrag(page, "a");
-  const scrollBefore = await page.evaluate(() => window.scrollY);
+  const panel = (await dashboard.boundingBox())!;
   const r = (await card(page, "a").boundingBox())!;
-  await page.mouse.move(r.x + r.width / 2, 692, { steps: 8 });
-  await expect
-    .poll(() => page.evaluate(() => window.scrollY), {
-      intervals: [50],
-      timeout: 3000,
-    })
-    .toBeGreaterThan(scrollBefore + 24);
+  const x = r.x + r.width / 2;
+  const scroll = () => dashboard.evaluate((node) => node.scrollTop);
+  const scrollBefore = await scroll();
+  await page.mouse.move(x, panel.y + panel.height - 8, { steps: 8 });
+  await expect.poll(scroll).toBeGreaterThan(scrollBefore + 24);
   await expect(card(page, "a").locator(".card-header")).toHaveClass(
     /card-reordering/,
   );
+  expect(await page.evaluate(() => window.scrollY)).toBe(windowBefore);
   expect(await saved(page)).toBe(before);
+  for (const point of [
+    { x: panel.x - 4, y: panel.y + panel.height - 8 },
+    { x, y: panel.y - 4 },
+    { x, y: panel.y + panel.height + 4 },
+  ]) {
+    await page.mouse.move(point.x, point.y);
+    await expect(page.locator(".card-drop-indicator")).toHaveCount(0);
+    const stopped = await scroll();
+    await page.evaluate(async () => {
+      for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    });
+    expect(await scroll()).toBe(stopped);
+  }
+  // An in-panel top edge scrolls up even though it is below the toolbar.
+  await dashboard.evaluate((node) => {
+    node.scrollTop = 140;
+  });
+  await page.mouse.move(x, panel.y + 8);
+  await expect.poll(scroll).toBeLessThan(116);
   await page.keyboard.press("Escape");
   await page.mouse.up();
   await expect(
     page.locator(".card-reordering, .card-drop-indicator"),
   ).toHaveCount(0);
-  const scrollAfter = await page.evaluate(() => window.scrollY);
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      ),
-  );
-  expect(await page.evaluate(() => window.scrollY)).toBe(scrollAfter);
+  const scrollAfter = await scroll();
+  await page.evaluate(async () => {
+    for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+  });
+  expect(await scroll()).toBe(scrollAfter);
+  expect(await page.evaluate(() => window.scrollY)).toBe(windowBefore);
   expect(await order(page)).toEqual(["a", "b", "c", "d"]);
   expect(await saved(page)).toBe(before);
   expect(await page.evaluate(() => (window as any).reorderTest.writes)).toBe(0);
@@ -1309,3 +1331,44 @@ test("refresh cannot turn a held toolbar button into a chart drag", async ({
   await move(page, "a", "d", true);
   expect(await order(page)).toEqual(["b", "c", "d", "a"]);
 });
+
+for (const finish of ["Escape", "pointercancel", "drop"] as const) {
+  test(`section ${finish} restores the nested dashboard scroll position`, async ({
+    page,
+  }) => {
+    await fixture(page, false, true);
+    const dashboard = page.locator("#dashboard");
+    await dashboard.evaluate((node) => {
+      node.style.height = "360px";
+      node.style.alignSelf = "start";
+    });
+    const heading = section(page, "second").locator(".section-heading");
+    await heading.scrollIntoViewIfNeeded();
+    const before = await dashboard.evaluate((node) => node.scrollTop);
+    const windowBefore = await page.evaluate(() => window.scrollY);
+    const stored = await saved(page);
+    expect(before).toBeGreaterThan(100);
+    await beginSectionDrag(page, "second");
+    await expect
+      .poll(() => dashboard.evaluate((node) => node.scrollTop))
+      .toBe(0);
+    if (finish === "drop") await hoverSection(page, "second", true);
+    else if (finish === "Escape") await page.keyboard.press("Escape");
+    else
+      await page.evaluate(() =>
+        window.dispatchEvent(
+          new PointerEvent("pointercancel", {
+            pointerId: (window as any).reorderTest.sectionPointer,
+          }),
+        ),
+      );
+    await page.mouse.up();
+    await expect(dashboard).not.toHaveClass(/section-dragging/);
+    await expect
+      .poll(() => dashboard.evaluate((node) => node.scrollTop))
+      .toBe(before);
+    expect(await page.evaluate(() => window.scrollY)).toBe(windowBefore);
+    expect(await saved(page)).toBe(stored);
+    await expectMixedSections(page);
+  });
+}

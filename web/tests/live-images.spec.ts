@@ -1,6 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
 
-async function fixture(page: Page, holdInitial = false) {
+async function fixture(
+  page: Page,
+  holdInitial = false,
+  { single = false, compact = true } = {},
+) {
   await page.route(/^http:\/\/127\.0\.0\.1:\d+\/$/, (route) =>
     route.fulfill({
       contentType: "text/html",
@@ -8,7 +12,8 @@ async function fixture(page: Page, holdInitial = false) {
     }),
   );
   await page.goto("/");
-  await page.evaluate(async (holdInitial) => {
+  const options = { holdInitial, single, compact };
+  await page.evaluate(async ({ holdInitial, single, compact }) => {
     const { ImagePanel } = await import("/src/images.ts");
     const { Api } = await import("/src/api.ts");
     const canvas = document.createElement("canvas");
@@ -29,7 +34,9 @@ async function fixture(page: Page, holdInitial = false) {
     });
     const state: any = {
       frame,
-      frames: [frame(0), frame(2), frame(4), frame(99, "other")],
+      frames: single
+        ? [frame(0), frame(99, "other")]
+        : [frame(0), frame(2), frame(4), frame(99, "other")],
       requests: [],
       pending: [],
       hold: holdInitial,
@@ -62,7 +69,7 @@ async function fixture(page: Page, holdInitial = false) {
     const host = document.createElement("section");
     host.style.cssText = "width:600px;height:400px";
     document.body.append(host);
-    const panel = new ImagePanel(host, api, { compact: true });
+    const panel = new ImagePanel(host, api, { compact });
     state.panel = panel;
     state.source = (run = "run") => [
       {
@@ -84,14 +91,16 @@ async function fixture(page: Page, holdInitial = false) {
     panel.setActive(true);
     panel.setSources(state.source());
     (window as any).liveImages = state;
-  }, holdInitial);
+  }, options);
   if (!holdInitial) {
-    await expect(page.locator(".frame-info")).toHaveText("Step 0 · 1 / 3");
+    await expect(page.locator(".frame-info")).toContainText(
+      compact ? `Step 0 · 1 / ${single ? 1 : 3}` : `1 of ${single ? 1 : 3}`,
+    );
     await expect
       .poll(() =>
         page.evaluate(() => (window as any).liveImages.panel.cache.size),
       )
-      .toBe(2);
+      .toBe(single ? 1 : 2);
   }
 }
 
@@ -196,6 +205,10 @@ test("hints during initial metadata and live requests coalesce without losing th
   page,
 }) => {
   await fixture(page, true);
+  await expect(page.getByRole("slider")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Play image timeline" }),
+  ).toHaveCount(0);
   await page.evaluate(() => {
     const s = (window as any).liveImages;
     s.frames.push(s.frame(6));
@@ -404,4 +417,163 @@ test("an initially empty source shows frame zero on first arrival without autopl
   expect(
     await page.evaluate(() => (window as any).liveImages.panel.playing),
   ).toBe(false);
+});
+
+for (const compact of [true, false]) {
+  test(`single image hides sequence controls without a layout gap (${compact ? "compact" : "full"})`, async ({
+    page,
+  }) => {
+    await fixture(page, false, { single: true, compact });
+    await expect(page.locator(".frame-info")).toBeVisible();
+    await expect(
+      page.getByLabel("Native resolution image viewport"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Zoom in", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("slider")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Play image timeline" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "← Previous", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Next →", exact: true }),
+    ).toHaveCount(0);
+    await page.getByLabel("More image controls").click();
+    await expect(page.getByLabel("Playback rate")).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Rotate ↻", exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.locator(".card-image-timeline").evaluate((timeline) => {
+        const info = timeline.querySelector(".frame-info")!;
+        const controls = [...timeline.querySelectorAll("button, input")];
+        return {
+          controls: controls.length,
+          collapsed: controls.every(
+            (control) => control.getClientRects().length === 0,
+          ),
+          extraHeight:
+            timeline.getBoundingClientRect().height -
+            info.getBoundingClientRect().height,
+        };
+      }),
+    ).toEqual({ controls: 4, collapsed: true, extraHeight: 0 });
+    expect(
+      await page.evaluate(() => {
+        const p = (window as any).liveImages.panel;
+        p.togglePlay();
+        return p.playing;
+      }),
+    ).toBe(false);
+  });
+}
+
+test("multiple images expose navigation and playback; source replacement and clear hide them", async ({
+  page,
+}) => {
+  await fixture(page);
+  const slider = page.getByRole("slider", { name: "Image frame timeline" });
+  const play = page.getByRole("button", { name: "Play image timeline" });
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute("max", "2");
+  await expect(play).toBeVisible();
+  await page.getByRole("button", { name: "Next →", exact: true }).click();
+  await expect(page.locator(".frame-info")).toHaveText("Step 2 · 2 / 3");
+  await page.getByRole("button", { name: "← Previous", exact: true }).click();
+  await expect(page.locator(".frame-info")).toHaveText("Step 0 · 1 / 3");
+  await slider.focus();
+  await slider.press("End");
+  await expect(page.locator(".frame-info")).toHaveText("Step 4 · 3 / 3");
+  await page.getByLabel("More image controls").click();
+  await expect(page.getByLabel("Playback rate")).toBeVisible();
+  await page.getByLabel("Playback rate").selectOption("1000");
+  await play.click();
+  await expect(play).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => {
+    const s = (window as any).liveImages;
+    s.hold = true;
+    s.frames = [s.frame(10, "a", "new")];
+    s.panel.setSources(s.source("new"));
+  });
+  await expect(page.getByRole("status")).toHaveText("Loading image metadata…");
+  await expect(slider).toHaveCount(0);
+  await expect(play).toHaveCount(0);
+  await expect(page.getByLabel("Playback rate")).toBeHidden();
+  await page.evaluate(() => {
+    const s = (window as any).liveImages;
+    s.hold = false;
+    s.release();
+  });
+  await expect(page.locator(".frame-info")).toHaveText("Step 10 · 1 / 1");
+  await expect(slider).toHaveCount(0);
+  await expect(play).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as any).liveImages.panel.playing),
+  ).toBe(false);
+  await page.evaluate(() => (window as any).liveImages.panel.clear());
+  await expect(page.getByRole("status")).toHaveText("Disconnected");
+  await expect(slider).toHaveCount(0);
+  await expect(play).toHaveCount(0);
+});
+
+test("a second live image reveals controls without replacing the image, camera or selection", async ({
+  page,
+}) => {
+  await fixture(page, false, { single: true });
+  await expect(page.getByRole("slider")).toHaveCount(0);
+  await page.evaluate(async () => {
+    const s = (window as any).liveImages,
+      p = s.panel;
+    p.setCamera({
+      x: 0.2,
+      y: 0.1,
+      width: 0.4,
+      height: 0.3,
+      rotation: 90,
+      flip: true,
+    });
+    await new Promise(requestAnimationFrame);
+    s.before = {
+      item: p.viewer.world.getItemAt(0),
+      camera: p.camera(),
+      frame: p.displayed,
+      content: s.contentCount(),
+    };
+    s.frames.push(s.frame(-1));
+    p.refreshLive();
+  });
+  await expect(page.locator(".frame-info")).toHaveText("Step 0 · 2 / 2");
+  const slider = page.getByRole("slider", { name: "Image frame timeline" });
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute("max", "1");
+  await expect(slider).toHaveValue("1");
+  await expect(
+    page.getByRole("button", { name: "Play image timeline" }),
+  ).toBeVisible();
+  await page.getByLabel("More image controls").click();
+  await expect(page.getByLabel("Playback rate")).toBeVisible();
+  expect(
+    await page.evaluate(() => {
+      const s = (window as any).liveImages,
+        p = s.panel;
+      return {
+        item: p.viewer.world.getItemAt(0) === s.before.item,
+        camera: JSON.stringify(p.camera()) === JSON.stringify(s.before.camera),
+        frame: p.displayed === s.before.frame,
+        content: s.contentCount() === s.before.content,
+        playing: p.playing,
+      };
+    }),
+  ).toEqual({
+    item: true,
+    camera: true,
+    frame: true,
+    content: true,
+    playing: false,
+  });
+  await page.getByRole("button", { name: "← Previous", exact: true }).click();
+  await expect(page.locator(".frame-info")).toHaveText("Step -1 · 1 / 2");
 });

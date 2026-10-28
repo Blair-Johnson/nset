@@ -9,10 +9,9 @@ import {
   setEditorAxis,
   setEditorBounds,
   setEditorToggle,
-  smoothingAlpha,
 } from "./chart-editor";
 import { defaults, effectiveRange, validateConfig } from "./config";
-import { strengthToSmoothing, smoothingToStrength } from "./dashboard-controls";
+import { smoothingUnit } from "./smoothing-coordinate";
 import { newChart, seriesId, validateChart } from "./workspace";
 import type { Catalog, SeriesRef } from "./workspace-types";
 
@@ -192,16 +191,14 @@ test("missing overrides are a no-op and safe validation remains enforced", () =>
   assert.throws(() => validateChart(card), /positive/);
 });
 
-test("editor smoothing uses the shared mapping including fractional strengths and endpoints", () => {
-  for (const strength of [0, 0.5, 25, 50, 80, 99, 100]) {
-    const shared = strengthToSmoothing(strength);
-    assert.equal(smoothingAlpha(strength), shared.alpha);
-    assert.ok(Math.abs(smoothingToStrength(shared) - strength) < 1e-10);
-  }
-  assert.equal(smoothingAlpha(0), 1);
-  assert.equal(smoothingAlpha(50), 0.1);
-  assert.equal(smoothingAlpha(100), 0.01);
-  assert.throws(() => smoothingAlpha(-10));
+test("editor smoothing units follow scalar X or independent XY join transforms", () => {
+  const config = defaults();
+  assert.equal(smoothingUnit(config, false), "steps");
+  config.xScale = "log";
+  assert.equal(smoothingUnit(config, false), "decades");
+  assert.equal(smoothingUnit(config, true), "steps");
+  config.joinScale = "asinh";
+  assert.equal(smoothingUnit(config, true), "asinh units");
 });
 
 test("automatic axis titles use actual metric keys, honest mixed labels, and never mutate the card", () => {

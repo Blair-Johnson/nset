@@ -617,7 +617,10 @@ pub(crate) fn validate_config(v: &Value) -> Result<()> {
             ("axis", Strings(&["step", "timestamp", "relative"])),
             ("interpolation", Strings(&["linear", "pchip"])),
             ("smoothing", Bool),
-            ("alpha", Number(POSITIVE, 1.0)),
+            ("smoothingSigma", Number(POSITIVE, INF)),
+            ("joinScale", Strings(&["linear", "log", "asinh"])),
+            ("joinLog", Numbers(&[2.0, 10.0])),
+            ("joinAsinh", Number(POSITIVE, INF)),
             ("xScale", Strings(&["linear", "log", "asinh"])),
             ("yScale", Strings(&["linear", "log", "asinh"])),
             ("xMin", Custom(|v| nullable_number(v, -INF, INF))),
@@ -885,6 +888,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn smoothing_sigma_and_join_contract() {
+        for value in [
+            json!({"smoothing": true, "smoothingSigma": 1.0}),
+            json!({"smoothingSigma": 1000.0, "joinScale": "asinh", "joinLog": 2, "joinAsinh": 0.5}),
+            json!({"joinScale": "log", "joinLog": 10}),
+            json!({"style": {"alpha": 0.2}}),
+        ] {
+            assert!(validate_config(&value).is_ok(), "{value}");
+        }
+        for value in [
+            json!({"alpha": 0.2}),
+            json!({"smoothingSigma": 0}),
+            json!({"smoothingSigma": -1}),
+            json!({"smoothingSigma": "1"}),
+            json!({"joinScale": "sqrt"}),
+            json!({"joinLog": 3}),
+            json!({"joinLog": "10"}),
+            json!({"joinAsinh": 0}),
+            json!({"joinAsinh": -1}),
+        ] {
+            assert!(validate_config(&value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn chart_details_and_run_labels_match_frontend_schema_fixture() {
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/chart_details_schema.json"))
@@ -927,7 +955,8 @@ mod tests {
         );
         let v = json!({
             "version": 1, "axis": "timestamp", "interpolation": "pchip",
-            "smoothing": true, "alpha": 0.2, "xScale": "linear", "yScale": "asinh",
+            "smoothing": true, "smoothingSigma": 0.2, "joinScale": "linear", "joinLog": 10, "joinAsinh": 1,
+            "xScale": "linear", "yScale": "asinh",
             "xMin": null, "xMax": 12, "yMin": -2, "yMax": 2,
             "xLabel": "time", "yLabel": "value", "xFormat": "iso-time", "yFormat": "fixed-2",
             "height": 440, "width": null, "grid": true, "ticks": false, "legend": true,
@@ -1041,7 +1070,7 @@ mod tests {
         ] {
             assert!(validate_config(&v).is_err(), "{v}");
         }
-        assert!(validate_config(&json!({"alpha": POSITIVE,
+        assert!(validate_config(&json!({"smoothingSigma": POSITIVE,
             "advanced": {"scales": {"x": {"asinh": POSITIVE}}, "axes": [{"space": POSITIVE, "splits": [], "values": []}]}
         })).is_ok());
     }

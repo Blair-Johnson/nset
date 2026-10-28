@@ -549,7 +549,13 @@ test("drawer drag minimum fits both toolbar rows and follows filter visibility",
     .toBeGreaterThan(unfilteredMinimum);
   await expectToolbarFits(page);
   await divider.press("End");
-  await expect(divider).toHaveAttribute("aria-valuenow", "600");
+  const halfWidth = await page
+    .locator(".workspace-layout")
+    .evaluate((node) => node.clientWidth / 2);
+  expect(Number(await divider.getAttribute("aria-valuenow"))).toBeCloseTo(
+    halfWidth,
+    0,
+  );
   await dragDrawerToMinimum(page);
   await expectToolbarFits(page);
   await toggle(page).click();
@@ -642,7 +648,139 @@ test("drawer minimum tracks action labels and counts while narrow viewports rema
       const layoutWidth = (await page
         .locator(".workspace-layout")
         .boundingBox())!.width;
-      expect(max).toBeLessThanOrEqual(Math.min(600, layoutWidth - 420));
+      expect(max).toBeLessThanOrEqual(layoutWidth / 2);
     }
   }
+});
+
+test("drawer status is colored text with keyboard menu/error states; resizing reaches half the page", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 850 });
+  const histories = await fixture(page);
+  const row = drawer(page).locator('[data-run-id="run-0"]').first();
+  const status = row.locator(".run-status-pill");
+  const selected = await savedSelection(page);
+  const beforeHistories = histories();
+  const styles = await status.evaluate((node) => {
+    const style = getComputedStyle(node);
+    const name = getComputedStyle(
+      node.closest(".run-drawer-row")!.querySelector(".drawer-run-name")!,
+    );
+    return {
+      border: style.borderWidth,
+      background: style.backgroundColor,
+      radius: style.borderRadius,
+      font: parseFloat(style.fontSize),
+      nameFont: parseFloat(name.fontSize),
+      color: style.color,
+      chevron: getComputedStyle(node.querySelector(".run-status-chevron")!)
+        .display,
+    };
+  });
+  expect(styles.border).toBe("0px");
+  expect(styles.radius).toBe("0px");
+  expect(styles.background).toBe("rgba(0, 0, 0, 0)");
+  expect(styles.font).toBeLessThan(styles.nameFont);
+  expect(styles.chevron).toBe("none");
+  expect(styles.color).not.toBe(
+    await row
+      .locator(".drawer-run-name")
+      .evaluate((node) => getComputedStyle(node).color),
+  );
+  await status.focus();
+  await status.press("ArrowDown");
+  await expect(
+    page.getByRole("menu", { name: "Change run status" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(status).toBeFocused();
+  await status.click();
+  await page
+    .getByRole("menuitemradio", { name: "Failed", exact: true })
+    .click();
+  // The fixture deliberately rejects writes: error and accepted status survive.
+  await expect(row.getByRole("alert")).toContainText("Could not save status");
+  await expect(status).toHaveAttribute("aria-describedby", /error$/);
+  await expect(status).toHaveText("Finished");
+  const divider = page.getByRole("separator", { name: "Resize run list" });
+  await divider.press("End");
+  const half = await page
+    .locator(".workspace-layout")
+    .evaluate((node) => node.clientWidth / 2);
+  expect((await drawer(page).boundingBox())!.width).toBeCloseTo(half, 0);
+  expect(half).toBeGreaterThan(600);
+  expect(await savedSelection(page)).toEqual(selected);
+  expect(histories()).toBe(beforeHistories);
+  await expect(row.getByRole("alert")).toContainText("Could not save status");
+  await divider.press("Home");
+  const box = (await divider.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(1500, box.y + 20, { steps: 8 });
+  await page.mouse.up();
+  expect((await drawer(page).boundingBox())!.width).toBeCloseTo(half, 0);
+});
+
+test("drawer read-only text status and focused controls survive live keyed updates", async ({
+  page,
+}) => {
+  await page.route("**/__drawer_readonly", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: '<!doctype html><html><head><link rel="stylesheet" href="/src/style.css"></head><body><main class="workspace-layout"></main></body></html>',
+    }),
+  );
+  await page.goto("/__drawer_readonly");
+  await page.evaluate(async () => {
+    const { RunDrawer } = await import("/src/run-drawer.ts");
+    const run = {
+      id: "rx-1",
+      experiment_id: "readonly",
+      name: "Imported run",
+      status: "running",
+      params: {},
+      tags: {},
+      created_at: 0,
+      updated_at: 0,
+      rx: { sourceId: "source", uid: "1", state: "active" },
+    };
+    const catalog = {
+      experiments: [{ id: "readonly", name: "Read-only", created_at: 0 }],
+      runs: [run],
+      series: [],
+    } as any;
+    const pane = new RunDrawer(
+      "readonly",
+      { open: true, width: 300, query: "", status: "all", scrollTop: 0 },
+      () => {},
+      () => {},
+    );
+    document.querySelector("main")!.append(pane.pane);
+    pane.update(catalog, []);
+    pane.mount();
+    (window as any).__readonlyDrawer = { pane, catalog };
+  });
+  const status = page.locator(".run-drawer .run-status-pill");
+  const checkbox = page.getByRole("checkbox", { name: "Show Imported run" });
+  await expect(status).toBeDisabled();
+  await expect(status).toHaveAttribute("aria-label", /read-only/);
+  await expect(status).not.toHaveAttribute("aria-haspopup");
+  await expect(status).toHaveText("active");
+  await checkbox.focus();
+  expect(
+    await page.evaluate(() => {
+      const fixture = (window as any).__readonlyDrawer;
+      const before = document.querySelector(".run-status-pill");
+      const next = structuredClone(fixture.catalog);
+      next.runs[0].status = "finished";
+      next.runs[0].rx.state = "succeeded";
+      fixture.pane.update(next, []);
+      return before === document.querySelector(".run-status-pill");
+    }),
+  ).toBe(true);
+  await expect(checkbox).toBeFocused();
+  await expect(status).toHaveText("succeeded");
+  await expect(status).toBeDisabled();
+  await expect(status).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
 });

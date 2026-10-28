@@ -3,6 +3,7 @@ import test from "node:test";
 import { joinXY, makeXYInterpolator, type Point } from "./math.ts";
 import { analyze, xQuantity } from "./analysis.ts";
 import { defaults } from "./config.ts";
+import { gaussianLocalLinear } from "./gaussian.ts";
 import {
   cameraAxis,
   newChart,
@@ -17,14 +18,15 @@ import {
 import { defaultXBinding, editorXChoices } from "./chart-editor.ts";
 import type { Catalog } from "./workspace-types.ts";
 
-const run = (id: string, experiment = "e1") => ({
-  id,
-  experiment_id: experiment,
-  name: `Run ${id}`,
-  status: "finished",
-  created_at: 1000,
-  params: {},
-}) as unknown as Catalog["runs"][number];
+const run = (id: string, experiment = "e1") =>
+  ({
+    id,
+    experiment_id: experiment,
+    name: `Run ${id}`,
+    status: "finished",
+    created_at: 1000,
+    params: {},
+  }) as unknown as Catalog["runs"][number];
 const series = (run_id: string, key: string) => ({
   run_id,
   key,
@@ -60,39 +62,88 @@ const p = (step: number, value: number, seq = step): Point => ({
 test("joinXY pairs channels on the shared parameter over their overlap", () => {
   // X is sampled more sparsely and starts later: Y knots outside are dropped,
   // X knots inside interpolate Y. No extrapolation in either direction.
-  const y: [number, number][] = [[0, 10], [1, 8], [2, 6], [3, 4]];
-  const x: [number, number][] = [[1, 100], [3, 300]];
-  assert.deepEqual(joinXY(y, x, "linear"), [[100, 8], [200, 6], [300, 4]]);
-  assert.deepEqual(joinXY(y, x, "linear", "y"), [[100, 8], [200, 6], [300, 4]]);
+  const y: [number, number][] = [
+    [0, 10],
+    [1, 8],
+    [2, 6],
+    [3, 4],
+  ];
+  const x: [number, number][] = [
+    [1, 100],
+    [3, 300],
+  ];
+  assert.deepEqual(joinXY(y, x, "linear"), [
+    [100, 8],
+    [200, 6],
+    [300, 4],
+  ]);
+  assert.deepEqual(joinXY(y, x, "linear", "y"), [
+    [100, 8],
+    [200, 6],
+    [300, 4],
+  ]);
   assert.deepEqual(joinXY([], x, "linear"), []);
   // Union of knots: an X knot between Y knots adds a sample.
-  assert.deepEqual(joinXY([[0, 0], [2, 2]], [[0, 0], [1, 5], [2, 6]], "linear"), [
-    [0, 0],
-    [5, 1],
-    [6, 2],
-  ]);
+  assert.deepEqual(
+    joinXY(
+      [
+        [0, 0],
+        [2, 2],
+      ],
+      [
+        [0, 0],
+        [1, 5],
+        [2, 6],
+      ],
+      "linear",
+    ),
+    [
+      [0, 0],
+      [5, 1],
+      [6, 2],
+    ],
+  );
 });
 
 test("XY interpolator reads monotonic X exactly and refuses ambiguous X", () => {
-  const cumulative = makeXYInterpolator([[0, 4], [10, 2], [20, 1]]);
+  const cumulative = makeXYInterpolator([
+    [0, 4],
+    [10, 2],
+    [20, 1],
+  ]);
   assert.equal(cumulative.monotonic, true);
   assert.equal(cumulative.at(5), 3);
   assert.equal(cumulative.at(25), null);
   assert.deepEqual(cumulative.crossings(1.5), { points: [15], plateaus: [] });
-  const decreasing = makeXYInterpolator([[20, 1], [10, 2], [0, 4]]);
+  const decreasing = makeXYInterpolator([
+    [20, 1],
+    [10, 2],
+    [0, 4],
+  ]);
   assert.equal(decreasing.at(5), 3);
-  const loop = makeXYInterpolator([[0, 0], [10, 1], [5, 2]]);
+  const loop = makeXYInterpolator([
+    [0, 0],
+    [10, 1],
+    [5, 2],
+  ]);
   assert.equal(loop.monotonic, false);
   assert.equal(loop.at(6), null);
   // Crossings still find every place the curve meets the level, sorted.
   assert.deepEqual(loop.crossings(1.5).points, [7.5]);
   assert.deepEqual(loop.crossings(0.5).points, [5]);
   // Repeated x keeps the later sample (duplicate-coordinate semantics).
-  assert.equal(makeXYInterpolator([[0, 1], [0, 2], [1, 3]]).at(0), 2);
+  assert.equal(
+    makeXYInterpolator([
+      [0, 1],
+      [0, 2],
+      [1, 3],
+    ]).at(0),
+    2,
+  );
 });
 
-test("analyze joins X before display and smooths only the Y channel", () => {
-  const config = { ...defaults(), smoothing: true, alpha: 0.5 };
+test("analyze smooths independent coordinates before joining and retains raw observations", () => {
+  const config = { ...defaults(), smoothing: true, smoothingSigma: 1 };
   const [trace] = analyze(
     [
       {
@@ -103,9 +154,39 @@ test("analyze joins X before display and smooths only the Y channel", () => {
     ],
     config,
   );
-  assert.deepEqual(trace.points, [[0, 0], [10, 2], [20, 3]]);
-  assert.deepEqual(trace.observations, [[0, 0], [10, 4], [20, 4]]);
-  assert.equal(trace.fn.at(15), 2.5);
+  trace.points.forEach(([x], i) => assert.ok(Math.abs(x - i * 10) < 1e-12));
+  assert.deepEqual(
+    trace.points,
+    joinXY(
+      gaussianLocalLinear(
+        [
+          [0, 0],
+          [1, 4],
+          [2, 4],
+        ],
+        1,
+      ),
+      gaussianLocalLinear(
+        [
+          [0, 0],
+          [1, 10],
+          [2, 20],
+        ],
+        1,
+      ),
+      "linear",
+    ),
+  );
+  assert.notDeepEqual(trace.points, trace.observations);
+  assert.deepEqual(trace.observations, [
+    [0, 0],
+    [10, 4],
+    [20, 4],
+  ]);
+  assert.ok(
+    Math.abs(trace.fn.at(15)! - (trace.points[1][1] + trace.points[2][1]) / 2) <
+      1e-12,
+  );
   assert.deepEqual(trace.x, { key: "data" });
   assert.equal(xQuantity([trace], config), "metric");
   assert.equal(xQuantity([], config), "step");
@@ -114,7 +195,11 @@ test("analyze joins X before display and smooths only the Y channel", () => {
 test("key binding: one trace per selected run, runs lacking X are left out", () => {
   const card = newChart("timeseries", ["loss"]);
   card.x = { mode: "key", key: "data" };
-  const resolved = resolveSources(validateChart(card), ["r1", "r2", "r3"], catalog());
+  const resolved = resolveSources(
+    validateChart(card),
+    ["r1", "r2", "r3"],
+    catalog(),
+  );
   assert.deepEqual(
     resolved.map((s) => [s.runId, s.x?.ref.runId, s.x?.ref.key]),
     [
@@ -130,7 +215,10 @@ test("series binding: specific series across runs and experiments", () => {
     mode: "explicit",
     series: [{ runId: "r3", key: "loss", kind: "metric" }],
   };
-  card.x = { mode: "series", series: { runId: "r1", key: "data", kind: "metric" } };
+  card.x = {
+    mode: "series",
+    series: { runId: "r1", key: "data", kind: "metric" },
+  };
   const [only] = resolveSources(validateChart(card), [], catalog());
   assert.equal(only.runId, "r3");
   assert.equal(only.x?.ref.runId, "r1");
@@ -140,8 +228,14 @@ test("series binding: specific series across runs and experiments", () => {
   assert.deepEqual(resolveSources(card, [], catalog()), []);
   // Selected Y runs combine with a fixed X too.
   const followed = newChart("timeseries", ["loss"]);
-  followed.x = { mode: "series", series: { runId: "r1", key: "data", kind: "metric" } };
-  assert.equal(resolveSources(followed, ["r1", "r2", "r3"], catalog()).length, 3);
+  followed.x = {
+    mode: "series",
+    series: { runId: "r1", key: "data", kind: "metric" },
+  };
+  assert.equal(
+    resolveSources(followed, ["r1", "r2", "r3"], catalog()).length,
+    3,
+  );
 });
 
 test("X binding validation round-trips and rejects malformed bindings", () => {
@@ -162,7 +256,10 @@ test("X binding validation round-trips and rejects malformed bindings", () => {
   ])
     assert.throws(() => validateChart({ ...card, x }));
   assert.throws(() =>
-    validateChart({ ...newChart("image", ["img"]), x: { mode: "key", key: "a" } }),
+    validateChart({
+      ...newChart("image", ["img"]),
+      x: { mode: "key", key: "a" },
+    }),
   );
 });
 
@@ -182,16 +279,24 @@ test("dashboard X control ignores XY charts but smoothing still applies", () => 
   const xy = newChart("timeseries", ["loss"]);
   xy.x = { mode: "key", key: "data" };
   const timed = newChart("timeseries", ["loss"]);
-  view.sections = [{ id: "s", title: "S", collapsed: false, cards: [xy, timed] }];
+  view.sections = [
+    { id: "s", title: "S", collapsed: false, cards: [xy, timed] },
+  ];
   assert.equal(dashboardSettings(view).axis, "step");
   const sections = withDashboardSettings(view, {
-    axis: "relative",
-    smoothingStrength: 50,
+    smoothingSigma: 2,
   });
   const [nextXY, nextTimed] = sections[0].cards;
   assert.equal(nextXY.config.axis, "step");
   assert.equal(nextXY.config.smoothing, true);
-  assert.equal(nextTimed.config.axis, "relative");
+  assert.equal(nextTimed.config.axis, "step");
+  const changed = withDashboardSettings(view, { axis: "relative" });
+  assert.equal(changed[0].cards[0].config.axis, "step");
+  assert.equal(changed[0].cards[1].config.axis, "relative");
+  assert.throws(
+    () => withDashboardSettings(view, { axis: "relative", smoothingSigma: 2 }),
+    /Mixed units/,
+  );
 });
 
 test("editor X choices: keys from the Y runs, or any series; defaults avoid Y", () => {
@@ -213,8 +318,9 @@ test("editor X choices: keys from the Y runs, or any series; defaults avoid Y", 
   });
   card.x = { mode: "key", key: "gone" };
   assert.equal(
-    editorXChoices(card, catalog(), ["r1"], "key").find((c) => c.value === "gone")
-      ?.available,
+    editorXChoices(card, catalog(), ["r1"], "key").find(
+      (c) => c.value === "gone",
+    )?.available,
     false,
   );
 });

@@ -1,3 +1,4 @@
+import { smoothingUnit } from "./smoothing-coordinate";
 import { touchPrimary } from "./input-capabilities";
 import { NAVIGATE_LABEL, plotIcon } from "./plot-icons";
 import { mountRecordControls } from "./record-controls";
@@ -6,12 +7,7 @@ import type { Api, ImageFrame } from "./api";
 import { plotType, setPlotType, type PlotType } from "./plot-types";
 import { withRunColors } from "./series-colors";
 import { loadPlotRuns, metricAxisLabel, xMetricLabel } from "./card-label";
-import {
-  applyDashboardControls,
-  resetXAxis,
-  strengthToSmoothing,
-  smoothingToStrength,
-} from "./dashboard-controls";
+import { applyDashboardControls, resetXAxis } from "./dashboard-controls";
 import {
   deepMerge,
   effectiveRange,
@@ -128,7 +124,12 @@ export function editorAxisTitle(card: ChartSpec, axis: "x" | "y"): string {
   if (typeof literal === "string") return literal;
   const saved = card.config[`${axis}Label`];
   if (saved) return saved;
-  if (card.records) return axis === "x" ? card.records.x : card.records.ys.length === 1 ? card.records.ys[0] : "Record values";
+  if (card.records)
+    return axis === "x"
+      ? card.records.x
+      : card.records.ys.length === 1
+        ? card.records.ys[0]
+        : "Record values";
   if (axis === "x")
     return card.kind === "timeseries" && card.x
       ? xMetricLabel(card.x)
@@ -148,10 +149,6 @@ export function setEditorToggle(
   config[key] = value;
   if (key === "legend") removeOverride(config, ["legend", "show"]);
   else for (const i of [0, 1]) removeOverride(config, ["axes", i, key, "show"]);
-}
-/** Compatibility wrapper for the shared dashboard/editor strength mapping. */
-export function smoothingAlpha(strength: number): number {
-  return strengthToSmoothing(strength).alpha;
 }
 
 export interface SourceChoice {
@@ -274,7 +271,11 @@ export function editorXChoices(
     return `${experiments.get(run?.experiment_id ?? "") ?? "Unknown experiment"} / ${run?.name ?? runId} · ${key}`;
   };
   for (const series of metrics) {
-    const ref: SeriesRef = { runId: series.run_id, key: series.key, kind: "metric" };
+    const ref: SeriesRef = {
+      runId: series.run_id,
+      key: series.key,
+      kind: "metric",
+    };
     choices.set(seriesId(ref), {
       value: seriesId(ref),
       label: describe(series.run_id, series.key),
@@ -374,7 +375,15 @@ export function openChartEditor(options: ChartEditorOptions): {
   // Keep pure helpers importable by Node tests without a CSS loader or browser globals.
   void import("./chart-editor.css");
   const draft = clone(options.card);
-  if (options.isNew && draft.kind !== "image" && options.catalog.rx && options.catalog.runs.some(r => r.rx && options.selectedRunIds.includes(r.id))) draft.records ??= newRecordBinding(options.catalog);
+  if (
+    options.isNew &&
+    draft.kind !== "image" &&
+    options.catalog.rx &&
+    options.catalog.runs.some(
+      (r) => r.rx && options.selectedRunIds.includes(r.id),
+    )
+  )
+    draft.records ??= newRecordBinding(options.catalog);
   let recordControls: ReturnType<typeof mountRecordControls> | undefined;
   let recordPreviewNotes = "";
   let recordPreviewSources: ResolvedSeries[] = [];
@@ -501,11 +510,15 @@ export function openChartEditor(options: ChartEditorOptions): {
   preview.setAttribute("aria-label", "Chart preview");
   const previewTitle = el("h3", "", draft.title || "Untitled chart");
   const previewToolbar = el("div", "ce-preview-toolbar");
-  const previewNavigation = button("", () => {
-    if (!touchPrimary()) return;
-    previewNavigate = !previewNavigate;
-    configurePreviewNavigation();
-  }, "card-button");
+  const previewNavigation = button(
+    "",
+    () => {
+      if (!touchPrimary()) return;
+      previewNavigate = !previewNavigate;
+      configurePreviewNavigation();
+    },
+    "card-button",
+  );
   previewNavigation.title = NAVIGATE_LABEL;
   previewNavigation.setAttribute("aria-label", NAVIGATE_LABEL);
   previewNavigation.setAttribute("aria-pressed", "false");
@@ -533,7 +546,11 @@ export function openChartEditor(options: ChartEditorOptions): {
   // Only offer the fold when there is something to read in it.
   new MutationObserver(() => {
     previewDetails.hidden = !previewWarnings.textContent;
-  }).observe(previewWarnings, { childList: true, characterData: true, subtree: true });
+  }).observe(previewWarnings, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
   const retry = button("Retry preview", () => {
     sourceToken = "";
     schedulePreview();
@@ -603,6 +620,7 @@ export function openChartEditor(options: ChartEditorOptions): {
   function change() {
     saveError.textContent = "";
     refreshAutoRangeHelp();
+    refreshSmoothingState();
     schedulePreview();
   }
   function input(
@@ -739,17 +757,30 @@ export function openChartEditor(options: ChartEditorOptions): {
   let renderChoices = () => {};
   function renderAll() {
     previewNavigation.hidden = draft.kind === "image" || !touchPrimary();
-    recordControls?.destroy(); recordControls = undefined;
+    recordControls?.destroy();
+    recordControls = undefined;
     renderChart();
     renderData();
     renderX();
     renderAxes();
     renderSmoothing();
     renderAppearance();
-    if (draft.records) recordControls = mountRecordControls(panels.get("Data")!, panels.get("X")!, {
-      binding: draft.records, catalog: options.catalog, selected: options.selectedRunIds, api: options.api,
-      changed: change, error: message => { if (message) errors.set("records", message); else errors.delete("records"); },
-    });
+    if (draft.records)
+      recordControls = mountRecordControls(
+        panels.get("Data")!,
+        panels.get("X")!,
+        {
+          binding: draft.records,
+          catalog: options.catalog,
+          selected: options.selectedRunIds,
+          api: options.api,
+          changed: change,
+          error: (message) => {
+            if (message) errors.set("records", message);
+            else errors.delete("records");
+          },
+        },
+      );
   }
   function renderChart() {
     const panel = clearPanel("Chart");
@@ -778,7 +809,10 @@ export function openChartEditor(options: ChartEditorOptions): {
           clone(draft.source),
         );
         setPlotType(draft, value as PlotType);
-        if (draft.kind === "image") { delete draft.x; delete draft.records; }
+        if (draft.kind === "image") {
+          delete draft.x;
+          delete draft.records;
+        }
         draft.source = clone(
           sourceMemory.get(`${draft.kind}/${draft.source.mode}`) ??
             (draft.source.mode === "selected"
@@ -792,14 +826,32 @@ export function openChartEditor(options: ChartEditorOptions): {
       },
     );
     if (draft.kind !== "image" && (options.catalog.rx || draft.records)) {
-      select(panel, "data-source", "Data source", draft.records ? "records" : "metrics", [["metrics", "Metrics"], ["records", "rx records"]], value => {
-        if (value === "records") { draft.records = newRecordBinding(options.catalog); delete draft.x; }
-        else delete draft.records;
-        renderAll();
-      });
+      select(
+        panel,
+        "data-source",
+        "Data source",
+        draft.records ? "records" : "metrics",
+        [
+          ["metrics", "Metrics"],
+          ["records", "rx records"],
+        ],
+        (value) => {
+          if (value === "records") {
+            draft.records = newRecordBinding(options.catalog);
+            delete draft.x;
+          } else delete draft.records;
+          renderAll();
+        },
+      );
     }
     if (draft.records) {
-      panel.append(el("p", "ce-help", "Runs: selected rx runs in this workspace. This source is read-only."));
+      panel.append(
+        el(
+          "p",
+          "ce-help",
+          "Runs: selected rx runs in this workspace. This source is read-only.",
+        ),
+      );
       return;
     }
     select(
@@ -825,8 +877,7 @@ export function openChartEditor(options: ChartEditorOptions): {
         // A per-run X key needs runs to follow; specific Y series pair with
         // one specific X series instead, and vice versa.
         if (draft.x) {
-          const key =
-            draft.x.mode === "key" ? draft.x.key : draft.x.series.key;
+          const key = draft.x.mode === "key" ? draft.x.key : draft.x.series.key;
           const next = xBindingFor(key);
           if (next) draft.x = next;
         }
@@ -839,7 +890,10 @@ export function openChartEditor(options: ChartEditorOptions): {
   }
   function renderData() {
     const panel = clearPanel("Data");
-    if (draft.records) { panelHeadings.get("Data")!.textContent = "Record fields"; return; }
+    if (draft.records) {
+      panelHeadings.get("Data")!.textContent = "Record fields";
+      return;
+    }
     panelHeadings.get("Data")!.textContent =
       draft.kind === "image" ? "Images" : "Y axis";
     // What is on the axis now, at a glance: one removable chip per choice.
@@ -959,8 +1013,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       const result = choicePage(choices, pickerSearch, pickerPage);
       pickerPage = result.page;
       list.replaceChildren();
-      if (!result.rows.length)
-        list.append(el("p", "ce-empty", "No matches."));
+      if (!result.rows.length) list.append(el("p", "ce-empty", "No matches."));
       for (const choice of result.rows) {
         const row = el(
           "label",
@@ -1073,7 +1126,10 @@ export function openChartEditor(options: ChartEditorOptions): {
       group(
         "Metric (specific series)",
         editorXChoices(draft, options.catalog, options.selectedRunIds, "series")
-          .filter((choice) => choice.available || xValue() === `series:${choice.value}`)
+          .filter(
+            (choice) =>
+              choice.available || xValue() === `series:${choice.value}`,
+          )
           .map((choice) => [`series:${choice.value}`, choice.label]),
       );
     // Keep a saved binding that no longer fits the lists above selectable.
@@ -1111,7 +1167,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       change();
       fields.get("axis")?.control.focus({ preventScroll: true });
     };
-    if (draft.x)
+    if (draft.x) {
       select(
         row,
         "x-join",
@@ -1125,8 +1181,56 @@ export function openChartEditor(options: ChartEditorOptions): {
         (value) => {
           // The join parameter is hidden; X bounds stay meaningful.
           draft.config.axis = value as ViewConfig["axis"];
+          renderX();
         },
       );
+      const join = el("div", "ce-pair");
+      panel.append(join);
+      select(
+        join,
+        "joinScale",
+        "Join scale",
+        draft.config.joinScale,
+        [
+          ["linear", "Linear"],
+          ["log", "Logarithmic"],
+          ["asinh", "Asinh"],
+        ],
+        (value) => {
+          draft.config.joinScale = value as ViewConfig["joinScale"];
+          renderX();
+        },
+        "Independent coordinate used to smooth and match observations; not the displayed X metric.",
+      );
+      if (draft.config.joinScale === "log")
+        select(
+          join,
+          "joinLog",
+          "Join log base",
+          String(draft.config.joinLog),
+          [
+            ["10", "10"],
+            ["2", "2"],
+          ],
+          (value) => {
+            draft.config.joinLog = Number(value) as 2 | 10;
+          },
+        );
+      if (draft.config.joinScale === "asinh")
+        number(
+          join,
+          "joinAsinh",
+          `Join asinh threshold (${draft.config.axis === "step" ? "steps" : "seconds"})`,
+          draft.config.joinAsinh,
+          (value) => {
+            draft.config.joinAsinh = value!;
+          },
+          Number.MIN_VALUE,
+          Infinity,
+          false,
+          "Time is converted to seconds before the join transform. Default: 1.",
+        );
+    }
   }
   function renderAxes() {
     for (const axis of ["x", "y"] as const) clearPanel(axisPanel[axis]);
@@ -1378,41 +1482,70 @@ export function openChartEditor(options: ChartEditorOptions): {
     }
   }
 
+  function refreshSmoothingState() {
+    if (draft.kind === "image") return;
+    if (draft.records) {
+      foldState("Smoothing", "Unavailable for paired records");
+      return;
+    }
+    const unit = smoothingUnit(draft.config, !!draft.x);
+    const control = fields.get("smoothingSigma")?.control;
+    if (control) {
+      const label = control.parentElement?.querySelector("label");
+      if (label) label.textContent = `Smoothing sigma (${unit})`;
+      (control as HTMLInputElement).disabled = !draft.config.smoothing;
+    }
+    foldState(
+      "Smoothing",
+      `${draft.config.smoothing ? `${draft.config.smoothingSigma} ${unit}` : "Off"} · ${draft.config.interpolation === "pchip" ? "smooth" : "linear"}`,
+    );
+  }
   function renderSmoothing() {
     const panel = clearPanel("Smoothing");
     if (scalarOnly("Smoothing")) return;
-    const strengthBox = el("div", "ce-smoothing");
-    panel.append(strengthBox);
-    const strength = el("input");
-    strength.type = "range";
-    strength.min = "0";
-    strength.max = "100";
-    strength.step = "any";
-    strength.value = String(smoothingToStrength(draft.config));
-    const strengthHint = () =>
-      Number(strength.value) === 0
-        ? "None"
-        : Number(strength.value) === 100
-          ? "More"
-          : `${Math.round(Number(strength.value))}%`;
-    field(strengthBox, "strength", "Smoothing strength", strength);
-    const endpoints = el("div", "ce-smoothing-endpoints");
-    endpoints.append(el("span", "", "None"), el("span", "", "More"));
-    strengthBox.append(endpoints);
-    const refreshState = () =>
-      foldState(
-        "Smoothing",
-        `${strengthHint()} · ${draft.records ? "event order" : draft.config.interpolation === "pchip" ? "smooth" : "linear"}`,
+    if (draft.records) {
+      const unavailable = toggle(
+        panel,
+        "smoothing",
+        "Enable smoothing",
+        false,
+        () => {},
+        "Paired records have no independent coordinate for smoothing.",
       );
-    strength.setAttribute("aria-valuetext", strengthHint());
-    strength.oninput = () => {
-      Object.assign(draft.config, strengthToSmoothing(Number(strength.value)));
-      strength.setAttribute("aria-valuetext", strengthHint());
-      refreshState();
-      change();
-    };
-    if (draft.records) panel.append(el("p", "ce-help", "Smoothing follows event order. Record observations are already paired; no independent-series interpolation is applied."));
-    else select(
+      unavailable.disabled = true;
+      refreshSmoothingState();
+      return;
+    }
+    toggle(
+      panel,
+      "smoothing",
+      "Enable smoothing",
+      draft.config.smoothing,
+      (value) => {
+        draft.config.smoothing = value;
+        if (!value) {
+          setError("smoothingSigma", "");
+          const sigma = fields.get("smoothingSigma")?.control as
+            HTMLInputElement | undefined;
+          if (sigma) sigma.value = String(draft.config.smoothingSigma);
+        }
+      },
+      "Gaussian bandwidth in the independent coordinate. Off preserves sigma; default sigma is 1.",
+    );
+    number(
+      panel,
+      "smoothingSigma",
+      `Smoothing sigma (${smoothingUnit(draft.config, !!draft.x)})`,
+      draft.config.smoothingSigma,
+      (value) => {
+        draft.config.smoothingSigma = value!;
+      },
+      Number.MIN_VALUE,
+      Infinity,
+      false,
+      "Linear: steps or seconds. Log: decades (base 10) or doublings (base 2). Asinh: transformed units.",
+    );
+    select(
       panel,
       "interpolation",
       "Between observations",
@@ -1423,10 +1556,9 @@ export function openChartEditor(options: ChartEditorOptions): {
       ],
       (value) => {
         draft.config.interpolation = value as ViewConfig["interpolation"];
-        refreshState();
       },
     );
-    refreshState();
+    refreshSmoothingState();
   }
 
   function renderAppearance() {
@@ -1521,11 +1653,9 @@ export function openChartEditor(options: ChartEditorOptions): {
     const curveForm = el("div", "ce-curve-form");
     details.append(rows, paging, curveForm);
     function renderSeriesList() {
-      const resolved = draft.records ? recordPreviewSources : resolveSources(
-        draft,
-        options.selectedRunIds,
-        options.catalog,
-      );
+      const resolved = draft.records
+        ? recordPreviewSources
+        : resolveSources(draft, options.selectedRunIds, options.catalog);
       const result = choicePage(
         resolved.map((ref) => ({
           id: ref.id,
@@ -1540,10 +1670,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       );
       stylePage = result.page;
       rows.replaceChildren();
-      if (!result.total)
-        rows.append(
-          el("p", "ce-help", "No curves yet."),
-        );
+      if (!result.total) rows.append(el("p", "ce-help", "No curves yet."));
       for (const choice of result.rows) {
         const choose = button(
           choice.label,
@@ -1663,7 +1790,8 @@ export function openChartEditor(options: ChartEditorOptions): {
             : style.path;
     const pointsFor = (style: RunStyle) =>
       String(style.markers?.show ?? style.points);
-    let pointsBeforeNone = shapeFor(effective) === "none" ? "false" : pointsFor(effective);
+    let pointsBeforeNone =
+      shapeFor(effective) === "none" ? "false" : pointsFor(effective);
     const pointSync: (() => void)[] = [];
     const setPoints = (value: string) => {
       patch.points = value !== "false";
@@ -1788,7 +1916,9 @@ export function openChartEditor(options: ChartEditorOptions): {
     );
     // With no line, hiding points would hide the curve: use "Show this curve".
     const syncPointsOff = () => {
-      const off = pointsControl.querySelector<HTMLOptionElement>('option[value="false"]');
+      const off = pointsControl.querySelector<HTMLOptionElement>(
+        'option[value="false"]',
+      );
       if (off) off.disabled = shapeFor(effective) === "none";
     };
     syncPointsOff();
@@ -1968,7 +2098,10 @@ export function openChartEditor(options: ChartEditorOptions): {
     const token = JSON.stringify([
       draft.kind,
       draft.records,
-      sources.map((source) => [source.id, source.x ? seriesId(source.x.ref) : null]),
+      sources.map((source) => [
+        source.id,
+        source.x ? seriesId(source.x.ref) : null,
+      ]),
     ]);
     if (token !== sourceToken) {
       loadAbort?.abort();
@@ -2072,7 +2205,10 @@ export function openChartEditor(options: ChartEditorOptions): {
         previewStatus.textContent = `${sources.length} image source(s) · preview only`;
         return;
       }
-      if (!options.store && !draft.records || draft.records && !options.api) {
+      if (
+        (!options.store && !draft.records) ||
+        (draft.records && !options.api)
+      ) {
         previewStatus.textContent = `${sources.length} curve(s) chosen. Preview is available when connected.`;
         return;
       }
@@ -2080,7 +2216,19 @@ export function openChartEditor(options: ChartEditorOptions): {
         loadAbort = new AbortController();
         const signal = loadAbort.signal;
         pendingLoad = draft.records
-          ? loadRecordPlot(options.api!, clone(draft.records), options.catalog, options.selectedRunIds, signal).then(result => { if (!signal.aborted) { recordPreviewNotes = result.notes; recordPreviewSources = result.sources; } return result.data; })
+          ? loadRecordPlot(
+              options.api!,
+              clone(draft.records),
+              options.catalog,
+              options.selectedRunIds,
+              signal,
+            ).then((result) => {
+              if (!signal.aborted) {
+                recordPreviewNotes = result.notes;
+                recordPreviewSources = result.sources;
+              }
+              return result.data;
+            })
           : loadPlotRuns(sources, options.store!, signal);
       }
       previewStatus.textContent = hasPreviousScalarPreview()
@@ -2088,8 +2236,13 @@ export function openChartEditor(options: ChartEditorOptions): {
         : "Loading complete histories…";
       const [data, module] = await Promise.all([pendingLoad, import("./plot")]);
       if (closed || version !== previewVersion) return;
-      const stylesKey = JSON.stringify(recordPreviewSources.map(ref => ref.id));
-      if (valid.records && stylesKey !== renderedRecordStyles) { renderedRecordStyles = stylesKey; renderAppearance(); }
+      const stylesKey = JSON.stringify(
+        recordPreviewSources.map((ref) => ref.id),
+      );
+      if (valid.records && stylesKey !== renderedRecordStyles) {
+        renderedRecordStyles = stylesKey;
+        renderAppearance();
+      }
       const config = withRunColors(
         clone(valid.config),
         valid.records ? recordPreviewSources : sources,
@@ -2177,7 +2330,11 @@ export function openChartEditor(options: ChartEditorOptions): {
       pendingScalarView = undefined;
       renderedScalarKind = valid.kind;
       previewTitle.textContent = valid.title || "Untitled chart";
-      const count = data.reduce((sum, series) => sum + (series.paired?.points.length ?? series.raw.length), 0);
+      const count = data.reduce(
+        (sum, series) =>
+          sum + (series.paired?.points.length ?? series.raw.length),
+        0,
+      );
       previewStatus.textContent = `${data.length} curve(s) · ${count.toLocaleString()} observations${robustRangeApplied ? " · Central 98% display" : ""}`;
       previewHost.dataset.observationCount = String(count);
     } catch (error) {
@@ -2203,8 +2360,9 @@ export function openChartEditor(options: ChartEditorOptions): {
   form.onsubmit = async (event) => {
     event.preventDefault();
     if (saving || closed) return;
-    const sourceCount = draft.records ? draft.records.ys.length :
-      draft.source.mode === "selected"
+    const sourceCount = draft.records
+      ? draft.records.ys.length
+      : draft.source.mode === "selected"
         ? draft.source.keys.length
         : draft.source.series.length;
     setError(

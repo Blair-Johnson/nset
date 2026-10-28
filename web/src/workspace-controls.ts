@@ -5,8 +5,13 @@ export type DashboardAxis = "step" | "timestamp" | "relative";
 export interface DashboardControlsOptions {
   axis: DashboardAxis | null;
   smoothing: number | null;
+  /** Keep the slider range stable when the toolbar is rebuilt. */
+  smoothingMax?: number;
   onAxis: (axis: DashboardAxis) => boolean | void;
-  onSmoothing: (strength: number) => boolean | void;
+  onSmoothing: (sigma: number) => boolean | void;
+  /** null means incomparable units: numeric edits are disabled, Off is allowed. */
+  smoothingUnit?: string | null;
+  smoothingSignature?: string | null;
 }
 
 /** Display-only until a native change event commits a deliberate user edit. */
@@ -17,10 +22,9 @@ export function createDashboardControls(
   root.setAttribute("role", "group");
   root.setAttribute("aria-label", "Dashboard controls");
   let savedAxis = options.axis;
-  let savedSmoothing =
-    options.smoothing === null
-      ? null
-      : Math.max(0, Math.min(100, Math.round(options.smoothing)));
+  let savedSmoothing = options.smoothing;
+  const mixedUnits =
+    options.smoothingUnit === null || options.smoothingSignature === null;
 
   const axisLabel = element("label", "dashboard-control-axis");
   axisLabel.append(element("span", "", "X axis"));
@@ -47,38 +51,72 @@ export function createDashboardControls(
   axis.value = savedAxis ?? "";
   axisLabel.append(axis);
 
-  const smoothingLabel = element("label", "dashboard-control-smoothing");
+  const smoothingLabel = element("div", "dashboard-control-smoothing");
   smoothingLabel.append(element("span", "", "Smoothing"));
   const slider = element("input");
   slider.type = "range";
   slider.min = "0";
-  slider.max = "100";
-  slider.step = "1";
+  function setRange(max: number) {
+    slider.max = String(max);
+    slider.step = String(max / 1000);
+  }
+  setRange(
+    mixedUnits
+      ? 1
+      : Math.max(
+          savedSmoothing ?? 0,
+          options.smoothingMax ??
+            (savedSmoothing && savedSmoothing > 0 ? savedSmoothing : 100),
+        ),
+  );
   slider.setAttribute("aria-label", "Dashboard smoothing");
-  slider.title = "Smoothing strength: None to More";
-  const output = element("span", "dashboard-smoothing-value");
-  // The range's aria-valuetext supplies its value to assistive technology.
-  output.setAttribute("aria-hidden", "true");
+  const output = element("button", "dashboard-smoothing-value");
+  output.type = "button";
+  output.setAttribute("aria-label", "Edit smoothing bandwidth");
+  output.disabled = mixedUnits;
+  const sigma = element("input", "dashboard-smoothing-editor");
+  sigma.type = "text";
+  sigma.inputMode = "decimal";
+  sigma.setAttribute("aria-label", "Dashboard smoothing sigma");
+  sigma.hidden = true;
+  const unit = options.smoothingUnit ?? "steps";
+  if (mixedUnits)
+    slider.title =
+      "Mixed units: slide to zero to turn smoothing off. Edit bandwidths per chart.";
   function showSmoothing(value: number | null) {
     const text =
-      value === null
-        ? "Mixed"
-        : value === 0
-          ? "None"
-          : value === 100
-            ? "More"
-            : `${value}%`;
+      value === 0
+        ? "Off"
+        : mixedUnits
+          ? "Mixed units"
+          : value === null
+            ? "Mixed"
+            : `${Number(value.toPrecision(4))} ${unit}`;
     output.textContent = text;
     slider.setAttribute("aria-valuetext", text);
     slider.dataset.mixed = String(value === null);
   }
   function restoreSmoothing() {
-    // A mixed thumb is a neutral starting point, not an applied setting.
-    slider.value = String(savedSmoothing ?? 50);
+    slider.value = mixedUnits
+      ? String(savedSmoothing === 0 ? 0 : 1)
+      : String(savedSmoothing ?? Number(slider.max) / 2);
+    sigma.value = savedSmoothing === null ? "" : String(savedSmoothing);
+    sigma.placeholder = savedSmoothing === null ? "Mixed" : "";
     showSmoothing(savedSmoothing);
   }
+  function closeEditor() {
+    sigma.hidden = true;
+    output.hidden = false;
+  }
+  output.onclick = () => {
+    restoreSmoothing();
+    output.hidden = true;
+    sigma.hidden = false;
+    sigma.focus();
+    sigma.select();
+  };
   restoreSmoothing();
-  smoothingLabel.append(slider, output);
+  smoothingLabel.append(slider, output, sigma);
 
   const status = element("span", "dashboard-controls-status");
   status.setAttribute("role", "status");
@@ -110,21 +148,58 @@ export function createDashboardControls(
       failed("X axis");
     }
   };
-  slider.oninput = () => showSmoothing(slider.valueAsNumber);
-  slider.onchange = () => {
-    const next = slider.valueAsNumber;
+  function commitSmoothing(next: number, setUpperBound = false) {
+    if (!Number.isFinite(next) || next < 0 || (mixedUnits && next !== 0)) {
+      restoreSmoothing();
+      return;
+    }
+    const previousMax = Number(slider.max);
+    // The callback can synchronously rebuild the toolbar and read this range.
+    if (setUpperBound && next > 0) setRange(next);
     if (next === savedSmoothing) {
-      showSmoothing(savedSmoothing);
+      restoreSmoothing();
       return;
     }
     try {
       if (options.onSmoothing(next) === false) throw new Error("not saved");
       savedSmoothing = next;
-      showSmoothing(savedSmoothing);
+      restoreSmoothing();
       succeeded();
     } catch {
+      setRange(previousMax);
       restoreSmoothing();
       failed("smoothing");
+    }
+  }
+  const sliderValue = () => {
+    const max = Number(slider.max);
+    const index = Math.round((Number(slider.value) / max) * 1000);
+    return index === 1000
+      ? max
+      : Number(((index * max) / 1000).toPrecision(15));
+  };
+  slider.oninput = () => {
+    showSmoothing(
+      mixedUnits && slider.value !== "0" ? savedSmoothing : sliderValue(),
+    );
+  };
+  slider.onchange = () => commitSmoothing(sliderValue());
+  sigma.onchange = () =>
+    commitSmoothing(
+      sigma.value.trim() === "" ? NaN : Number(sigma.value),
+      true,
+    );
+  sigma.onblur = closeEditor;
+  sigma.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      restoreSmoothing();
+      closeEditor();
+      output.focus();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      sigma.blur();
+      output.focus();
     }
   };
   root.append(axisLabel, smoothingLabel, status);

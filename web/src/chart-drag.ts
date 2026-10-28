@@ -1,3 +1,5 @@
+import { GestureScroll } from "./gesture-scroll";
+
 export interface ChartDropTarget {
   sectionId: string;
   id?: string;
@@ -33,6 +35,7 @@ export class ChartDrag {
     const lifetime = new AbortController();
     const listeners = { signal: lifetime.signal };
     const pointer = event.pointerId;
+    const scrollport = new GestureScroll(header);
     const startX = event.clientX,
       startY = event.clientY;
     let x = startX,
@@ -46,7 +49,7 @@ export class ChartDrag {
     const connected = () =>
       header.isConnected && header.getClientRects().length > 0;
     const valid = () => connected() && options.valid();
-    const inside = () => x >= 0 && x < innerWidth && y >= 0 && y < innerHeight;
+    const inside = () => scrollport.contains(x, y);
     const target = () => (inside() ? options.target(x, y) : undefined);
     const finish = (commit = false) => {
       if (ended) return;
@@ -77,10 +80,7 @@ export class ChartDrag {
     };
     const scroll = () => {
       if (ended) return;
-      if (inside()) {
-        const speed = y < 48 ? -12 : y > innerHeight - 48 ? 12 : 0;
-        if (speed) window.scrollBy(0, speed);
-      }
+      if (target()) scrollport.by(scrollport.edgeSpeed(x, y));
       preview();
       if (!ended) frame = requestAnimationFrame(scroll);
     };

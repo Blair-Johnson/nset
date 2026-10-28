@@ -223,10 +223,10 @@ test("rx catalog preserves identity and automatically completes beyond five pinn
   assert.equal(result.rx?.nextAfter, null);
 });
 
-test("paired EMA follows event order and ambiguous duplicate-X cursors stay undefined", () => {
+test("paired records without a common coordinate remain raw and duplicate-X cursors stay undefined", () => {
   const config = defaults();
   config.smoothing = true;
-  config.alpha = 0.5;
+  config.smoothingSigma = 0.5;
   const points: [number, number][] = [
     [1, 4],
     [1, 2],
@@ -236,11 +236,7 @@ test("paired EMA follows event order and ambiguous duplicate-X cursors stay unde
     [{ run, raw: [], paired: { key: "epoch", points } }],
     config,
   );
-  assert.deepEqual(data.points, [
-    [1, 4],
-    [1, 3],
-    [0.5, 1.5],
-  ]);
+  assert.deepEqual(data.points, points);
   assert.deepEqual(data.observations, points);
   assert.equal(data.fn.at(1), null);
   assert.equal(data.fn.monotonic, false);

@@ -57,7 +57,10 @@ export interface ViewConfig {
   axis: "step" | "timestamp" | "relative";
   interpolation: "linear" | "pchip";
   smoothing: boolean;
-  alpha: number;
+  smoothingSigma: number;
+  joinScale: Scale;
+  joinLog: 2 | 10;
+  joinAsinh: number;
   xScale: Scale;
   yScale: Scale;
   xMin: number | null;
@@ -96,7 +99,10 @@ export function defaults(): ViewConfig {
     axis: "step",
     interpolation: "linear",
     smoothing: false,
-    alpha: 0.2,
+    smoothingSigma: 1,
+    joinScale: "linear",
+    joinLog: 10,
+    joinAsinh: 1,
     xScale: "linear",
     yScale: "linear",
     xMin: null,
@@ -679,7 +685,7 @@ export function validateConfig(value: unknown): ViewConfig {
       if (v !== 1) throw new Error("Unsupported view version.");
     } else if (k === "axis") choice(v, p, ["step", "timestamp", "relative"]);
     else if (k === "interpolation") choice(v, p, ["linear", "pchip"]);
-    else if (["xScale", "yScale"].includes(k))
+    else if (["xScale", "yScale", "joinScale"].includes(k))
       choice(v, p, ["linear", "log", "asinh"]);
     else if (["xFormat", "yFormat"].includes(k)) choice(v, p, formats);
     else if (["xLabel", "yLabel"].includes(k)) str(v, p);
@@ -695,8 +701,9 @@ export function validateConfig(value: unknown): ViewConfig {
       ].includes(k)
     )
       bool(v, p);
-    else if (k === "alpha") {
-      num(v, p, Number.MIN_VALUE, 1);
+    else if (k === "joinLog") choice(v, p, [2, 10]);
+    else if (["smoothingSigma", "joinAsinh"].includes(k)) {
+      num(v, p, Number.MIN_VALUE);
     } else if (k === "height") num(v, p, 240, 1800);
     else if (k === "width") {
       if (v !== null) num(v, p, 320, 8000);

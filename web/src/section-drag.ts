@@ -1,3 +1,5 @@
+import { GestureScroll } from "./gesture-scroll";
+
 type Drop = (id: string, targetId: string, after: boolean) => void;
 
 /** Section-only pointer gesture. Never changes workspace collapse flags or chart DOM. */
@@ -44,8 +46,9 @@ export class SectionDrag {
     const pointer = event.pointerId;
     const startX = event.clientX,
       startY = event.clientY;
-    const scrollX = window.scrollX,
-      scrollY = window.scrollY;
+    const scrollport = new GestureScroll(dashboard);
+    const scrollX = scrollport.x,
+      scrollY = scrollport.y;
     let x = startX,
       y = startY,
       active = false,
@@ -59,6 +62,7 @@ export class SectionDrag {
     marker.className = "section-drop-indicator";
     marker.setAttribute("aria-hidden", "true");
     const slot = () => {
+      if (!scrollport.contains(x, y)) return;
       const headers = sections.map((node) => ({
         id: node.dataset.sectionId!,
         rect: node
@@ -107,14 +111,12 @@ export class SectionDrag {
         if (expanded === null) node.removeAttribute("aria-expanded");
         else node.setAttribute("aria-expanded", expanded);
       }
-      if (active) window.scrollTo(scrollX, scrollY);
+      if (active) scrollport.to(scrollX, scrollY);
       if (next) drop(source.dataset.sectionId!, next.id, next.after);
     };
     this.cancelGesture = () => finish();
     const autoScroll = () => {
-      const edge = 48;
-      const speed = y < edge ? -12 : y > innerHeight - edge ? 12 : 0;
-      if (speed) window.scrollBy(0, speed);
+      if (slot()) scrollport.by(scrollport.edgeSpeed(x, y));
       preview();
       frame = requestAnimationFrame(autoScroll);
     };
@@ -168,7 +170,11 @@ export class SectionDrag {
             return;
           }
           // Lower section headers may have started far below the now-compact list.
-          sections[0].scrollIntoView({ block: "nearest" });
+          const first = sections[0].getBoundingClientRect();
+          const bounds = scrollport.bounds();
+          if (first.top < bounds.top) scrollport.by(first.top - bounds.top);
+          else if (first.bottom > bounds.bottom)
+            scrollport.by(first.bottom - bounds.bottom);
           frame = requestAnimationFrame(autoScroll);
         }
         move.preventDefault();

@@ -195,10 +195,16 @@ for (const viewport of [
       .toBeLessThanOrEqual(1);
     await page.mouse.wheel(0, 5000);
     expect((await geometry()).scrollY).toBe(0);
-    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.locator("tbody tr")).toHaveCount(120);
     await expect(
-      page.getByText("51–100 of 120", { exact: true }),
-    ).toBeVisible();
+      page.getByRole("button", { name: /^(Next|Previous)$/ }),
+    ).toHaveCount(0);
+    expect(
+      await wrap.evaluate((node) =>
+        node.contains(document.querySelector("thead")),
+      ),
+    ).toBe(false);
+    expect((await geometry()).header).toBeCloseTo(before.header, 0);
     await page.getByText("Columns", { exact: true }).click();
     await expect(
       page.getByRole("searchbox", { name: "Search columns", exact: true }),
@@ -431,4 +437,149 @@ test("very wide Run columns scroll aside without obscuring other fields", async 
   });
   await resize.press("Home");
   await expect(page.locator(".run-table")).not.toHaveClass(/run-name-unpinned/);
+});
+
+test("all filtered rows render, default tracks fill the viewport, and explicit widths stay exact", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await fixture(page);
+  const table = page.getByRole("table", { name: "Runs", exact: true });
+  await expect(table).toHaveCount(1);
+  await expect(table.getByRole("columnheader")).toHaveCount(5);
+  await expect(table.getByRole("row")).toHaveCount(121);
+  await page
+    .getByRole("searchbox", {
+      name: "Search runs, parameters or tags",
+      exact: true,
+    })
+    .fill("Candidate 0");
+  await expect(table.locator("tbody tr")).toHaveCount(100);
+  await expect(page.locator(".table-summary")).toContainText("100 matching");
+  await expect(
+    page.getByRole("button", { name: /^(Next|Previous)$/ }),
+  ).toHaveCount(0);
+  await page.getByText("Columns", { exact: true }).click();
+  await page.getByRole("checkbox", { name: "loss", exact: true }).uncheck();
+  await page
+    .getByRole("searchbox", { name: "Search columns", exact: true })
+    .press("Escape");
+  const measure = () =>
+    table.evaluate((node) => {
+      const head = node.querySelector("thead")!;
+      const body = node.querySelector("tbody")!;
+      const headers = [...head.querySelectorAll("th")].map((n) =>
+        n.getBoundingClientRect(),
+      );
+      const cells = [...body.querySelector("tr")!.children].map((n) =>
+        n.getBoundingClientRect(),
+      );
+      return {
+        available: body.clientWidth,
+        headerWidth: head.querySelector("tr")!.getBoundingClientRect().width,
+        rowWidth: body.querySelector("tr")!.getBoundingClientRect().width,
+        aligned: headers.every(
+          (r, i) =>
+            Math.abs(r.width - cells[i].width) < 1 &&
+            Math.abs(r.x - cells[i].x) < 1,
+        ),
+        rule: getComputedStyle(body.querySelector("td:nth-child(2)")!)
+          .borderRightWidth,
+        sameParent: head.parentElement === body.parentElement,
+      };
+    });
+  await expect.poll(async () => (await measure()).aligned).toBe(true);
+  let geometry = await measure();
+  expect(geometry.headerWidth).toBeGreaterThanOrEqual(geometry.available);
+  expect(geometry.rowWidth).toBeGreaterThanOrEqual(geometry.available);
+  expect(geometry.rule).toBe("0px");
+  expect(geometry.sameParent).toBe(true);
+  const resize = handle(page, "created_at");
+  const before = await columnWidth(resize);
+  await resize.focus();
+  await resize.press("ArrowLeft");
+  expect(await columnWidth(resize)).toBeCloseTo(before - 16, 0);
+  await page.evaluate(() => (window as any).__runLayout.tick());
+  expect(await columnWidth(resize)).toBeCloseTo(before - 16, 0);
+  expect(
+    await page.evaluate(() =>
+      Object.keys((window as any).__runLayout.state.columnWidths),
+    ),
+  ).toEqual(["created_at"]);
+  await page.setViewportSize({ width: 800, height: 360 });
+  expect(await columnWidth(resize)).toBeCloseTo(before - 16, 0);
+  await table.locator("tbody").evaluate((node) => {
+    node.scrollLeft = 200;
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect.poll(async () => (await measure()).aligned).toBe(true);
+  await expect(page.locator(".table-more-below")).toBeHidden();
+  await table.locator("tbody").evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await expect(page.locator(".table-more-below")).toBeVisible();
+});
+
+test("shrinking the trailing default column moves its boundary and leaves trailing fill", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await fixture(page);
+  await page.getByText("Columns", { exact: true }).click();
+  await page.getByRole("checkbox", { name: "loss", exact: true }).uncheck();
+  await page
+    .getByRole("searchbox", { name: "Search columns", exact: true })
+    .press("Escape");
+  const resize = handle(page, "created_at");
+  const boundary = () =>
+    resize.evaluate((node) => node.getBoundingClientRect().right);
+  const beforeWidth = await columnWidth(resize);
+  const beforeBoundary = await boundary();
+  const statusWidth = await columnWidth(handle(page, "status"));
+  await drag(page, resize, -100, false);
+  expect(await columnWidth(resize)).toBeCloseTo(beforeWidth - 100, 0);
+  expect(await boundary()).toBeCloseTo(beforeBoundary - 100, 0);
+  expect(await columnWidth(handle(page, "status"))).toBe(statusWidth);
+  await page.mouse.up();
+  expect(await boundary()).toBeCloseTo(beforeBoundary - 100, 0);
+  await page.evaluate(() => (window as any).__runLayout.tick());
+  expect(await boundary()).toBeCloseTo(beforeBoundary - 100, 0);
+  await resize.press("ArrowLeft");
+  expect(await boundary()).toBeCloseTo(beforeBoundary - 116, 0);
+  await resize.press("Home");
+  expect(await boundary()).toBeCloseTo(beforeBoundary, 0);
+  await drag(page, resize, -100, false);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  expect(await boundary()).toBeCloseTo(beforeBoundary, 0);
+  expect(await columnWidth(resize)).toBeCloseTo(beforeWidth, 0);
+
+  // Even when every field is custom, rows fill the viewport without stretching
+  // any saved width; the unused portion is a trailing, non-column area.
+  await page.evaluate(() => {
+    (window as any).__runLayout.state.columnWidths = {
+      name: 240,
+      status: 120,
+      created_at: 176,
+    };
+    (window as any).__runLayout.show();
+  });
+  for (const [key, width] of [
+    ["name", 240],
+    ["status", 120],
+    ["created_at", 176],
+  ] as const)
+    expect(await columnWidth(handle(page, key))).toBe(width);
+  const geometry = await page.locator(".run-table").evaluate((node) => ({
+    available: node.querySelector("tbody")!.clientWidth,
+    row: node.querySelector("tbody tr")!.getBoundingClientRect().width,
+    header: node.querySelector("thead tr")!.getBoundingClientRect().width,
+    finalCell: node
+      .querySelector("tbody tr td:last-child")!
+      .getBoundingClientRect().right,
+    rowRight: node.querySelector("tbody tr")!.getBoundingClientRect().right,
+  }));
+  expect(geometry.row).toBe(geometry.available);
+  expect(geometry.header).toBe(geometry.available);
+  expect(geometry.rowRight - geometry.finalCell).toBeGreaterThan(100);
 });

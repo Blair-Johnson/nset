@@ -158,7 +158,7 @@ async function fixture(page: Page, surface: Surface, readonly = false) {
 }
 
 for (const surface of surfaces) {
-  test(`${surface}: editable status has a centered SVG chevron, not a text glyph`, async ({
+  test(`${surface}: editable status uses surface-appropriate styling without text glyphs`, async ({
     page,
   }) => {
     await fixture(page, surface);
@@ -167,6 +167,17 @@ for (const surface of surfaces) {
       exact: true,
     });
     const chevron = pill.locator("span.run-status-chevron");
+    if (surface === "drawer") {
+      await expect(chevron).toBeHidden();
+      await expect(pill).toHaveCSS("font-size", "11px");
+      await expect(pill).toHaveCSS("border-top-width", "0px");
+      await expect(pill).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await pill.click();
+      await expect(
+        page.getByRole("menuitemradio", { name: "Canceled", exact: true }),
+      ).toBeVisible();
+      return;
+    }
     await expect(chevron).toBeVisible();
     await expect(chevron).toHaveAttribute("aria-hidden", "true");
     await expect(chevron).toHaveText("");

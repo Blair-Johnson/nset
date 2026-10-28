@@ -81,7 +81,7 @@ for (const width of [1440, 390])
           checkbox: rect(last.querySelector("input")!),
           lastMetric: rect(last.lastElementChild!),
           row: rect(last),
-          pager: rect(document.querySelector(".table-pager")!),
+          footer: rect(document.querySelector(".table-footer")!),
           scrollTop: wrap.scrollTop,
           scrollLeft: wrap.scrollLeft,
           globalWidth: document.documentElement.scrollWidth,
@@ -155,10 +155,10 @@ for (const width of [1440, 390])
     expect(after.row.height).toBeGreaterThanOrEqual(28);
     expect(after.row.height).toBeLessThanOrEqual(34);
     expect(after.scrollTop).toBeGreaterThan(0);
-    expect(after.header.y).toBeGreaterThanOrEqual(after.wrap.y - 1);
+    expect(after.header.bottom).toBeLessThanOrEqual(after.wrap.y + 1);
     expect(after.header.bottom).toBeLessThan(after.wrap.bottom);
-    expect(after.pager.y).toBeGreaterThanOrEqual(after.wrap.bottom);
-    expect(after.pager.bottom).toBeLessThanOrEqual(1000);
+    expect(after.footer.y).toBeGreaterThanOrEqual(after.wrap.bottom);
+    expect(after.footer.bottom).toBeLessThanOrEqual(1000);
     if (width > 760) {
       expect(after.checkbox.x).toBeGreaterThanOrEqual(after.wrap.x);
       expect(after.identity.x).toBeGreaterThanOrEqual(after.checkbox.right);
@@ -183,7 +183,7 @@ for (const width of [1440, 390])
       ).not.toBe("none");
       await page.screenshot({ path: info.outputPath("scrolled-focus.png") });
       await page.mouse.move(0, 0);
-      await page.getByRole("button", { name: "Next", exact: true }).focus();
+      await page.locator(".run-table-scroll").focus();
       const backgrounds = await last
         .locator("td")
         .evaluateAll((cells) =>
@@ -217,22 +217,43 @@ for (const width of [1440, 390])
       await page.keyboard.press("Enter");
       await expect(sort).toBeFocused();
       expect((await measure()).scrollTop).toBe(after.scrollTop);
-      await page.getByRole("button", { name: "Next", exact: true }).focus();
-      await page.keyboard.press("Enter");
       await expect(
-        page.getByRole("button", { name: "Next", exact: true }),
-      ).toBeFocused();
-      await expect(
-        page.getByText("51–100 of 120", { exact: true }),
-      ).toBeVisible();
+        page.getByRole("button", { name: /^(Next|Previous)$/ }),
+      ).toHaveCount(0);
       await expect(
         page.locator("tbody input[type=checkbox]:checked"),
-      ).toHaveCount(50);
+      ).toHaveCount(120);
     } else {
       expect(after.checkbox.x).toBeGreaterThanOrEqual(after.wrap.x);
       expect(after.identity.right).toBeLessThan(after.wrap.x);
       expect(after.wrap.width - 36).toBeGreaterThanOrEqual(300);
       expect(after.lastMetric.width).toBeLessThanOrEqual(after.wrap.width);
       expect(after.lastMetric.right).toBeLessThanOrEqual(after.wrap.right + 1);
+    }
+    // Wait through scroll-event delivery before and after each rebuild. Merely
+    // checking synchronously misses an emptied header copying zero to the body.
+    const settleScroll = () =>
+      page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+    const sort = page.locator("thead th:last-child button");
+    await sort.focus();
+    await settleScroll();
+    const beforeSort = await measure();
+    expect(beforeSort.scrollLeft).toBeGreaterThan(0);
+    for (const activation of ["click", "Enter", "Space"]) {
+      if (activation === "click") await sort.click();
+      else await page.keyboard.press(activation);
+      await settleScroll();
+      await expect(sort).toBeFocused();
+      await expect(sort).toBeInViewport();
+      expect((await measure()).scrollLeft).toBe(beforeSort.scrollLeft);
+      expect((await measure()).scrollTop).toBe(beforeSort.scrollTop);
+      expect(
+        await page.locator("thead").evaluate((node) => node.scrollLeft),
+      ).toBe(beforeSort.scrollLeft);
     }
   });

@@ -200,6 +200,18 @@ interface Request {
   version: number;
   progress?: [number, number];
 }
+/** One winner per step for this run/key, independent of value or timestamp.
+ * Return a new seq-ordered array: cards may still retain the previous snapshot. */
+function mergeMetricSteps(prefix: Point[], tail: Point[] = []): Point[] {
+  const winners = new Map<number, Point>();
+  for (const points of [prefix, tail]) {
+    for (const point of points) {
+      const previous = winners.get(point.step);
+      if (!previous || point.seq > previous.seq) winners.set(point.step, point);
+    }
+  }
+  return [...winners.values()].sort((a, b) => a.seq - b.seq);
+}
 /** Only complete snapshots are published. Watched prefixes are pinned beyond the LRU budget. */
 export class MetricStore implements MetricLoader {
   private readonly entries = new Map<string, Entry>();
@@ -538,6 +550,7 @@ export class MetricStore implements MetricLoader {
               entry.ref.key,
               request.controller.signal,
               progress,
+              "latest-per-step",
             )
           : await this.api
               .metrics(
@@ -545,20 +558,21 @@ export class MetricStore implements MetricLoader {
                 entry.ref.key,
                 request.controller.signal,
                 progress,
+                "latest-per-step",
               )
               .then((points) => ({
                 points,
                 snapshot: points.at(-1)?.seq ?? 0,
               }));
       if (!this.valid(request)) return;
-      entry.points = result.points;
+      entry.points = mergeMetricSteps(result.points);
       entry.snapshot = result.snapshot;
       entry.full = false;
       entry.clean = request.version;
       entry.failures = 0;
       entry.retryAt = 0;
       this.touch(entry);
-      this.settle(entry, result.points);
+      this.settle(entry, entry.points);
       this.changed([entry]);
     } catch (error) {
       if (this.valid(request)) this.failed(entry, error);
@@ -639,6 +653,7 @@ export class MetricStore implements MetricLoader {
           runId: entry.ref.runId,
           key: entry.ref.key,
           after: entry.snapshot,
+          policy: "latest-per-step",
         })),
         controller.signal,
       );
@@ -646,7 +661,7 @@ export class MetricStore implements MetricLoader {
       // Api.metricTails returns request order and has validated every page of every stream.
       for (const [index, entry] of entries.entries()) {
         if (this.entries.get(entry.key) !== entry) continue;
-        entry.points = entry.points!.concat(result[index].points);
+        entry.points = mergeMetricSteps(entry.points!, result[index].points);
         entry.snapshot = result[index].snapshot;
         entry.clean = versions[index];
         entry.failures = 0;

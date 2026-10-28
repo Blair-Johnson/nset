@@ -99,8 +99,16 @@ test("no function or exotic object sneaks through non-JSON callers", () => {
 });
 test("invalid config rejects rather than silently correcting", () => {
   for (const patch of [
-    { alpha: 0 },
-    { alpha: 1.1 },
+    { smoothingSigma: 0 },
+    { smoothingSigma: -1 },
+    { smoothingSigma: Infinity },
+    { smoothingSigma: NaN },
+    { joinScale: "sqrt" },
+    { joinLog: 3 },
+    { joinAsinh: 0 },
+    { joinAsinh: -1 },
+    { joinAsinh: Infinity },
+    { alpha: 0.2 },
     { xMin: 4, xMax: 2 },
     { xScale: "log", xMin: 0 },
     { height: 0 },
@@ -673,16 +681,22 @@ test("literal CSS color validity does not depend on string length", () => {
   assert.equal(isSafeColor("hsl(20% 30% 40%)"), false);
 });
 
-test("all X axes round-trip in v1 configs without changing legacy smoothing", () => {
+test("all X axes round-trip with sigma and independent join settings", () => {
   for (const axis of ["step", "timestamp", "relative"] as const) {
     const config = validateConfig({
       version: 1,
       axis,
       smoothing: true,
-      alpha: 0.0001,
+      smoothingSigma: 0.0001,
+      joinScale: "asinh",
+      joinLog: 2,
+      joinAsinh: 3,
     });
     assert.equal(config.axis, axis);
-    assert.equal(config.alpha, 0.0001);
+    assert.equal(config.smoothingSigma, 0.0001);
+    assert.equal(config.joinScale, "asinh");
+    assert.equal(config.joinLog, 2);
+    assert.equal(config.joinAsinh, 3);
     assert.deepEqual(
       validateConfig(JSON.parse(JSON.stringify(config))),
       config,
@@ -690,7 +704,10 @@ test("all X axes round-trip in v1 configs without changing legacy smoothing", ()
     assert.equal(validateView({ ...saved(), config }).config.axis, axis);
   }
   assert.deepEqual(validateConfig({ version: 1 }), defaults());
-  assert.equal(validateConfig({ smoothing: false, alpha: 0.2 }).alpha, 0.2);
+  assert.equal(
+    validateConfig({ smoothing: false, smoothingSigma: 0.2 }).smoothingSigma,
+    0.2,
+  );
   for (const axis of ["elapsed", "wall", "", null])
     assert.throws(() => validateConfig({ axis }), /axis/);
 });
@@ -716,7 +733,10 @@ test("JSON safety validates each shared object once without expanding all paths"
 
 test("deep merge reads the copied base, not inherited or hidden properties", () => {
   const patch = { nested: { added: 2 } };
-  assert.deepEqual(deepMerge(Object.create({ nested: { keep: 1 } }), patch), patch);
+  assert.deepEqual(
+    deepMerge(Object.create({ nested: { keep: 1 } }), patch),
+    patch,
+  );
   const hidden = Object.defineProperty({}, "nested", { value: { keep: 1 } });
   assert.deepEqual(deepMerge(hidden, patch), patch);
   let reads = 0;
@@ -731,10 +751,36 @@ test("deep merge reads the copied base, not inherited or hidden properties", () 
   let axisReads = 0;
   const axes = Object.defineProperty([], "0", {
     enumerable: true,
-    get() { axisReads++; return { label: "x", grid: { show: true } }; },
+    get() {
+      axisReads++;
+      return { label: "x", grid: { show: true } };
+    },
   });
-  assert.deepEqual(deepMerge({ axes }, { axes: [{ grid: { stroke: "red" } }] }), {
-    axes: [{ label: "x", grid: { show: true, stroke: "red" } }],
-  });
+  assert.deepEqual(
+    deepMerge({ axes }, { axes: [{ grid: { stroke: "red" } }] }),
+    {
+      axes: [{ label: "x", grid: { show: true, stroke: "red" } }],
+    },
+  );
   assert.equal(axisReads, 1);
+});
+
+test("smoothing defaults are positive and old top-level alpha is not migrated", () => {
+  const config = validateConfig({});
+  assert.equal(config.smoothing, false);
+  assert.equal(config.smoothingSigma, 1);
+  assert.equal(config.joinScale, "linear");
+  assert.equal(config.joinLog, 10);
+  assert.equal(config.joinAsinh, 1);
+  assert.equal(
+    validateConfig({ smoothingSigma: Number.MIN_VALUE }).smoothingSigma,
+    Number.MIN_VALUE,
+  );
+  assert.equal(
+    validateConfig({ smoothingSigma: 1000, joinAsinh: 1000 }).smoothingSigma,
+    1000,
+  );
+  assert.throws(() => validateConfig({ alpha: 0.2 }), /unknown setting/);
+  // Opacity is unrelated and remains supported.
+  assert.equal(validateConfig({ style: { alpha: 0.2 } }).style.alpha, 0.2);
 });

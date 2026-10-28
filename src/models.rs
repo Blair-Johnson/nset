@@ -159,9 +159,19 @@ pub struct Metric {
     pub timestamp: i64,
     pub value: f64,
 }
+/// Read-time projection only; stored observations and retry identities are unchanged.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetricPolicy {
+    #[default]
+    All,
+    LatestPerStep,
+}
 #[derive(Deserialize)]
 pub struct MetricQuery {
     pub key: String,
+    #[serde(default)]
+    pub policy: MetricPolicy,
     pub after: Option<i64>,
     pub snapshot: Option<i64>,
     pub limit: Option<usize>,
@@ -202,6 +212,8 @@ pub struct MetricTailQuery {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricTailStream {
+    #[serde(default)]
+    pub policy: MetricPolicy,
     #[serde(rename = "runId")]
     pub run_id: String,
     pub key: String,

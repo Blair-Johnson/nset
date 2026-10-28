@@ -126,11 +126,45 @@ test("global smoothing updates folded scalar charts but never recreates image pa
   await page
     .locator('[data-card-kind="image"] .image-canvas')
     .evaluate((el) => ((window as any).imageIdentity = el));
-  await page.getByLabel("Dashboard smoothing", { exact: true }).fill("50");
-  await expect(await cursor(page, 5)).toHaveText("1.1");
+  await page
+    .getByRole("button", { name: "Edit smoothing bandwidth", exact: true })
+    .click();
+  await page
+    .getByLabel("Dashboard smoothing sigma", { exact: true })
+    .fill("50");
+  await page
+    .getByLabel("Dashboard smoothing sigma", { exact: true })
+    .dispatchEvent("change");
+  // Independent three-observation weighted fit; the cursor at 5 interpolates
+  // between fitted knots at 0 and 10, not a sample-count EMA.
+  const fit = (x: number) => {
+    let s0 = 0,
+      s1 = 0,
+      s2 = 0,
+      t0 = 0,
+      t1 = 0;
+    for (const [step, value] of [
+      [0, 1],
+      [10, 3],
+      [20, 1],
+    ]) {
+      const d = (step - x) / 50,
+        w = Math.exp((-d * d) / 2);
+      s0 += w;
+      s1 += w * d;
+      s2 += w * d * d;
+      t0 += w * value;
+      t1 += w * d * value;
+    }
+    return (t0 * s2 - t1 * s1) / (s0 * s2 - s1 * s1);
+  };
+  const value = await cursor(page, 5);
+  await expect
+    .poll(async () => Number(await value.textContent()))
+    .toBeCloseTo((fit(0) + fit(10)) / 2, 5);
   expect(
     scalar(await saved(page)).every(
-      (c: any) => c.config.smoothing && c.config.alpha === 0.1,
+      (c: any) => c.config.smoothing && c.config.smoothingSigma === 50,
     ),
   ).toBe(true);
   expect(
@@ -138,7 +172,9 @@ test("global smoothing updates folded scalar charts but never recreates image pa
       .locator('[data-card-kind="image"] .image-canvas')
       .evaluate((el) => el === (window as any).imageIdentity),
   ).toBe(true);
-  await page.getByLabel("Dashboard smoothing", { exact: true }).fill("0");
+  await page
+    .getByRole("slider", { name: "Dashboard smoothing", exact: true })
+    .press("Home");
   await expect(await cursor(page, 5)).toHaveText("2");
 });
 test("failed global setting save restores configs and keyboard focus", async ({
@@ -163,4 +199,112 @@ test("failed global setting save restores configs and keyboard focus", async ({
     scalar(await saved(page)).every((c: any) => c.config.axis === "step"),
   ).toBe(true);
   await expect(await cursor(page, 5)).toHaveText("2");
+});
+
+test("smoothing slider retains its expanded maximum across downward drags and toolbar rebuilds", async ({
+  page,
+}) => {
+  await fixture(page);
+  const slider = page.getByRole("slider", {
+    name: "Dashboard smoothing",
+    exact: true,
+  });
+  await page
+    .getByRole("button", { name: "Edit smoothing bandwidth", exact: true })
+    .click();
+  await page
+    .getByLabel("Dashboard smoothing sigma", { exact: true })
+    .fill("1000");
+  await page
+    .getByLabel("Dashboard smoothing sigma", { exact: true })
+    .dispatchEvent("change");
+  await expect(slider).toHaveAttribute("max", "1000");
+  await expect(slider).toHaveValue("1000");
+  for (const fraction of [0.6, 0.3]) {
+    const box = (await slider.boundingBox())!;
+    const current = Number(await slider.inputValue()) / 1000;
+    await page.mouse.move(
+      box.x + 8 + current * (box.width - 16),
+      box.y + box.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      box.x + 8 + fraction * (box.width - 16),
+      box.y + box.height / 2,
+      { steps: 8 },
+    );
+    await page.mouse.up();
+    await expect(slider).toHaveAttribute("max", "1000");
+    const value = Number(await slider.inputValue());
+    expect(value).toBeGreaterThan(1000 * (fraction - 0.1));
+    expect(value).toBeLessThan(1000 * (fraction + 0.1));
+    expect(
+      scalar(await saved(page)).every(
+        (c: any) => c.config.smoothingSigma === value,
+      ),
+    ).toBe(true);
+  }
+  await slider.press("Home");
+  await expect(slider).toHaveValue("0");
+  await expect(slider).toHaveAttribute("max", "1000");
+  await slider.press("End");
+  await expect(slider).toHaveValue("1000");
+  await expect(slider).toHaveAttribute("max", "1000");
+  await page.getByRole("button", { name: "Runs", exact: true }).first().click();
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await expect(slider).toHaveAttribute("max", "1000");
+  await slider.press("ArrowLeft");
+  await expect(slider).toHaveAttribute("max", "1000");
+  expect(Number(await slider.inputValue())).toBeLessThan(1000);
+});
+
+test("explicit sub-second bounds replace larger ranges and retain linear resolution", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page
+    .getByRole("combobox", { name: "Dashboard X axis" })
+    .selectOption("relative");
+  const slider = page.getByRole("slider", {
+    name: "Dashboard smoothing",
+    exact: true,
+  });
+  for (const max of [1000, 1, 0.01]) {
+    await page
+      .getByRole("button", { name: "Edit smoothing bandwidth", exact: true })
+      .click();
+    const input = page.getByLabel("Dashboard smoothing sigma", { exact: true });
+    await input.fill(String(max));
+    await input.dispatchEvent("change");
+    await expect(slider).toHaveAttribute("max", String(max));
+    await expect(slider).toHaveAttribute("step", String(max / 1000));
+    await expect(slider).toHaveValue(String(max));
+    for (const fraction of [0.2, 0.8]) {
+      const box = (await slider.boundingBox())!;
+      const current = Number(await slider.inputValue()) / max;
+      await page.mouse.move(
+        box.x + 8 + current * (box.width - 16),
+        box.y + box.height / 2,
+      );
+      await page.mouse.down();
+      await page.mouse.move(
+        box.x + 8 + fraction * (box.width - 16),
+        box.y + box.height / 2,
+        { steps: 8 },
+      );
+      await page.mouse.up();
+      await expect(slider).toHaveAttribute("max", String(max));
+      const value = Number(await slider.inputValue());
+      expect(value / max).toBeGreaterThan(fraction - 0.1);
+      expect(value / max).toBeLessThan(fraction + 0.1);
+      expect((value / max) * 1000).toBeCloseTo(
+        Math.round((value / max) * 1000),
+        8,
+      );
+    }
+    await slider.press("Home");
+    await slider.press("ArrowRight");
+    expect(Number(await slider.inputValue())).toBeCloseTo(max / 1000, 12);
+    await expect(slider).toHaveAttribute("max", String(max));
+  }
 });

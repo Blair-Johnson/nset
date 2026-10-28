@@ -298,3 +298,83 @@ test("a later failed tail page never resolves a partial snapshot", async () => {
   await rejected;
   assert.equal(published, false);
 });
+
+test("raw metrics retain duplicate steps unless a policy is requested", async () => {
+  const history = [point(1), { ...point(2), step: 1, timestamp: -10 }];
+  const seen: string[] = [];
+  const api = mocked(
+    [{ points: history, snapshot: 9, next_after: null, total: 2 }],
+    seen,
+  );
+  assert.deepEqual(
+    await api.metrics("r", "k", new AbortController().signal),
+    history,
+  );
+  assert.equal(
+    new URL(seen[0], "http://local").searchParams.has("policy"),
+    false,
+  );
+});
+
+test("latest-per-step history keeps policy and snapshot across sparse seq pages", async () => {
+  const seen: string[] = [];
+  const first = { ...point(3), step: 8, timestamp: 100 };
+  const correction = { ...point(9), step: 1, timestamp: -100 };
+  const api = mocked(
+    [
+      { points: [first], snapshot: 12, next_after: 3, total: 2 },
+      { points: [correction], snapshot: 12, next_after: null, total: 2 },
+    ],
+    seen,
+  );
+  const progress: number[] = [];
+  const result = await api.metricsSnapshot(
+    "r",
+    "k",
+    new AbortController().signal,
+    (loaded) => progress.push(loaded),
+    "latest-per-step",
+  );
+  assert.deepEqual(result, { points: [first, correction], snapshot: 12 });
+  assert.deepEqual(progress, [1, 2]);
+  const queries = seen.map((url) => new URL(url, "http://local").searchParams);
+  assert.deepEqual(
+    queries.map((q) => q.get("policy")),
+    ["latest-per-step", "latest-per-step"],
+  );
+  assert.equal(queries[1].get("snapshot"), "12");
+  assert.equal(queries[1].get("after"), "3");
+});
+
+test("latest-per-step tails retain per-stream policy on continuation and empty pages", async () => {
+  const requests: { series: import("./api").MetricTailRequest[] }[] = [];
+  const correction = { ...point(7), step: 1, timestamp: -10 };
+  const api = new Api(
+    () => "",
+    async (_url, init) => {
+      const body = JSON.parse(String(init!.body));
+      requests.push(body);
+      const more = requests.length === 1;
+      return Response.json({
+        series: [
+          {
+            runId: "r",
+            key: "k",
+            snapshot: 20,
+            points: more ? [correction] : [],
+            next_after: more ? 7 : null,
+          },
+        ],
+      });
+    },
+  );
+  assert.deepEqual(
+    await api.metricTails([
+      { runId: "r", key: "k", after: 5, policy: "latest-per-step" },
+    ]),
+    [{ runId: "r", key: "k", points: [correction], snapshot: 20 }],
+  );
+  assert.deepEqual(requests[1].series, [
+    { runId: "r", key: "k", after: 7, snapshot: 20, policy: "latest-per-step" },
+  ]);
+});

@@ -462,11 +462,24 @@ export class PlotPanel {
       options.preserveView && sameAxes
         ? (this.navigation?.snapshot() ?? null)
         : null;
-    // Metadata labels and automatically clipped ranges do not change topology.
+    // Labels, automatic ranges, and analysis-only edits do not change renderer
+    // topology. Reuse refreshes path/marker closures and labels from the new data.
     const topology = (items: Analyzed[], c: ViewConfig) =>
       JSON.stringify({
         sources: items.map((d) => [d.run.id, d.x?.key]),
-        config: { ...c, xMin: null, xMax: null, yMin: null, yMax: null },
+        config: {
+          ...c,
+          xMin: null,
+          xMax: null,
+          yMin: null,
+          yMax: null,
+          smoothing: false,
+          smoothingSigma: 1,
+          joinScale: "linear",
+          joinLog: 10,
+          joinAsinh: 1,
+          interpolation: "linear",
+        },
       });
     const drawIndices = traceDrawIndices(
       data.map((d) => d.run.id),

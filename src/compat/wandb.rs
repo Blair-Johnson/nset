@@ -1242,6 +1242,7 @@ mod tests {
                 .metrics(
                     id,
                     models::MetricQuery {
+                        policy: Default::default(),
                         key: "loss".into(),
                         after: None,
                         snapshot: None,
@@ -1280,6 +1281,7 @@ mod tests {
                 .metrics(
                     native.id,
                     models::MetricQuery {
+                        policy: Default::default(),
                         key: "loss".into(),
                         after: None,
                         snapshot: None,

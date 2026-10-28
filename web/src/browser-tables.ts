@@ -493,26 +493,39 @@ export function runTable(
     clear,
     chartButton,
   );
-  const wrap = element("div", "table-scroll run-table-scroll");
-  wrap.tabIndex = 0;
-  wrap.setAttribute("role", "region");
-  wrap.setAttribute("aria-label", "Scrollable runs table");
+  const region = element("div", "run-table-region");
+  region.setAttribute("role", "region");
+  region.setAttribute("aria-label", "Scrollable runs table");
   const table = element("table", "data-table run-table");
+  table.setAttribute("role", "table");
   table.setAttribute("aria-label", "Runs");
-  const columnLayout = new RunTableColumns(table, (state.columnWidths ??= {}));
-  const head = element("thead");
-  const body = element("tbody");
+  // One semantic table, but independent header/body scroll surfaces. Vertical
+  // elastic overscroll belongs only to tbody, never the header or toolbar.
+  const head = element("thead", "run-table-header");
+  head.setAttribute("role", "rowgroup");
+  const body = element("tbody", "table-scroll run-table-scroll");
+  body.setAttribute("role", "rowgroup");
+  body.tabIndex = 0;
+  const wrap = body;
   table.append(head, body);
-  wrap.append(table);
-  const pager = element("div", "table-pager");
+  region.append(table);
+  const columnLayout = new RunTableColumns(table, (state.columnWidths ??= {}));
+  const syncHeader = () => {
+    head.scrollLeft = wrap.scrollLeft;
+  };
+  const syncRows = () => {
+    wrap.scrollLeft = head.scrollLeft;
+  };
+  wrap.addEventListener("scroll", syncHeader, { passive: true });
+  head.addEventListener("scroll", syncRows, { passive: true });
   const footer = element("div", "table-footer");
   const summary = element("span", "table-summary");
   summary.setAttribute("aria-live", "polite");
   const below = element("span", "table-more-below");
   below.hidden = true;
-  footer.append(summary, below, pager);
+  footer.append(summary, below);
   host.classList.add("run-browser");
-  host.append(tools, wrap, footer);
+  host.append(tools, region, footer);
   // "More below" tracks the native scroll viewport, not the page.
   let belowFrame = 0;
   const updateBelow = () => {
@@ -587,10 +600,9 @@ export function runTable(
     renderedRows = rows;
     renderedPending = filterSession.pending > 0;
     renderedError = filterSession.error;
-    state.page = Math.min(
-      state.page,
-      Math.max(0, Math.ceil(rows.length / pageSize) - 1),
-    );
+    // Run rows are never paginated. Keep the legacy state field harmless for
+    // callers sharing TableState with the still-paginated experiments page.
+    state.page = 0;
     setText(selected, `${selection.size} selected`);
     clear.hidden = !selection.size && !hasPendingSelection?.();
     chartButton.disabled = !selection.size;
@@ -609,9 +621,13 @@ export function runTable(
     if (headerSignature !== renderedHeader) {
       renderedHeader = headerSignature;
       columnLayout.setFields(headerFields.map(([key]) => key));
-      head.replaceChildren();
+      // Build off-DOM so layout reads while creating resize handles cannot
+      // clamp a temporarily empty header's horizontal scroll position.
       const header = element("tr");
+      header.setAttribute("role", "row");
       const choose = element("th");
+      choose.setAttribute("role", "columnheader");
+      choose.scope = "col";
       const all = element("input");
       all.type = "checkbox";
       all.dataset.selectAll = "";
@@ -628,6 +644,8 @@ export function runTable(
       header.append(choose);
       for (const [key, label] of headerFields) {
         const th = element("th");
+        th.setAttribute("role", "columnheader");
+        th.scope = "col";
         th.setAttribute(
           "aria-sort",
           state.sort === key
@@ -660,19 +678,16 @@ export function runTable(
         th.append(control, resize);
         header.append(th);
       }
-      head.append(header);
+      head.replaceChildren(header);
     }
     const all = head.querySelector<HTMLInputElement>("[data-select-all]")!;
     if (focusedAll) restoreFocus = all;
     all.checked = rows.length > 0 && rows.every((r) => selection.has(r.id));
     all.indeterminate = !all.checked && rows.some((r) => selection.has(r.id));
-    const pageRows = rows.slice(
-      state.page * pageSize,
-      (state.page + 1) * pageSize,
-    );
+
     const bodySignature = JSON.stringify([
       headerFields,
-      pageRows.map((run) => [
+      rows.map((run) => [
         // Status and updated_at do not require rebuilding any row controls.
         {
           ...run,
@@ -693,7 +708,7 @@ export function runTable(
     ]);
     if (bodySignature !== renderedBody) {
       renderedBody = bodySignature;
-      const renderedIds = new Set(pageRows.map((run) => run.id));
+      const renderedIds = new Set(rows.map((run) => run.id));
       for (const [id, control] of statusControls) {
         if (!renderedIds.has(id)) {
           control.destroy();
@@ -705,8 +720,9 @@ export function runTable(
         }
       }
       body.replaceChildren();
-      for (const run of pageRows) {
+      for (const run of rows) {
         const tr = element("tr");
+        tr.setAttribute("role", "row");
         tr.dataset.runId = run.id;
         const td = cell("");
         const check = element("input");
@@ -784,10 +800,12 @@ export function runTable(
           parameter.title = `${parameterName(key)}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
           tr.append(parameter);
         }
+        for (const td of tr.children) td.setAttribute("role", "cell");
         body.append(tr);
       }
       if (!rows.length && !filterSession.error) {
         const tr = element("tr");
+        tr.setAttribute("role", "row");
         const td = cell(
           runs.length
             ? filterSession.pending
@@ -798,16 +816,14 @@ export function runTable(
         );
         td.colSpan = 4 + state.metrics!.length + state.parameters!.length;
         tr.append(td);
+        for (const td of tr.children) td.setAttribute("role", "cell");
         body.append(tr);
       }
     }
-    for (const run of pageRows) statusControls.get(run.id)?.updateRun(run);
-    pagination(pager, rows.length, state, render);
-    const shown = Math.min(pageSize, rows.length - state.page * pageSize);
+    for (const run of rows) statusControls.get(run.id)?.updateRun(run);
     const summaryText = [
       `${runs.length} run${runs.length === 1 ? "" : "s"}`,
       rows.length !== runs.length ? `${rows.length} matching` : "",
-      rows.length > pageSize ? `${Math.max(0, shown)} on this page` : "",
       selection.size ? `${selection.size} selected` : "",
     ]
       .filter(Boolean)
@@ -823,6 +839,8 @@ export function runTable(
     restoreFocus?.focus({ preventScroll: true });
     wrap.scrollTop = scrollTop;
     wrap.scrollLeft = scrollLeft;
+    // Restore both surfaces before queued scroll events can synchronize them.
+    syncHeader();
   }
   search.oninput = () => {
     state.query = search.value;
@@ -899,6 +917,8 @@ export function runTable(
       columnLayout.destroy();
       observer.disconnect();
       wrap.removeEventListener("scroll", updateBelow);
+      wrap.removeEventListener("scroll", syncHeader);
+      head.removeEventListener("scroll", syncRows);
       window.removeEventListener("resize", fit);
       cancelAnimationFrame(fitFrame);
       cancelAnimationFrame(belowFrame);

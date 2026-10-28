@@ -2,18 +2,16 @@ import { element } from "./utils";
 
 /** Presentation-only widths, keyed by sort field (including exact parameter paths). */
 export class RunTableColumns {
-  private readonly group = element("colgroup");
+  private readonly renderedWidths = new Map<string, number>();
   private readonly mobile = matchMedia("(max-width: 760px)");
   private fields: string[] = [];
-  private readonly viewportObserver = new ResizeObserver(() =>
-    this.updatePinnedName(),
-  );
+  private readonly viewportObserver = new ResizeObserver(() => this.apply());
 
   private updatePinnedName() {
-    const available = this.table.parentElement?.clientWidth ?? 0;
+    const available = this.table.tBodies[0]?.clientWidth ?? 0;
     this.table.classList.toggle(
       "run-name-unpinned",
-      available > 0 && this.width("name") + 36 > available - 120,
+      available > 0 && this.renderedWidth("name") + 36 > available - 120,
     );
   }
   private active?: {
@@ -29,7 +27,6 @@ export class RunTableColumns {
     private readonly table: HTMLTableElement,
     private readonly widths: Record<string, number>,
   ) {
-    table.prepend(this.group);
     this.mobile.addEventListener("change", this.apply);
   }
 
@@ -58,35 +55,65 @@ export class RunTableColumns {
     return this.clamp(key, Number.isFinite(saved) ? saved : fallback);
   }
 
+  private maximum(key: string) {
+    // Viewport-filling defaults may exceed the usual cap on ultrawide screens.
+    // Keep saved widths valid when returning to a smaller viewport, too.
+    return Math.max(
+      1600,
+      this.table.tBodies[0]?.clientWidth ?? 0,
+      Number.isFinite(this.widths[key]) ? this.widths[key] : 0,
+    );
+  }
+
   private clamp(key: string, width: number) {
-    return Math.round(Math.min(1600, Math.max(this.minimum(key), width)));
+    return Math.round(
+      Math.min(this.maximum(key), Math.max(this.minimum(key), width)),
+    );
   }
 
   setFields(fields: string[]) {
     this.cancelResize();
     this.fields = fields;
-    if (this.table.parentElement)
-      this.viewportObserver.observe(this.table.parentElement);
-    this.group.replaceChildren(
-      ...Array.from({ length: fields.length + 1 }, () => element("col")),
-    );
+    this.viewportObserver.observe(this.table.tBodies[0]);
     this.apply();
+  }
+
+  private renderedWidth(key: string) {
+    return this.renderedWidths.get(key) ?? this.width(key);
   }
 
   private apply = () => {
     const widths = [36, ...this.fields.map((key) => this.width(key))];
-    Array.from(this.group.children).forEach((col, i) => {
-      (col as HTMLElement).style.width = `${widths[i]}px`;
-    });
-    this.table.style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
+    const available = this.table.tBodies[0].clientWidth;
+    const total = widths.reduce((sum, width) => sum + width, 0);
+    // Only the trailing field may absorb spare space. Moving that fill into
+    // an earlier field when the trailing one becomes custom would keep its
+    // dragged boundary stationary. A custom trailing field leaves blank fill
+    // after the columns instead; saved widths remain exact.
+    const trailing = this.fields.at(-1);
+    if (trailing && !Number.isFinite(this.widths[trailing]) && available > total)
+      widths[widths.length - 1] += available - total;
+    this.fields.forEach((key, i) =>
+      this.renderedWidths.set(key, widths[i + 1]),
+    );
+    this.table.style.setProperty(
+      "--run-table-columns",
+      widths.map((width) => `${width}px`).join(" "),
+    );
+    this.table.style.setProperty(
+      "--run-table-width",
+      `${Math.max(available, widths.reduce((sum, width) => sum + width, 0))}px`,
+    );
+    // Match the body's usable width even with non-overlay OS scrollbars.
+    this.table.tHead!.style.width = `${available}px`;
     this.updatePinnedName();
     for (const handle of this.table.querySelectorAll<HTMLElement>(
       ".column-resize-handle",
-    ))
-      handle.setAttribute(
-        "aria-valuenow",
-        String(this.width(handle.dataset.columnKey!)),
-      );
+    )) {
+      const key = handle.dataset.columnKey!;
+      handle.setAttribute("aria-valuenow", String(this.renderedWidth(key)));
+      handle.setAttribute("aria-valuemax", String(this.maximum(key)));
+    }
   };
 
   private finish(commit: boolean) {
@@ -122,8 +149,8 @@ export class RunTableColumns {
     handle.setAttribute("aria-orientation", "vertical");
     handle.setAttribute("aria-label", `Resize ${label} column`);
     handle.setAttribute("aria-valuemin", String(this.minimum(key)));
-    handle.setAttribute("aria-valuemax", "1600");
-    handle.setAttribute("aria-valuenow", String(this.width(key)));
+    handle.setAttribute("aria-valuemax", String(this.maximum(key)));
+    handle.setAttribute("aria-valuenow", String(this.renderedWidth(key)));
     handle.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -147,7 +174,7 @@ export class RunTableColumns {
         this.cancelResize();
         this.widths[key] = this.clamp(
           key,
-          this.width(key) +
+          this.renderedWidth(key) +
             (event.key === "ArrowRight" ? 1 : -1) * (event.shiftKey ? 64 : 16),
         );
         this.apply();
@@ -163,7 +190,7 @@ export class RunTableColumns {
         key,
         pointerId: event.pointerId,
         x: event.clientX,
-        width: this.width(key),
+        width: this.renderedWidth(key),
         saved: this.widths[key],
       };
       handle.setPointerCapture(event.pointerId);

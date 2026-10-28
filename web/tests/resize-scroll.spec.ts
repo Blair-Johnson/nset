@@ -2,12 +2,15 @@ import { test, expect, type Page, type TestInfo } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 
 const target = '[data-card-id="resize-12"]';
+const panelScroll = (page: Page) =>
+  page.locator("#dashboard").evaluate((node) => node.scrollTop);
 
 async function fixture(page: Page, bottom = false) {
   let histories = 0;
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/views") return route.fulfill({ json: { views: [] } });
     if (path === "/api/catalog")
       return route.fulfill({
         json: {
@@ -128,11 +131,13 @@ async function fixture(page: Page, bottom = false) {
     s.pins = { ...c.pins };
   });
   if (bottom)
-    await page.evaluate(() =>
-      window.scrollTo(0, document.documentElement.scrollHeight),
-    );
+    await page.locator("#dashboard").evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
   await frames(page, 4);
-  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(1000);
+  await expect(page.locator("#global-error")).toBeHidden();
+  expect(await panelScroll(page)).toBeGreaterThan(1000);
+  expect(await page.evaluate(() => scrollY)).toBe(0);
   return () => histories;
 }
 
@@ -146,6 +151,7 @@ async function startRecording(page: Page) {
   return page.evaluate(() => {
     const s = (window as any).resizeTest;
     const c = s.cards["resize-12"];
+    const panel = document.querySelector<HTMLElement>("#dashboard")!;
     s.frames = [];
     s.moves = [];
     s.recording = true;
@@ -158,7 +164,11 @@ async function startRecording(page: Page) {
             (node.matches(".dashboard-cell,.chart-section") ||
               node.contains(c.host))
           )
-            s.moves.push({ phase: s.phase, node: node.className, y: scrollY });
+            s.moves.push({
+              phase: s.phase,
+              node: node.className,
+              y: panel.scrollTop,
+            });
     });
     s.observer.observe(document.querySelector("#dashboard"), {
       childList: true,
@@ -168,18 +178,23 @@ async function startRecording(page: Page) {
       const rect = c.root.getBoundingClientRect();
       s.frames.push({
         phase: s.phase,
-        y: scrollY,
+        y: panel.scrollTop,
+        windowY: scrollY,
+        panelTop: panel.getBoundingClientRect().top,
+        toolbarHeight: document
+          .querySelector(".workspace-toolbar")!
+          .getBoundingClientRect().height,
         top: rect.top,
         left: rect.left,
         width: rect.width,
         height: rect.height,
-        max: document.documentElement.scrollHeight - innerHeight,
+        max: panel.scrollHeight - panel.clientHeight,
         focus: document.activeElement?.getAttribute("aria-label"),
       });
       if (s.recording) requestAnimationFrame(sample);
     };
     sample();
-    return scrollY;
+    return panel.scrollTop;
   });
 }
 
@@ -188,7 +203,7 @@ async function evidence(
   info: TestInfo,
   name: string,
   y: number,
-  policy: "page" | "anchor" | "clamp" = "page",
+  policy: "page" | "anchor" | "clamp" | "alert" = "page",
 ) {
   await frames(page, 6);
   const result = await page.evaluate(() => {
@@ -227,7 +242,8 @@ async function evidence(
     }),
   );
   for (const frame of result.frames) {
-    const reason = `${name}: ${JSON.stringify(frame)}`;
+    const reason = `${name}: ${JSON.stringify(frame)}; initial: ${JSON.stringify(result.frames[0])}`;
+    expect(frame.windowY, reason).toBe(0);
     if (policy !== "anchor")
       expect(
         Math.abs(frame.y - (policy === "clamp" ? Math.min(y, frame.max) : y)),
@@ -235,7 +251,13 @@ async function evidence(
       ).toBeLessThanOrEqual(1);
     if (policy !== "clamp") {
       expect(
-        Math.abs(frame.top - result.frames[0].top),
+        Math.abs(
+          frame.top -
+            result.frames[0].top -
+            (policy === "alert"
+              ? frame.panelTop - result.frames[0].panelTop
+              : 0),
+        ),
         reason,
       ).toBeLessThanOrEqual(1);
       expect(frame.left, reason).toBe(result.frames[0].left);
@@ -321,7 +343,7 @@ test("full-shell far-below-fold pointer resize preserves every frame and commits
   expect(histories()).toBe(loads);
 });
 
-test("keyboard resize retains focus, viewport and page position for repeated commits", async ({
+test("keyboard resize retains focus, viewport and panel position for repeated commits", async ({
   page,
 }, info) => {
   const histories = await fixture(page);
@@ -382,10 +404,9 @@ test("failed storage rolls back resize without losing scroll, focus or chart sta
   });
   const y = await startRecording(page);
   await drag(page, 70, 60);
-  // Reporting the storage error adds a banner above the dashboard. Native
-  // anchoring should keep the same card at the same viewport position, not
-  // force the old absolute scrollY and move the user's content down 61px.
-  await evidence(page, info, "failed-storage", y, "anchor");
+  // The error banner changes the panel's bounds. Preserve the panel's scroll
+  // offset and the card's position within it; the document never scrolls.
+  await evidence(page, info, "failed-storage", y, "alert");
   expect(await layout(page)).toEqual({ width: 580, height: 420 });
   await expect(page.locator(`${target} [data-role=chart-card]`)).toHaveCSS(
     "height",
@@ -395,7 +416,7 @@ test("failed storage rolls back resize without losing scroll, focus or chart sta
   expect(histories()).toBe(loads);
 });
 
-test("document shrink at the bottom allows only the browser's natural scroll clamp", async ({
+test("dashboard shrink at the bottom allows only the browser's natural scroll clamp", async ({
   page,
 }, info) => {
   const histories = await fixture(page, true);
@@ -403,7 +424,67 @@ test("document shrink at the bottom allows only the browser's natural scroll cla
   const y = await startRecording(page);
   await drag(page, 0, -100);
   await evidence(page, info, "bottom-clamp", y, "clamp");
-  expect(await page.evaluate(() => scrollY)).toBeLessThan(y - 50);
+  expect(await panelScroll(page)).toBeLessThan(y - 50);
   expect(await layout(page)).toEqual({ width: 580, height: 320 });
   expect(histories()).toBe(loads);
 });
+
+for (const finish of ["release", "escape", "cancel"] as const) {
+  test(`panel edge resize ${finish} accounts for scroll without moving the document`, async ({
+    page,
+  }) => {
+    await fixture(page);
+    const dashboard = page.locator("#dashboard");
+    await dashboard.evaluate((node) => {
+      node.style.height = "600px";
+      node.style.alignSelf = "start";
+    });
+    const handle = page.locator(`${target} .card-resize-handle`);
+    await handle.scrollIntoViewIfNeeded();
+    const panel = (await dashboard.boundingBox())!;
+    const box = (await handle.boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    const before = await panelScroll(page);
+    const stored = await layout(page);
+    const windowBefore = await page.evaluate(() => scrollY);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, panel.y + panel.height - 8);
+    await expect.poll(() => panelScroll(page)).toBeGreaterThan(before + 24);
+    expect(await page.evaluate(() => scrollY)).toBe(windowBefore);
+    // Leaving the visible panel stops auto-scroll, but pointer capture still
+    // tracks the final resize position and supports all completion paths.
+    const finalY = panel.y + panel.height + 8;
+    await page.mouse.move(x, finalY);
+    const stopped = await panelScroll(page);
+    await frames(page, 4);
+    expect(await panelScroll(page)).toBe(stopped);
+    if (finish === "escape") await page.keyboard.press("Escape");
+    if (finish === "cancel")
+      await handle.evaluate((node) =>
+        node.dispatchEvent(
+          new PointerEvent("pointercancel", { bubbles: true }),
+        ),
+      );
+    await page.mouse.up();
+    expect(await layout(page)).toEqual(
+      finish === "release"
+        ? {
+            width: stored.width,
+            height: Math.round(
+              Math.min(
+                2160,
+                Math.max(240, stored.height + finalY - y + stopped - before),
+              ),
+            ),
+          }
+        : stored,
+    );
+    await expect(page.locator(".card-resizing-slot")).toHaveCount(0);
+    expect(await page.evaluate(() => scrollY)).toBe(windowBefore);
+    const ended = await panelScroll(page);
+    await frames(page, 4);
+    expect(await panelScroll(page)).toBe(ended);
+  });
+}

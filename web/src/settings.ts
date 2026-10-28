@@ -8,6 +8,7 @@ import {
   type ViewConfig,
   type RunStyle,
 } from "./config";
+import { smoothingUnit } from "./smoothing-coordinate";
 import { element, message } from "./utils";
 import type { Run } from "./api";
 export class SettingsPanel {
@@ -105,13 +106,17 @@ export class SettingsPanel {
       "linear",
       "pchip",
     ]);
-    add(transforms, "smoothing", "Enable EMA");
-    add(transforms, "alpha", "EMA alpha (per observation)");
+    add(transforms, "smoothing", "Enable Gaussian smoothing");
+    add(
+      transforms,
+      "smoothingSigma",
+      `Smoothing sigma (${smoothingUnit(config, false)})`,
+    );
     transforms.append(
       element(
         "p",
         "field-wide hint",
-        "Duplicate x uses the largest sequence number. EMA is applied after canonicalization. No extrapolation. Raw markers remain unsmoothed; all numeric queries use the transformed full series.",
+        "Duplicate x uses the largest sequence number. Gaussian smoothing uses the full independent coordinate, not observation order: sigma defaults to 1 step/second, decade/doubling, or asinh unit. Linear time uses seconds; ordinary asinh keeps the raw display-unit threshold. No extrapolation. Raw markers remain unsmoothed; all numeric queries use the transformed full series.",
       ),
     );
     const axes = section("02 / Axes & viewport");

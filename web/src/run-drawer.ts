@@ -39,7 +39,7 @@ export function runDrawerState(experimentId: string): RunDrawerState {
     );
     if (typeof saved?.open === "boolean") state.open = saved.open;
     if (typeof saved?.width === "number" && Number.isFinite(saved.width))
-      state.width = Math.max(MIN_WIDTH, Math.min(600, saved.width));
+      state.width = Math.max(MIN_WIDTH, saved.width);
   } catch {
     /* Storage is optional; malformed or blocked preferences are ignored. */
   }
@@ -438,7 +438,7 @@ export class RunDrawer {
     if (this.narrow.matches) return Math.min(600, Math.max(0, innerWidth - 40));
     return Math.max(
       MIN_WIDTH,
-      Math.min(600, (this.pane.parentElement?.clientWidth ?? 1020) - 420),
+      (this.pane.parentElement?.clientWidth ?? innerWidth) / 2,
     );
   }
   private measure() {

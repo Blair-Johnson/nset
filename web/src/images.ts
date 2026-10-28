@@ -67,6 +67,7 @@ export class ImagePanel {
   private status = element("div", "image-frame-status");
   private play = element("button", "", "Play");
   private speed = element("select");
+  private sequenceControls: HTMLElement[] = [];
   private cameraInfo = element("div", "muted camera-info");
   /** Camera to apply instead of "home" when the first frame lands. */
   private pendingCamera?: ImageCamera;
@@ -210,6 +211,14 @@ export class ImagePanel {
       void this.show(Number(this.slider.value));
     };
     timeline.append(this.slider, this.info);
+    this.sequenceControls = [
+      previous,
+      this.play,
+      next,
+      this.slider,
+      this.speed,
+    ];
+    this.updateSequenceControls();
     this.host.append(toolbar, canvas, timeline, this.cameraInfo);
     this.status.setAttribute("role", "status");
     this.cameraInfo.hidden = this.compact;
@@ -472,6 +481,7 @@ export class ImagePanel {
       this.slider.max = String(Math.max(0, this.frames.length - 1));
       this.slider.value = String(this.index);
       this.slider.disabled = !this.frames.length;
+      this.updateSequenceControls();
       const displayed = this.frames.find(
         (frame) => frame.id === this.displayed,
       );
@@ -552,6 +562,13 @@ export class ImagePanel {
     }
     if (keys.includes(previousKey)) this.keySelect.value = previousKey;
     this.keySelect.hidden = this.compact && keys.length <= 1;
+  }
+  private updateSequenceControls(): void {
+    // Image metadata is a complete list; count only the selected run/key,
+    // never the blob cache or unrelated image keys.
+    const hidden = this.frames.length <= 1;
+    for (const control of this.sequenceControls) control.hidden = hidden;
+    if (hidden && this.playing) this.stop();
   }
   private updateFrameInfo(frame: ImageFrame): void {
     const index = this.frames.findIndex(
@@ -844,6 +861,7 @@ export class ImagePanel {
     this.slider.max = "0";
     this.slider.value = "0";
     this.slider.disabled = true;
+    this.updateSequenceControls();
   }
   private async load() {
     if (this.destroyed) return;
@@ -898,6 +916,7 @@ export class ImagePanel {
     this.frames = this.all.filter((f) => f.key === this.keySelect.value);
     this.slider.max = String(Math.max(0, this.frames.length - 1));
     this.slider.disabled = !this.frames.length;
+    this.updateSequenceControls();
     if (this.frames.length) void this.show(0);
     else {
       this.status.textContent = "No images found";
@@ -1166,7 +1185,7 @@ export class ImagePanel {
       this.stop();
       return;
     }
-    if (this.destroyed || !this.active || !this.frames.length) return;
+    if (this.destroyed || !this.active || this.frames.length <= 1) return;
     this.playing = true;
     const generation = this.playback.next();
     const current = () => this.playing && this.playback.current(generation);

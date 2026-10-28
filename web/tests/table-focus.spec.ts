@@ -99,7 +99,7 @@ test("Space preserves the same run checkbox through row reordering and duplicate
   ]);
 });
 
-test("select-all retains focus, covers all matching pages, and preserves other selections", async ({
+test("select-all retains focus, covers all matching rows, and preserves other selections", async ({
   page,
 }) => {
   await fixture(page);
@@ -173,7 +173,7 @@ test("render does not steal focus from search or an outside control", async ({
   await expect(page.locator("#outside")).toBeFocused();
 });
 
-test("120-run sort and pagination retain keyboard focus with enabled boundary fallbacks", async ({
+test("120-run sort retains keyboard focus with every matching row rendered", async ({
   page,
 }) => {
   await fixture(page, false, 120);
@@ -187,20 +187,12 @@ test("120-run sort and pagination retain keyboard focus with enabled boundary fa
   await expect(sort).toBeFocused();
   await expect(sort.locator("..")).toHaveAttribute("aria-sort", "ascending");
   await expect(run(page, 0)).toBeVisible();
-  const next = page.getByRole("button", { name: "Next", exact: true });
-  const previous = page.getByRole("button", { name: "Previous", exact: true });
-  await next.focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("51–100 of 120", { exact: true })).toBeVisible();
-  await expect(next).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("101–120 of 120", { exact: true })).toBeVisible();
-  await expect(next).toBeDisabled();
-  await expect(previous).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(previous).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("1–50 of 120", { exact: true })).toBeVisible();
-  await expect(previous).toBeDisabled();
-  await expect(next).toBeFocused();
+  await expect(page.locator("tbody tr")).toHaveCount(120);
+  await expect(
+    page.getByRole("button", { name: /^(Next|Previous)$/ }),
+  ).toHaveCount(0);
+  await run(page, 119).focus();
+  await page.keyboard.press("Space");
+  await expect(run(page, 119)).toBeFocused();
+  await expect(run(page, 119)).toBeChecked();
 });

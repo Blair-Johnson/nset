@@ -33,29 +33,61 @@
   border: 1px solid var(--control-border);
   border-radius: 4px;
 }
+.dashboard-control-smoothing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+}
 .dashboard-controls input[type="range"] {
   width: 112px;
   min-width: 64px;
-  min-height: 30px;
+  height: 28px;
   margin: 0;
   padding: 0;
+  accent-color: var(--accent);
   cursor: pointer;
-  accent-color: var(--accent, #75baff);
+}
+.dashboard-controls .dashboard-smoothing-value,
+.dashboard-controls .dashboard-smoothing-editor {
+  width: auto;
+  min-width: 3ch;
+  min-height: 28px;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+.dashboard-controls .dashboard-smoothing-value {
+  white-space: nowrap;
+  cursor: text;
+}
+.dashboard-controls .dashboard-smoothing-value:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.dashboard-controls .dashboard-smoothing-editor {
+  width: 12ch;
+  outline: 1px solid var(--control-border);
+}
+.dashboard-controls [hidden] {
+  display: none;
 }
 .dashboard-controls input[data-mixed="true"] {
   opacity: 0.7;
 }
 .dashboard-controls select:focus-visible,
-.dashboard-controls input:focus-visible {
+.dashboard-controls input:focus-visible,
+.dashboard-controls button:focus-visible {
   outline: 2px solid var(--accent, #75baff);
   outline-offset: 2px;
-}
-.dashboard-smoothing-value {
-  display: inline-block;
-  width: 5ch;
-  flex: 0 0 5ch;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .dashboard-controls-status {
   position: relative;
@@ -88,6 +120,6 @@
     width: 116px;
   }
   .dashboard-controls input[type="range"] {
-    width: 78px;
+    width: 96px;
   }
 }

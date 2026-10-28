@@ -9,7 +9,22 @@ function finite(value: number, name: string): number {
   return value;
 }
 
-/** Ascending x; largest seq wins duplicate x, with last input winning tied seq.
+/** Latest finite observation per step; greatest seq wins, then last input.
+ * Winner order is original input order (important for later coordinate ties).
+ * All numeric fields, including discarded observations, must be finite.
+ */
+export function latestPerStep(points: Point[]): Point[] {
+  const latest = new Map<number, number>();
+  points.forEach((p, i) => {
+    for (const key of ['seq', 'step', 'timestamp', 'value'] as const) finite(p[key], key);
+    const previous = latest.get(p.step);
+    if (previous === undefined || p.seq >= points[previous].seq) latest.set(p.step, i);
+  });
+  return points.filter((p, i) => latest.get(p.step) === i).map(p => ({ ...p }));
+}
+
+/** First latest-per-step, then ascending x; largest seq wins duplicate x,
+ * with last input winning tied seq.
  * Does not mutate inputs. Numeric fields must be finite (even discarded rows).
  * Relative x is timestamp - runStart, in backend milliseconds. The explicit
  * finite run origin is required even for empty data; first logging is not start.
@@ -18,8 +33,7 @@ export function canonicalize(points: Point[], axis: 'step' | 'timestamp' | 'rela
   if (axis !== 'step' && axis !== 'timestamp' && axis !== 'relative') throw new RangeError('Unknown axis');
   if (axis === 'relative') finite(runStart!, 'runStart');
   const latest = new Map<number, Point>();
-  for (const p of points) {
-    for (const key of ['seq', 'step', 'timestamp', 'value'] as const) finite(p[key], key);
+  for (const p of latestPerStep(points)) {
     const x = axis === 'relative' ? finite(p.timestamp - runStart!, 'Relative timestamp') : p[axis];
     const prior = latest.get(x);
     if (!prior || p.seq >= prior.seq) latest.set(x, p);
@@ -45,24 +59,6 @@ function mix(a: number, b: number, t: number): number {
   const delta = b - a;
   const value = Number.isFinite(delta) ? a + t * delta : (1 - t) * a + t * b;
   return Math.max(Math.min(a, b), Math.min(Math.max(a, b), value));
-}
-
-/** Per-observation EMA over the entire ordered series, seeded with its first y.
- * alpha is in (0, 1]; no viewport dependence, input mutation, or point removal.
- */
-export function ema(points: XY[], alpha: number): XY[] {
-  if (!(finite(alpha, 'alpha') > 0 && alpha <= 1)) throw new RangeError('alpha must be in (0, 1]');
-  const result = copyOrdered(points);
-  for (let i = 1; i < result.length; i++) result[i][1] = mix(result[i - 1][1], result[i][1], alpha);
-  return result;
-}
-
-/** EMA over paired event order. X is a recorded coordinate, not a sort key. */
-export function emaInOrder(points: XY[], alpha: number): XY[] {
-  if (!(finite(alpha, 'alpha') > 0 && alpha <= 1)) throw new RangeError('alpha must be in (0, 1]');
-  const result = points.map(([x, y]): XY => [finite(x, 'x'), finite(y, 'y')]);
-  for (let i = 1; i < result.length; i++) result[i][1] = mix(result[i - 1][1], result[i][1], alpha);
-  return result;
 }
 
 function sameSign(a: number, b: number): boolean {

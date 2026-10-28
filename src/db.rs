@@ -146,6 +146,22 @@ fn image_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Image> {
     })
 }
 const IMAGE_COLUMNS: &str = "id,run_id,key,step,timestamp,content_type,byte_length";
+
+fn metric_points_sql(policy: MetricPolicy) -> &'static str {
+    match policy {
+        MetricPolicy::All => {
+            "SELECT seq,key,step,timestamp,value FROM metrics WHERE run_id=? AND key=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?"
+        }
+        // The maximum of a step can pass `after` only if it exists in this suffix.
+        // Grouping the indexed (run,key,seq) range therefore preserves snapshot
+        // winners while avoiding a full-history scan for each tail poll. The
+        // primary-key lookup fetches only winners; no correlated per-row scan.
+        MetricPolicy::LatestPerStep => {
+            "SELECT seq,key,step,timestamp,value FROM metrics WHERE seq IN (SELECT MAX(seq) FROM metrics WHERE run_id=? AND key=? AND seq>? AND seq<=? GROUP BY step) ORDER BY seq LIMIT ?"
+        }
+    }
+}
+
 fn schema_version(connection: &Connection) -> Result<i64> {
     let version =
         connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
@@ -1198,8 +1214,12 @@ impl Database {
             let high: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0) FROM metrics WHERE run_id=? AND key=?", params![id,query.key], |row| row.get(0))?;
             let snapshot = query.snapshot.unwrap_or(high);
             if snapshot > high { return Err(ApiError::bad("snapshot exceeds stream high-water mark")); }
-            let total = tx.query_row("SELECT COUNT(*) FROM metrics WHERE run_id=? AND key=? AND seq<=?", params![id,query.key,snapshot], |row| row.get(0))?;
-            let mut points: Vec<Metric> = tx.prepare("SELECT seq,key,step,timestamp,value FROM metrics WHERE run_id=? AND key=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?")?.query_map(params![id,query.key,after,snapshot,(limit+1) as i64], |row| Ok(Metric {seq:row.get(0)?,key:row.get(1)?,step:row.get(2)?,timestamp:row.get(3)?,value:row.get(4)?}))?.collect::<rusqlite::Result<_>>()?;
+            let count_sql = match query.policy {
+                MetricPolicy::All => "SELECT COUNT(*) FROM metrics WHERE run_id=? AND key=? AND seq<=?",
+                MetricPolicy::LatestPerStep => "SELECT COUNT(DISTINCT step) FROM metrics WHERE run_id=? AND key=? AND seq<=?",
+            };
+            let total = tx.query_row(count_sql, params![id,query.key,snapshot], |row| row.get(0))?;
+            let mut points: Vec<Metric> = tx.prepare_cached(metric_points_sql(query.policy))?.query_map(params![id,query.key,after,snapshot,(limit+1) as i64], |row| Ok(Metric {seq:row.get(0)?,key:row.get(1)?,step:row.get(2)?,timestamp:row.get(3)?,value:row.get(4)?}))?.collect::<rusqlite::Result<_>>()?;
             let more = points.len() > limit;
             if more { points.pop(); }
             let next_after = if more { points.last().map(|point| point.seq) } else { None };
@@ -1231,30 +1251,66 @@ impl Database {
             }
         }
         drop(unique);
-        self.reader().call(move |conn| {
-            let tx = conn.transaction()?;
-            let mut series = Vec::with_capacity(query.series.len());
-            for stream in query.series {
-                require_run(&tx, &stream.run_id)?;
-                let high: i64 = tx.query_row(
-                    "SELECT COALESCE(MAX(seq),0) FROM metrics WHERE run_id=? AND key=?",
-                    params![stream.run_id, stream.key], |row| row.get(0))?;
-                let snapshot = stream.snapshot.unwrap_or(high);
-                if snapshot > high { return Err(ApiError::bad("snapshot exceeds stream high-water mark")); }
-                if stream.after > snapshot { return Err(ApiError::bad("after exceeds snapshot")); }
-                let mut points: Vec<Metric> = tx.prepare_cached(
-                    "SELECT seq,key,step,timestamp,value FROM metrics WHERE run_id=? AND key=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?"
-                )?.query_map(params![stream.run_id, stream.key, stream.after, snapshot, (limit + 1) as i64], |row| {
-                    Ok(Metric { seq: row.get(0)?, key: row.get(1)?, step: row.get(2)?, timestamp: row.get(3)?, value: row.get(4)? })
-                })?.collect::<rusqlite::Result<_>>()?;
-                let more = points.len() > limit;
-                if more { points.pop(); }
-                let next_after = if more { points.last().map(|point| point.seq) } else { None };
-                series.push(MetricTailPage { run_id: stream.run_id, key: stream.key, points, snapshot, next_after });
-            }
-            tx.commit()?;
-            Ok(MetricTailResponse { series })
-        }).await
+        self.reader()
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                let mut series = Vec::with_capacity(query.series.len());
+                for stream in query.series {
+                    require_run(&tx, &stream.run_id)?;
+                    let high: i64 = tx.query_row(
+                        "SELECT COALESCE(MAX(seq),0) FROM metrics WHERE run_id=? AND key=?",
+                        params![stream.run_id, stream.key],
+                        |row| row.get(0),
+                    )?;
+                    let snapshot = stream.snapshot.unwrap_or(high);
+                    if snapshot > high {
+                        return Err(ApiError::bad("snapshot exceeds stream high-water mark"));
+                    }
+                    if stream.after > snapshot {
+                        return Err(ApiError::bad("after exceeds snapshot"));
+                    }
+                    let mut points: Vec<Metric> = tx
+                        .prepare_cached(metric_points_sql(stream.policy))?
+                        .query_map(
+                            params![
+                                stream.run_id,
+                                stream.key,
+                                stream.after,
+                                snapshot,
+                                (limit + 1) as i64
+                            ],
+                            |row| {
+                                Ok(Metric {
+                                    seq: row.get(0)?,
+                                    key: row.get(1)?,
+                                    step: row.get(2)?,
+                                    timestamp: row.get(3)?,
+                                    value: row.get(4)?,
+                                })
+                            },
+                        )?
+                        .collect::<rusqlite::Result<_>>()?;
+                    let more = points.len() > limit;
+                    if more {
+                        points.pop();
+                    }
+                    let next_after = if more {
+                        points.last().map(|point| point.seq)
+                    } else {
+                        None
+                    };
+                    series.push(MetricTailPage {
+                        run_id: stream.run_id,
+                        key: stream.key,
+                        points,
+                        snapshot,
+                        next_after,
+                    });
+                }
+                tx.commit()?;
+                Ok(MetricTailResponse { series })
+            })
+            .await
     }
 
     pub async fn insert_image(

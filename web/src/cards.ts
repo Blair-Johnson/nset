@@ -1,3 +1,4 @@
+import { GestureScroll } from "./gesture-scroll";
 import { touchPrimary } from "./input-capabilities";
 import { runStartTime } from "./api";
 import { nearestCrossingRuns, plottedSeries } from "./crossings";
@@ -145,7 +146,9 @@ export class ChartCard {
     y: number;
     start: CardLayout;
     next: CardLayout;
-    /** Page scroll at gesture start: auto-scroll extends the drag distance. */
+    /** Scrollport offsets at gesture start extend the drag distance. */
+    scrollport: GestureScroll;
+    scrollX: number;
     scrollY: number;
     clientX: number;
     clientY: number;
@@ -373,6 +376,7 @@ export class ChartCard {
       event.preventDefault();
       const rect = this.root.getBoundingClientRect();
       const start = { width: rect.width, height: this.baseHeight() };
+      const scrollport = new GestureScroll(this.host);
       // Keep the original flex/grid footprint until release; only the child previews.
       this.host.style.setProperty("--resize-slot-width", `${rect.width}px`);
       this.host.style.setProperty("--resize-slot-height", `${rect.height}px`);
@@ -383,44 +387,36 @@ export class ChartCard {
         y: event.clientY,
         start,
         next: start,
-        scrollY: window.scrollY,
+        scrollport,
+        scrollX: scrollport.x,
+        scrollY: scrollport.y,
         clientX: event.clientX,
         clientY: event.clientY,
       };
       handle.setPointerCapture(event.pointerId);
       handle.focus({ preventScroll: true });
     };
-    // Height follows the pointer in page coordinates, so scrolling while
+    // Height follows the pointer in scrollport coordinates, so scrolling while
     // dragging grows the card past the visible area.
     const track = (g: NonNullable<typeof this.resizeGesture>) => {
       g.next = bounded(
-        g.start.width + g.clientX - g.x,
-        g.start.height + g.clientY - g.y + window.scrollY - g.scrollY,
+        g.start.width + g.clientX - g.x + g.scrollport.x - g.scrollX,
+        g.start.height + g.clientY - g.y + g.scrollport.y - g.scrollY,
       );
       this.applyDimensions(g.next);
-      // Reserve page height for the overflowing preview so scrolling can follow.
-      const grow = Math.max(0, g.next.height - g.start.height);
-      this.host.style.setProperty("--resize-slot-extra", `${grow}px`);
     };
-    // Near the bottom (or top) edge, scroll the page while the pointer rests.
-    const EDGE = 48;
+    // Near a visible panel edge, scroll only that panel while the pointer rests.
     const autoScroll = () => {
       const g = this.resizeGesture;
       if (!g) return;
       g.frame = undefined;
-      const fromBottom = window.innerHeight - g.clientY;
-      const speed =
-        fromBottom < EDGE
-          ? Math.ceil(((EDGE - Math.max(0, fromBottom)) / EDGE) * 18)
-          : g.clientY < EDGE
-            ? -Math.ceil(((EDGE - Math.max(0, g.clientY)) / EDGE) * 18)
-            : 0;
+      const speed = g.scrollport.edgeSpeed(g.clientX, g.clientY, 18);
       if (!speed) return;
-      const before = window.scrollY;
-      // The page may need room to scroll into: the card's preview grows first.
+      const before = g.scrollport.y;
+      // The panel may need room to scroll into: the card's preview grows first.
       track(g);
-      window.scrollBy(0, speed);
-      if (window.scrollY !== before) track(g);
+      g.scrollport.by(speed);
+      if (g.scrollport.y !== before) track(g);
       g.frame = requestAnimationFrame(autoScroll);
     };
     handle.onpointermove = (event) => {
@@ -772,7 +768,15 @@ export class ChartCard {
       this.legend.append(item);
     });
     if (config.smoothing)
-      this.legend.append(element("span", "card-series-note", "Smoothed"));
+      this.legend.append(
+        element(
+          "span",
+          "card-series-note",
+          this.spec.records
+            ? "Unsmoothed: no common step/time coordinate"
+            : "Smoothed",
+        ),
+      );
     this.updateLegendReadout();
   }
 
@@ -1217,7 +1221,7 @@ export class ChartCard {
         })
       )
         return;
-      const data = analyze(raw, this.spec.config);
+      const data = analyze(raw, this.spec.config, this.data);
       const previous = {
         data: this.data,
         raw: this.raw,
@@ -1699,7 +1703,10 @@ export class ChartCard {
         config: {
           ...s.config,
           smoothing: false,
-          alpha: 0,
+          smoothingSigma: 1,
+          joinScale: "linear",
+          joinLog: 10,
+          joinAsinh: 1,
           interpolation: "linear",
         },
       });
@@ -1718,11 +1725,10 @@ export class ChartCard {
       this.data = analyze(this.raw, spec.config);
       this.renderLegend();
       const display = this.displayConfig();
-      this.plot.render(
+      this.plot.updateData(
         this.data,
         spec.outliers === "robust" ? robustConfig(this.data, display) : display,
         this.pins,
-        { preserveView: true },
       );
       this.renderResults();
       return;

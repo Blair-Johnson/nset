@@ -60,6 +60,7 @@ impl Fixture {
             .block_on(self.db.metrics(
                 self.run.clone(),
                 MetricQuery {
+                    policy: Default::default(),
                     key: "loss".into(),
                     after: None,
                     snapshot: None,

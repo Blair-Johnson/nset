@@ -4,7 +4,7 @@ async function fixture(page: Page, kind: "runs" | "experiments" = "runs") {
   await page.route("**/__table_live_updates", (route) =>
     route.fulfill({
       contentType: "text/html",
-      body: "<!doctype html><html><head><style>.table-scroll { height: 180px; width: 600px; overflow: auto; } table { width: 1000px; } td { height: 30px; } .column-choices { max-height: 100px; overflow: auto; }</style></head><body><main></main></body></html>",
+      body: '<!doctype html><html><head><link rel="stylesheet" href="/src/style.css"><style>.table-scroll { height: 180px; width: 600px; overflow: auto; } .data-table:not(.run-table) { width: 1000px; } td { height: 30px; } .run-browser { height: 320px; width: 600px; } .run-table { width: 100%; } .column-choices { max-height: 100px; overflow: auto; }</style></head><body><main></main></body></html>',
     }),
   );
   await page.goto("/__table_live_updates");
@@ -192,18 +192,17 @@ test("metric counts, status and new runs refresh while typing without selection 
   ).toHaveLength(121);
 });
 
-test("live values preserve page, sort, checkbox focus and scrolling; equivalent data keeps rows mounted", async ({
+test("live values preserve sort, checkbox focus and scrolling; equivalent data keeps rows mounted", async ({
   page,
 }) => {
   await fixture(page);
-  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.locator("tbody tr")).toHaveCount(120);
   await run(page, 55).getByRole("checkbox").focus();
   const result = await page.evaluate(() => {
     const f = (window as any).__liveTable;
     const wrap = f.table.querySelector(".table-scroll");
     wrap.scrollTop = 110;
     wrap.scrollLeft = 90;
-    const nextButton = f.table.querySelector('[data-page-action="next"]');
     const sortButton = f.table.querySelector('[data-sort-key="metric:loss"]');
     const next = structuredClone(f.catalog);
     next.series[55].last_value = 51.25;
@@ -211,18 +210,18 @@ test("live values preserve page, sort, checkbox focus and scrolling; equivalent 
     f.update(next);
     const row = f.table.querySelector('tr[data-run-id="run-55"]');
     f.update(structuredClone(next));
-    const offPage = structuredClone(next);
-    offPage.series[119].count = 10;
-    f.update(offPage);
+    const sameRow = row === f.table.querySelector('tr[data-run-id="run-55"]');
+    const offscreen = structuredClone(next);
+    offscreen.series[119].count = 10;
+    f.update(offscreen);
     return {
       page: f.state.page,
       sort: f.state.sort,
       descending: f.state.descending,
       scrollTop: wrap.scrollTop,
       scrollLeft: wrap.scrollLeft,
-      sameRow: row === f.table.querySelector('tr[data-run-id="run-55"]'),
-      samePager:
-        nextButton === f.table.querySelector('[data-page-action="next"]'),
+      sameRow,
+      noPager: !f.table.querySelector(".table-pager"),
       sameSort:
         sortButton === f.table.querySelector('[data-sort-key="metric:loss"]'),
       selections: f.selections,
@@ -230,22 +229,26 @@ test("live values preserve page, sort, checkbox focus and scrolling; equivalent 
     };
   });
   expect(result).toEqual({
-    page: 1,
+    page: 0,
     sort: "metric:loss",
     descending: false,
     scrollTop: 110,
     scrollLeft: 90,
     sameRow: true,
-    samePager: true,
+    noPager: true,
     sameSort: true,
     selections: [],
     calls: { setRuns: 0, notifications: 0, storage: 0 },
   });
   await expect(run(page, 55).getByRole("checkbox")).toBeFocused();
   await expect(run(page, 55).locator(".number-cell")).toHaveText("51.25");
-  await expect(page.locator("tbody tr").nth(2)).toHaveAttribute(
+  await expect(page.locator("tbody tr").nth(52)).toHaveAttribute(
     "data-run-id",
     "run-55",
+  );
+  await expect(run(page, 119).locator(".number-cell")).toHaveAttribute(
+    "title",
+    /10 logged values/,
   );
   // Even an unchanged row's details action resolves the most recent catalog object.
   await run(page, 55)
