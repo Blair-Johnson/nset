@@ -31,6 +31,13 @@ pub enum Change {
         /// Observations added to this key by ONE committed batch (not a total).
         count: usize,
         last: Metric,
+        /// Authoritative run activity time from the committed database row.
+        #[serde(
+            rename = "runUpdatedAt",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        run_updated_at: Option<i64>,
     },
     Catalog,
     Rx,

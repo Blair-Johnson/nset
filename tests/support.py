@@ -20,7 +20,7 @@ from nset_client import Client, DeliveryError
 def isolated_env(home):
     """Subprocesses use the same installed package, never a source path override."""
     env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(home / "state"),
-               LOCALAPPDATA=str(home / "local"))
+               LOCALAPPDATA=str(home / "local"), NSET_SPOOL_DIR=str(home / "journal"))
     env.pop("PYTHONPATH", None)
     env["NSET_TEST_CLIENT_SOURCE"] = str(Path(nset_client.__file__).resolve())
     return env
@@ -58,7 +58,7 @@ class Server:
         self.url = f"http://127.0.0.1:{self.port}"
         self.binary = Path(os.environ.get("NSET_BINARY", ROOT / "target/debug/nset")).resolve()
         self.spool_patch = patch("nset_client.client._spool_path", side_effect=lambda url:
-            self.directory / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.sqlite3")
+            self.directory / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.journal")
         self.spool_patch.start()
         self.client = Client(self.url, token=self.token)
         self.process = None

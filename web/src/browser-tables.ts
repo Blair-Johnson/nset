@@ -77,20 +77,23 @@ export function experimentTable(
     ["name", "Experiment"],
     ["runs", "Runs"],
     ["created_at", "Created"],
+    ["updated_at", "Updated"],
   ];
   for (const [key, label] of headers) {
     const th = element("th");
-    th.append(
-      button(
-        label,
-        () => {
-          state.descending = state.sort === key ? !state.descending : false;
-          state.sort = key;
-          render();
-        },
-        "sort-button",
-      ),
+    const control = button(
+      label,
+      () => {
+        state.descending =
+          state.sort === key ? !state.descending : key === "updated_at";
+        state.sort = key;
+        render();
+      },
+      "sort-button",
     );
+    control.dataset.sortKey = key;
+    control.title = label;
+    th.append(control);
     row.append(th);
   }
   head.append(row);
@@ -100,17 +103,54 @@ export function experimentTable(
   const pager = element("div", "table-pager");
   host.append(tools, wrap, pager);
   const counts = new Map<string, number>();
+  const updated = new Map<string, number>();
   let renderedBody = "";
-  function refreshCounts() {
+  function refreshSummaries() {
     counts.clear();
-    for (const run of catalog.runs)
+    updated.clear();
+    const includeTimestamp = (id: string, timestamp: number) => {
+      if (
+        typeof timestamp === "number" &&
+        Number.isFinite(new Date(timestamp).getTime())
+      )
+        updated.set(id, Math.max(updated.get(id) ?? timestamp, timestamp));
+    };
+    for (const experiment of catalog.experiments)
+      includeTimestamp(experiment.id, experiment.created_at);
+    for (const run of catalog.runs) {
       counts.set(run.experiment_id, (counts.get(run.experiment_id) ?? 0) + 1);
+      includeTimestamp(run.experiment_id, run.created_at);
+      includeTimestamp(run.experiment_id, run.updated_at);
+    }
   }
   function render() {
+    headers.forEach(([key, label], index) => {
+      const th = row.children[index];
+      th.setAttribute(
+        "aria-sort",
+        state.sort === key
+          ? state.descending
+            ? "descending"
+            : "ascending"
+          : "none",
+      );
+      setText(
+        th.querySelector("button")!,
+        label + (state.sort === key ? (state.descending ? " ↓" : " ↑") : ""),
+      );
+    });
     const q = state.query.trim().toLowerCase();
     const rows = catalog.experiments
       .filter((e) => e.name.toLowerCase().includes(q))
       .sort((a, b) => {
+        if (state.sort === "updated_at") {
+          const av = updated.get(a.id),
+            bv = updated.get(b.id);
+          // Unknown timestamps stay last in either direction; ties stay stable.
+          if (av === undefined) return bv === undefined ? 0 : 1;
+          if (bv === undefined) return -1;
+          return (state.descending ? -1 : 1) * (av - bv);
+        }
         const result =
           state.sort === "name"
             ? a.name.localeCompare(b.name)
@@ -135,6 +175,7 @@ export function experimentTable(
       pageRows.map((experiment) => [
         experiment,
         counts.get(experiment.id) ?? 0,
+        updated.get(experiment.id),
       ]),
       !!catalog.experiments.length,
     ]);
@@ -161,6 +202,7 @@ export function experimentTable(
           name,
           cell(String(counts.get(experiment.id) ?? 0)),
           cell(timeLabel(experiment.created_at), "muted"),
+          cell(timeLabel(updated.get(experiment.id) ?? NaN), "muted"),
         );
         body.append(tr);
       }
@@ -172,7 +214,7 @@ export function experimentTable(
             : "No experiments yet. Log a run to get started.",
           "empty-table",
         );
-        td.colSpan = 3;
+        td.colSpan = headers.length;
         tr.append(td);
         body.append(tr);
       }
@@ -192,12 +234,12 @@ export function experimentTable(
     state.page = 0;
     render();
   };
-  refreshCounts();
+  refreshSummaries();
   render();
   return Object.assign(host, {
     updateCatalog(next: Catalog) {
       catalog = next;
-      refreshCounts();
+      refreshSummaries();
       render();
     },
   });

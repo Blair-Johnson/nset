@@ -1,4 +1,4 @@
-"""Pure native outbox tests: mock transport, real disposable SQLite, no server."""
+"""Pure native outbox tests: mock transport, real disposable journal, no server."""
 import concurrent.futures
 import contextlib
 import json
@@ -22,6 +22,42 @@ from nset_client import (APIError, BatchConflictError, Client, DurableOutbox,
 METRICS = [{"key": "loss", "step": 0, "value": 1.25}]
 
 
+def journal_files(path):
+    """Snapshot persisted bytes without opening or mutating the journal."""
+    root = Path(path)
+    return {str(file.relative_to(root)): file.read_bytes()
+            for file in root.rglob("*") if file.is_file()}
+
+
+def journal_rows(path):
+    """Read canonical payloads through a separate journal instance."""
+    from nset_client.journal import DirectoryJournal
+    path = Path(path)
+    destination = json.loads((path / "destination.json").read_bytes())["destination"]
+    with contextlib.closing(DirectoryJournal(path, destination)) as journal:
+        rows = []
+        for record_id in journal.snapshot():
+            row = journal.read(record_id)
+            if row is not None:  # Another delivery may acknowledge after the snapshot.
+                rows.append(row[:3])
+        return rows
+
+
+def legacy_outbox(path, destination):
+    """Create an old-format fixture solely to test rejection without migration."""
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE outbox_meta (destination TEXT NOT NULL)")
+        db.execute("INSERT INTO outbox_meta VALUES (?)", (destination,))
+        db.execute("""CREATE TABLE outbox_pending (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL, payload BLOB NOT NULL, accepted INTEGER NOT NULL,
+            UNIQUE(run_id, batch_id))""")
+        db.execute("INSERT INTO outbox_pending(run_id,batch_id,payload,accepted) VALUES (?,?,?,?)",
+                   ("run", "legacy-id", b'{"metrics":[{"key":"loss","step":0,"value":1.25}]}', 1))
+        db.execute("PRAGMA user_version=1")
+    Path(path).chmod(0o600)
+
+
 def receipt(method, path, *, raw):
     assert method == "PUT", method
     assert "/ingest/" in path, path
@@ -35,7 +71,7 @@ class OutboxTests(IsolatedClientTestCase):
         super().setUp()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "outbox.sqlite3"
+        self.path = Path(self.temp.name) / "outbox.journal"
         self.destination = self.client("http://localhost:8080", token="never-store-this-token", timeout=.05)
 
     def box(self, **options):
@@ -44,8 +80,7 @@ class OutboxTests(IsolatedClientTestCase):
         return box
 
     def rows(self):
-        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
-            return db.execute("SELECT run_id,batch_id,payload FROM outbox_pending ORDER BY id").fetchall()
+        return journal_rows(self.path)
 
     def test_mocked_fixtures_leave_fake_user_spool_untouched(self):
         from types import SimpleNamespace
@@ -57,7 +92,7 @@ class OutboxTests(IsolatedClientTestCase):
             _private_spool(sentinel)
             with DurableOutbox(SimpleNamespace(http=self.destination.http), sentinel) as box:
                 box.enqueue("user-sentinel", METRICS, batch_id="never-acknowledge")
-            before = {p.name: p.read_bytes() for p in sentinel.parent.iterdir()}
+            before = journal_files(sentinel.parent)
             fixture = OutboxTests()
             fixture.setUp()
             clients = fixture.clients
@@ -74,7 +109,7 @@ class OutboxTests(IsolatedClientTestCase):
                     fixture.doCleanups()
                 self.assertTrue(all(c._closed and c._outbox is None for c in clients))
                 self.assertTrue(all("user-sentinel" not in call.args[1] for call in send.call_args_list))
-            self.assertEqual({p.name: p.read_bytes() for p in sentinel.parent.iterdir()}, before)
+            self.assertEqual(journal_files(sentinel.parent), before)
 
     def test_offline_commit_reopen_and_credentials_not_stored(self):
         with patch("nset_client.outbox.Transport.request", side_effect=OSError("offline")) as send:
@@ -83,17 +118,17 @@ class OutboxTests(IsolatedClientTestCase):
             batch_id = box.enqueue("run", data)
             data[0]["value"] = 99
             self.assertRegex(batch_id, r"^[a-z0-9]{32}$")
-            self.assertEqual(box._db.execute("PRAGMA synchronous").fetchone(), (2,))
-            self.assertEqual(box._db.execute("PRAGMA journal_mode").fetchone(), ("wal",))
-            self.assertEqual(len(self.rows()), 1)  # visible on independent connection, already committed
+            self.assertTrue(self.path.is_dir())
+            self.assertEqual(len(list(self.path.glob("*.batch"))), 1)
+            self.assertEqual(len(self.rows()), 1)  # Independently visible after durable publication.
             self.assertEqual(json.loads(self.rows()[0][2]), {"metrics": METRICS})
             send.assert_not_called()
             with self.assertRaisesRegex(OSError, "offline"):
                 box.flush()
             self.assertIsInstance(box.last_error, OSError)
             box.close()
-            for file in Path(self.temp.name).iterdir():
-                self.assertNotIn(self.destination.http.token.encode(), file.read_bytes())
+            for data in journal_files(self.path).values():
+                self.assertNotIn(self.destination.http.token.encode(), data)
             self.destination.http.token = "rotated-secret"
             reopened = self.box()
             self.assertEqual(reopened.pending_count(), 1)
@@ -131,7 +166,7 @@ class OutboxTests(IsolatedClientTestCase):
         byte_box.enqueue("run", METRICS, batch_id="exact")
         self.assertEqual(len(self.rows()[0][2]), size)
 
-    def test_wire_body_limit_counts_canonical_bytes_before_transaction(self):
+    def test_wire_body_limit_counts_canonical_bytes_before_journal_access(self):
         box = self.box()
         box.enqueue("run", METRICS, batch_id="existing")
         metrics = [{"value": 1.25, "step": 0, "key": "\x00\u00e9"}]
@@ -140,16 +175,12 @@ class OutboxTests(IsolatedClientTestCase):
             self.assertEqual(box.enqueue("run", metrics, batch_id="exact"), "exact")
             self.assertEqual(self.rows()[-1][2], expected)
             originals = self.rows()
-            statements = []
-            box._db.set_trace_callback(statements.append)
-            try:
+            with patch.object(box._journal, "enqueue", wraps=box._journal.enqueue) as publish:
                 # One extra ASCII byte crosses the exact canonical UTF-8 boundary.
                 oversized = [dict(metrics[0], key="\x00\u00e9a")]
                 with self.assertRaisesRegex(ValueError, "HTTP body limit"):
                     box.enqueue("run", oversized, batch_id="oversized")
-                self.assertEqual(statements, [])  # Not even BEGIN was issued.
-            finally:
-                box._db.set_trace_callback(None)
+                publish.assert_not_called()  # No lock, temporary file, or publication.
             self.assertEqual(self.rows(), originals)
         box.close()
         self.assertEqual(self.box().pending_count(), 2)
@@ -280,21 +311,38 @@ class OutboxTests(IsolatedClientTestCase):
             DurableOutbox(self.destination, ":memory:")
 
     def test_destination_and_unknown_schema_rejected_without_payload_loss(self):
+        from nset_client.journal import JournalCorruptionError
         box = self.box()
         box.enqueue("run", METRICS)
         original = self.rows()
         box.close()
+        before = journal_files(self.path)
         for url in ("http://localhost:8081", "https://localhost:8080", "http://localhost:8080/prefix"):
             with self.subTest(url=url), self.assertRaisesRegex(ValueError, "destination"):
                 DurableOutbox(self.client(url, token="another"), self.path)
+            self.assertEqual(journal_files(self.path), before)
         self.assertEqual(self.rows(), original)
-        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
-            db.execute("PRAGMA user_version=99")
-        with self.assertRaisesRegex(ValueError, "schema"):
+        manifest = self.path / "destination.json"
+        metadata = json.loads(manifest.read_bytes())
+        manifest.write_text(json.dumps(dict(metadata, version=99)))
+        invalid = journal_files(self.path)
+        with self.assertRaisesRegex(JournalCorruptionError, "metadata"):
             self.box()
-        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (99,))
-        self.assertEqual(self.rows(), original)
+        self.assertEqual(journal_files(self.path), invalid)
+        self.assertEqual(json.loads(manifest.read_bytes())["version"], 99)
+        self.assertEqual({k: v for k, v in invalid.items() if k.endswith(".batch")},
+                         {k: v for k, v in before.items() if k.endswith(".batch")})
+
+    def test_legacy_sqlite_is_explicitly_rejected_and_preserved(self):
+        legacy = Path(self.temp.name) / "legacy.sqlite3"
+        legacy_outbox(legacy, self.destination.http.url)
+        # Even sidecars must not be opened, checkpointed, converted, or deleted.
+        Path(str(legacy) + "-wal").write_bytes(b"preserve legacy WAL")
+        Path(str(legacy) + "-shm").write_bytes(b"preserve legacy shared memory")
+        before = journal_files(Path(self.temp.name))
+        with self.assertRaisesRegex(ValueError, "legacy SQLite"):
+            self.destination.durable_outbox(legacy)
+        self.assertEqual(journal_files(Path(self.temp.name)), before)
 
     def test_flush_count_limits_and_partial_failure(self):
         box = self.box()
@@ -315,21 +363,48 @@ class OutboxTests(IsolatedClientTestCase):
             with self.assertRaises(ValueError):
                 box.flush(limit)
 
-    def test_busy_enqueue_and_busy_delete_preserve_original(self):
+    def test_publish_and_ack_io_failures_preserve_original(self):
         box = self.box()
         box.enqueue("run", METRICS, batch_id="original")
-        db = sqlite3.connect(self.path)
-        self.addCleanup(db.close)
-        db.execute("BEGIN IMMEDIATE")
-        with self.assertRaises(sqlite3.OperationalError):
-            box.enqueue("run", METRICS, batch_id="blocked")
-        with patch("nset_client.outbox.Transport.request", side_effect=receipt):
-            with self.assertRaises(sqlite3.OperationalError):
-                box.flush()
-        self.assertIsInstance(box.last_error, sqlite3.OperationalError)
-        self.assertEqual([row[1] for row in self.rows()], ["original"])
+        original = self.rows()
+        before = journal_files(self.path)
+        with patch("nset_client.journal.os.replace", side_effect=OSError("publish failed")):
+            with self.assertRaisesRegex(OSError, "publish failed"):
+                box.enqueue("run", METRICS, batch_id="blocked")
+        self.assertEqual(journal_files(self.path), before)
+        with patch("nset_client.outbox.Transport.request", side_effect=receipt) as failed:
+            with patch("nset_client.journal.os.unlink", side_effect=OSError("ack unlink failed")):
+                with self.assertRaisesRegex(OSError, "ack unlink failed"):
+                    box.flush()
+        self.assertIsInstance(box.last_error, OSError)
+        self.assertEqual(self.rows(), original)
+        self.assertEqual(journal_files(self.path), before)
         self.assertFalse(box._state.claims)
-        db.rollback()
+        with patch("nset_client.outbox.Transport.request", side_effect=receipt) as retry:
+            self.assertEqual(box.flush(), 1)
+        self.assertEqual(failed.call_args, retry.call_args)
+        self.assertEqual(self.rows(), [])
+
+    def test_journal_lock_contention_is_bounded_and_preserves_original(self):
+        from nset_client.journal import DirectoryJournal
+        box = self.box()
+        box.enqueue("run", METRICS, batch_id="original")
+        original = self.rows()
+        with contextlib.closing(DirectoryJournal(self.path, box._http.url)) as other:
+            with other._transaction():
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    box.enqueue("run", METRICS, batch_id="blocked")
+                self.assertLess(time.monotonic() - started, .5)
+                with patch("nset_client.outbox.Transport.request", side_effect=receipt) as send:
+                    started = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        box.flush()
+                    self.assertLess(time.monotonic() - started, .5)
+                    send.assert_not_called()
+        self.assertIsInstance(box.last_error, TimeoutError)
+        self.assertEqual(self.rows(), original)
+        self.assertFalse(box._state.claims)
         with patch("nset_client.outbox.Transport.request", side_effect=receipt):
             self.assertEqual(box.flush(), 1)
 
@@ -503,7 +578,7 @@ class OutboxTests(IsolatedClientTestCase):
     def test_interrupted_close_owner_releases_concurrent_follower(self):
         for interrupt_at in ("join", "wait"):
             with self.subTest(interrupt_at=interrupt_at):
-                self.path = Path(self.temp.name) / f"{interrupt_at}.sqlite3"
+                self.path = Path(self.temp.name) / f"{interrupt_at}.journal"
                 box = self.destination.durable_outbox(self.path)
                 box.enqueue("run", METRICS, batch_id="pending")
                 originals = self.rows()
@@ -587,7 +662,7 @@ class OutboxTests(IsolatedClientTestCase):
                             with box._condition:
                                 self.assertEqual(box._active, 1)
                                 self.assertFalse(box._closed)
-                                self.assertEqual(box._db.execute("SELECT 1").fetchone(), (1,))
+                                self.assertEqual(len(box._journal.snapshot()), 1)
                             self.assertFalse(follower_result.done())
                             retry.start()
                             release.set()

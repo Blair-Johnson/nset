@@ -1,4 +1,5 @@
 import { touchPrimary } from "./input-capabilities";
+import { runStartTime } from "./api";
 import { nearestCrossingRuns, plottedSeries } from "./crossings";
 import { chartIdentities, type ChartIdentity } from "./chart-identities";
 import { loadRecordPlot, recordConfig } from "./records";
@@ -14,6 +15,7 @@ import type { EditorCamera } from "./chart-editor";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
+import { traceDrawOrder } from "./trace-order";
 import { loadPlotRuns, withMetricLabel } from "./card-label";
 import { HoverLegendPosition } from "./hover-legend-position";
 import { nextCursorPlacement } from "./cursor-placement";
@@ -131,6 +133,8 @@ export class ChartCard {
   private cursorAxis: "x" | "y" = "x";
   private inspectOpen = false;
   private sources: ResolvedSeries[] = [];
+  private loadedRecordSources?: ResolvedSeries[];
+  private runOrder: readonly string[] = [];
   private legendDetails = element("details", "card-legend-details");
   private navigateButton?: HTMLButtonElement;
   private cursorButtons = new Map<"x" | "y", HTMLButtonElement>();
@@ -732,7 +736,23 @@ export class ChartCard {
     this.measureFolds();
   }
 
+  /** Table sorting changes stacking, never source membership or saved config. */
+  setRunOrder(topFirstRunIds: readonly string[]): void {
+    if (this.destroyed) return;
+    this.runOrder = [...topFirstRunIds];
+    this.syncDrawOrder(true);
+  }
+  private syncDrawOrder(redraw = false): void {
+    this.plot?.setDrawOrder(
+      // Catalog resolution only supplies placeholders for record traces. Keep
+      // the loader's authoritative identities paired with the displayed data.
+      traceDrawOrder(this.loadedRecordSources ?? this.sources, this.runOrder),
+      redraw,
+    );
+  }
+
   private renderLegend() {
+    this.syncDrawOrder();
     this.identities = chartIdentities(this.sources, this.context);
     this.legend.replaceChildren();
     this.legendValues = [];
@@ -1042,12 +1062,14 @@ export class ChartCard {
         s.id,
         s.label,
         s.run.created_at,
+        runStartTime(s.run),
         s.x && [
           s.x.ref.runId,
           s.x.ref.key,
           s.x.ref.kind,
           s.x.label,
           s.x.run.created_at,
+          runStartTime(s.x.run),
         ],
       ]),
     );
@@ -1157,8 +1179,11 @@ export class ChartCard {
             series.x?.raw === previous.x?.raw &&
             series.run.name === previous.run.name &&
             series.run.created_at === previous.run.created_at &&
+            runStartTime(series.run) === runStartTime(previous.run) &&
             series.x?.run.name === previous.x?.run.name &&
-            series.x?.run.created_at === previous.x?.run.created_at
+            series.x?.run.created_at === previous.x?.run.created_at &&
+            (series.x ? runStartTime(series.x.run) : undefined) ===
+              (previous.x ? runStartTime(previous.x.run) : undefined)
           );
         })
       )
@@ -1168,11 +1193,14 @@ export class ChartCard {
         data: this.data,
         raw: this.raw,
         sources: this.sources,
+        loadedRecordSources: this.loadedRecordSources,
       };
       this.data = data;
       this.raw = raw;
-      if (recordResult) this.sources = recordResult.sources;
+      if (recordResult)
+        this.sources = this.loadedRecordSources = recordResult.sources;
       try {
+        this.syncDrawOrder();
         const display = this.displayConfig();
         this.plot?.updateData(
           data,
@@ -1185,6 +1213,7 @@ export class ChartCard {
         this.data = previous.data;
         this.raw = previous.raw;
         this.sources = previous.sources;
+        this.loadedRecordSources = previous.loadedRecordSources;
         throw error;
       }
       this.renderLegend();
@@ -1329,6 +1358,7 @@ export class ChartCard {
     this.loaded = true;
     this.data = [];
     this.raw = [];
+    this.loadedRecordSources = undefined;
     this.legend.replaceChildren();
     this.plot?.clear();
     this.hover.textContent = "";
@@ -1392,7 +1422,7 @@ export class ChartCard {
         return;
       if (recordResult) {
         this.notice.textContent = recordResult.warning;
-        this.sources = recordResult.sources;
+        this.sources = this.loadedRecordSources = recordResult.sources;
       }
       this.raw = data;
       this.data = analyze(data, this.spec.config);

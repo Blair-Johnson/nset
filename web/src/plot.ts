@@ -1,4 +1,5 @@
 import uPlot from "uplot";
+import { traceDrawIndices, permuteTracePairs } from "./trace-order";
 import "uplot/dist/uPlot.min.css";
 import { installMouseAxisTicks } from "./mouse-axis-ticks";
 import { type XY } from "./math";
@@ -108,6 +109,27 @@ export class PlotPanel {
   private resize: ResizeObserver;
   private config?: ViewConfig;
   private analyzed: Analyzed[] = [];
+  private drawOrder: readonly string[] = [];
+  /** Logical trace index -> physical paired uPlot slot. */
+  private seriesSlots: number[] = [];
+  private seriesIndex(index: number): number {
+    return 2 * (this.seriesSlots[index] ?? index) + 1;
+  }
+  /** Repaint cached observations in a new order, using the ordinary deferred,
+   * view-preserving update path. No source/config mutation or history fetch. */
+  setDrawOrder(bottomFirstIds: readonly string[], redraw = true): void {
+    if (JSON.stringify(this.drawOrder) === JSON.stringify(bottomFirstIds))
+      return;
+    this.drawOrder = [...bottomFirstIds];
+    if (redraw && this.chart && this.config) {
+      const next = this.pendingData ?? {
+        data: this.analyzed,
+        config: this.config,
+        pins: this.pins,
+      };
+      this.updateData(next.data, next.config, next.pins);
+    }
+  }
   private geometry: (CrossingPath | undefined)[] = [];
   private markerShown: boolean[] = [];
   private plotted: boolean[] = [];
@@ -144,7 +166,8 @@ export class PlotPanel {
     this.analyzed.forEach((data, index) => {
       const style = styleFor(config, data.run.id, index);
       const markers = rawMarkerOptions(style);
-      for (const seriesIndex of [index * 2 + 1, index * 2 + 2]) {
+      const first = this.seriesIndex(index);
+      for (const seriesIndex of [first, first + 1]) {
         const series = this.chart!.series[seriesIndex];
         series.stroke = () => style.color;
         if (seriesIndex % 2 === 1)
@@ -255,7 +278,7 @@ export class PlotPanel {
    * Use the representative crossing's series index, not a run palette lookup. */
   seriesColor(index: number): string | undefined {
     const u = this.chart,
-      seriesIndex = index * 2 + 1;
+      seriesIndex = this.seriesIndex(index);
     const stroke = u?.series[seriesIndex]?.stroke;
     const color =
       typeof stroke === "function" ? stroke(u!, seriesIndex) : stroke;
@@ -288,8 +311,8 @@ export class PlotPanel {
     const level = u.posToVal(fixed, axis, true);
     const rows: HoverCrossing[] = [];
     this.analyzed.forEach((d, index) => {
-      if (!this.plotted[index] || u.series[2 * index + 1]?.show === false)
-        return;
+      const first = this.seriesIndex(index);
+      if (!this.plotted[index] || u.series[first]?.show === false) return;
       const style = styleFor(config, d.run.id, index);
       const positions: number[] = [];
       const add = (x: number, y: number) => {
@@ -334,13 +357,13 @@ export class PlotPanel {
       }
       const markers =
         markerEnabled(config, d.run.id, index) &&
-        this.markerShown[2 * index + 2] &&
-        u.series[2 * index + 2]?.show !== false
+        this.markerShown[first + 1] &&
+        u.series[first + 1]?.show !== false
           ? d.observations
           : [];
       const singleton =
         d.points.length === 1 &&
-        this.markerShown[2 * index + 1] &&
+        this.markerShown[first] &&
         (style.markers?.size ?? style.pointSize) > 0
           ? d.points
           : [];
@@ -445,7 +468,16 @@ export class PlotPanel {
         sources: items.map((d) => [d.run.id, d.x?.key]),
         config: { ...c, xMin: null, xMax: null, yMin: null, yMax: null },
       });
+    const drawIndices = traceDrawIndices(
+      data.map((d) => d.run.id),
+      this.drawOrder,
+    );
+    const seriesSlots: number[] = [];
+    drawIndices.forEach((logical, physical) => {
+      seriesSlots[logical] = physical;
+    });
     const reuse =
+      JSON.stringify(this.seriesSlots) === JSON.stringify(seriesSlots) &&
       !!options.updateData &&
       !!this.chart &&
       !!this.config &&
@@ -455,8 +487,8 @@ export class PlotPanel {
           this.analyzed.map((d, i) => [
             d.run.id,
             [
-              this.chart?.series[2 * i + 1]?.show !== false,
-              this.chart?.series[2 * i + 2]?.show !== false,
+              this.chart?.series[this.seriesIndex(i)]?.show !== false,
+              this.chart?.series[this.seriesIndex(i) + 1]?.show !== false,
             ],
           ]),
         )
@@ -701,11 +733,25 @@ export class PlotPanel {
         ],
         ready: [
           (u) => {
-            u.root
-              .querySelectorAll<HTMLElement>(".u-legend tbody .u-series")
-              .forEach((row, i) => {
-                row.dataset.seriesIndex = String(i + (u.legend.live ? 0 : 1));
-              });
+            const rows = [
+              ...u.root.querySelectorAll<HTMLElement>(
+                ".u-legend tbody .u-series",
+              ),
+            ];
+            rows.forEach((row, i) => {
+              row.dataset.seriesIndex = String(i + (u.legend.live ? 0 : 1));
+            });
+            // Native legend callbacks retain their physical slot; only DOM order
+            // follows the logical source list (as does the card's custom legend).
+            const logicalIndex = (row: HTMLElement) => {
+              const index = Number(row.dataset.seriesIndex);
+              return index === 0
+                ? 0
+                : 2 * drawIndices[Math.floor((index - 1) / 2)] +
+                    (index % 2 ? 1 : 2);
+            };
+            rows.sort((a, b) => logicalIndex(a) - logicalIndex(b));
+            for (const row of rows) row.parentElement?.append(row);
             let down: { x: number; y: number; distance: number } | undefined;
             const moved = (e: PointerEvent) => {
               if (this.interaction?.mode === "navigate") return;
@@ -766,6 +812,13 @@ export class PlotPanel {
       },
       quantity,
     );
+    // Resolve positional style overrides against logical sources first, then
+    // move entire trace/observation pairs. uPlot paints later slots on top.
+    opts.series = permuteTracePairs(opts.series, drawIndices);
+    const orderedData = permuteTracePairs(
+      aligned,
+      drawIndices,
+    ) as uPlot.AlignedData;
     const mouseAxisTicks = installMouseAxisTicks(opts, {
       x: coordinateFormatter(config, quantity, 0),
       y: coordinateFormatter(config, quantity, 1),
@@ -794,7 +847,12 @@ export class PlotPanel {
           const isolated =
             Boolean(event.ctrlKey || event.metaKey) !==
             Boolean(u.legend.isolate);
-          const next = pairedVisibility(before, selected, isolated, rawEnabled);
+          const next = pairedVisibility(
+            before,
+            selected,
+            isolated,
+            drawIndices.map((i) => rawEnabled[i]),
+          );
           u.batch(() =>
             next.forEach((show, i) => {
               if (i > 0 && show !== u.series[i].show) u.setSeries(i, { show });
@@ -811,7 +869,7 @@ export class PlotPanel {
       const values =
         axis === "x"
           ? xs
-          : (aligned.slice(1) as (number | null)[][]).flatMap((v, i) =>
+          : (orderedData.slice(1) as (number | null)[][]).flatMap((v, i) =>
               (reuse
                 ? this.chart!.series[i + 1].show
                 : opts.series[i + 1].show) !== false &&
@@ -862,7 +920,7 @@ export class PlotPanel {
       this.pins = pins;
       this.generation = generation;
       u.batch(() => {
-        u.setData(aligned, false);
+        u.setData(orderedData, false);
         if (this.navigation) this.navigation.updateFit(fit);
         else
           for (const axis of ["x", "y"] as const)
@@ -881,14 +939,15 @@ export class PlotPanel {
       data.forEach((d, i) => {
         const shown = visibility.get(d.run.id);
         if (shown) {
-          opts.series[2 * i + 1].show = shown[0];
-          opts.series[2 * i + 2].show = shown[1] && rawEnabled[i];
+          const first = 2 * seriesSlots[i] + 1;
+          opts.series[first].show = shown[0];
+          opts.series[first + 1].show = shown[1] && rawEnabled[i];
         }
       });
     const staging = document.createElement("div");
     let candidate: uPlot | undefined;
     try {
-      candidate = new uPlot(opts, aligned, staging);
+      candidate = new uPlot(opts, orderedData, staging);
       candidate.batch(() => {});
     } catch (error) {
       candidate?.destroy();
@@ -899,6 +958,7 @@ export class PlotPanel {
     this.chart?.destroy();
     this.host.replaceChildren(...staging.childNodes);
     this.chart = candidate;
+    this.seriesSlots = seriesSlots;
     this.mouseAxisTicks = mouseAxisTicks;
     this.geometry = geometry;
     this.markerShown = markerShown;
@@ -916,6 +976,8 @@ export class PlotPanel {
     this.interaction?.onViewChange?.();
     this.hoverPointer = hoverPointer;
     this.hoverClient = hoverClient;
+    if (hoverPointer)
+      this.chart.setCursor({ left: hoverPointer[0], top: hoverPointer[1] });
     this.mouseAxisTicks.update(hoverPointer ?? null);
     this.publishHover();
     publishWarnings();

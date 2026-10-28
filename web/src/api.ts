@@ -15,6 +15,20 @@ export interface Run {
   created_at: number;
   updated_at: number;
 }
+/** Relative-time origin in backend milliseconds, shared by every metric of a run.
+ * MLflow imports preserve original timestamps and start time, while created_at
+ * records the import itself. Never infer the origin from a series' first point.
+ * Keep created_at unchanged for catalog ordering and creation-time filters.
+ */
+export function runStartTime(run: Pick<Run, "created_at" | "tags">): number {
+  const imported = run.tags?.["mlflow_import.start_time"];
+  return typeof imported === "number" &&
+    Number.isSafeInteger(imported) &&
+    imported >= 0
+    ? imported
+    : run.created_at;
+}
+
 export interface ImageFrame {
   id: string;
   run_id: string;

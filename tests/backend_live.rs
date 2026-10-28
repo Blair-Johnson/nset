@@ -223,13 +223,14 @@ async fn commit_wakes_http_poll_with_per_batch_counts_and_replay() {
         .insert_metrics(
             f.run.clone(),
             batch(&[
-                ("loss", 9, 100, 1.0),
+                ("loss", 9, 8_000_000_000_000_000, 1.0),
                 ("loss", 9, 50, 2.0),
                 ("other", 0, 0, 4.0),
             ]),
         )
         .await
         .unwrap();
+    let first_updated_at = f.state.db.catalog().await.unwrap().runs[0].updated_at;
     f.state
         .db
         .insert_metrics(f.run.clone(), batch(&[("loss", 1, 2, 3.0)]))
@@ -259,6 +260,16 @@ async fn commit_wakes_http_poll_with_per_batch_counts_and_replay() {
     assert_eq!(loss[1]["runId"], f.run);
     let catalog = f.json("GET", "/api/catalog", json!(null)).await;
     assert_eq!(catalog["metric_seq"], 4);
+    for change in changes {
+        assert!(change["runUpdatedAt"].is_i64());
+        let expected = if change["high"] == 4 {
+            catalog["runs"][0]["updated_at"].clone()
+        } else {
+            json!(first_updated_at)
+        };
+        assert_eq!(change["runUpdatedAt"], expected);
+        assert_ne!(change["runUpdatedAt"], change["last"]["timestamp"]);
+    }
     assert_eq!(
         catalog["series"]
             .as_array()
@@ -557,6 +568,15 @@ async fn durable_intake_is_silent_until_query_commit_and_replay_is_silent() {
     let catalog = db.catalog().await.unwrap();
     assert_eq!(catalog.metric_seq, 2);
     assert_eq!(catalog.series[0].count, 2);
+    let payload = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        payload["changes"][0]["runUpdatedAt"],
+        catalog.runs[0].updated_at
+    );
+    assert_ne!(
+        payload["changes"][0]["runUpdatedAt"],
+        payload["changes"][0]["last"]["timestamp"]
+    );
     let cursor = live.cursor();
     tokio::time::timeout(Duration::from_secs(3), async {
         while ingest

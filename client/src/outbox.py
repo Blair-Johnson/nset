@@ -1,10 +1,10 @@
-"""Native scalar delivery backed by a plaintext SQLite WAL spool.
+"""Native scalar delivery backed by a plaintext node-local directory journal.
 
-Enqueue commits locally, not remotely. A valid receipt means server acceptance,
-not query visibility. Protect the spool directory: metric values and destination
-URL are plaintext (credentials are never persisted). Back up SQLite consistently,
-including its WAL; durability depends on the filesystem/device honoring fsync.
-The native client uses this same spool for automatic scalar delivery.
+Enqueue publishes locally, not remotely. A valid receipt means server acceptance,
+not query visibility. Protect the journal directory: metric values and destination
+URL are plaintext (credentials are never persisted). Durability depends on the
+filesystem/device honoring fsync. Node loss can lose the small unshipped tail;
+the native client uses the same journal for automatic scalar delivery.
 """
 from contextlib import contextmanager
 import json
@@ -12,7 +12,6 @@ import math
 import os
 from pathlib import Path
 import re
-import sqlite3
 import threading
 import time
 from urllib.parse import quote
@@ -20,20 +19,13 @@ import uuid
 import weakref
 
 from .transport import APIError, Transport
+from .journal import BatchConflictError, DirectoryJournal, OutboxFullError
 
 _MAX_SAFE = 9_007_199_254_740_991
 _MAX_BODY = 32 * 1024 * 1024  # Native HTTP body limit (src/config.rs).
 _BATCH_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY = weakref.WeakValueDictionary()
-
-
-class OutboxFullError(RuntimeError):
-    """Enqueue exceeded a local capacity limit; nothing was evicted."""
-
-
-class BatchConflictError(ValueError):
-    """A pending (run_id, batch_id) already has different canonical bytes."""
 
 
 class InvalidReceiptError(RuntimeError):
@@ -47,7 +39,7 @@ class DeliveryError(RuntimeError):
         self.spool_path, self.status = path, status
         reason = reason or (f"HTTP {status}" if status is not None else "delivery deadline expired")
         super().__init__(f"{reason}; undelivered scalars retained at {path}; "
-                         "reopen Client with the same URL to resume")
+                         "reopen Client with the same URL and journal root on this node to resume")
 
 
 class DeliveryTimeoutError(DeliveryError, TimeoutError):
@@ -94,22 +86,6 @@ def _seconds(value, label, minimum, maximum):
     return float(value)
 
 
-def _enable_wal(db, timeout):
-    # Concurrent first open can fail immediately during the journal-mode upgrade,
-    # even with busy_timeout set. Retry only SQLite lock conflicts, within budget.
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            if db.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
-                raise RuntimeError("outbox requires SQLite WAL mode")
-            return
-        except sqlite3.OperationalError as error:
-            if (str(error) not in ("database is locked", "database table is locked")
-                    or time.monotonic() >= deadline):
-                raise
-            time.sleep(min(.01, max(0, deadline - time.monotonic())))
-
-
 def _payload(metrics):
     rows = []
     for metric in metrics:
@@ -148,7 +124,7 @@ class DurableOutbox:
 
     The parent directory must exist. ``client`` supplies a destination, token and
     timeout, captured at construction; reopen to rotate credentials. Its timeout
-    must be finite and in 0.001..300 seconds. SQLite busy waits are at most 5s.
+    must be finite and in 0.001..300 seconds. Journal lock waits are at most 5s.
     Socket timeouts bound blocking socket operations, not an absolute wall-clock
     deadline (e.g. DNS resolution or a peer trickling bytes can take longer).
 
@@ -166,11 +142,11 @@ class DurableOutbox:
     ``close`` stops and joins background workers and waits for active flushes;
     it does NOT flush or discard pending data. Context entry does not start
     delivery and context exit only closes, even on an exception. After close,
-    reopen the same file to inspect or deliver remaining rows.
+    reopen the same directory to inspect or deliver remaining records.
 
     Each canonical HTTP payload must fit the native 32 MiB body limit.
-    Limits bound pending canonical payload bytes/count, not physical SQLite file
-    size. Same-ID different bytes are rejected locally only while pending; after
+    Limits bound pending canonical payload bytes/count, not physical journal
+    size (including metadata and orphan temporary files). Same-ID different bytes are rejected locally only while pending; after
     acknowledgement, conflicts are the server's responsibility.
     """
 
@@ -189,7 +165,9 @@ class DurableOutbox:
         timeout = _seconds(client.http.timeout, "client timeout", 0.001, 300)
         self._http = Transport(client.http.url, client.http.token, timeout)
         if os.fspath(path) == ":memory:":
-            raise ValueError("outbox requires a file, not an in-memory database")
+            raise ValueError("outbox requires a directory, not an in-memory database")
+        if Path(path).is_symlink():
+            raise PermissionError("nset journal must not be a symlink")
         self.path = str(Path(path).resolve())
         with _REGISTRY_LOCK:
             self._state = _REGISTRY.get(self.path)
@@ -205,33 +183,9 @@ class DurableOutbox:
         self._last_error = None
         with (self._state.lock if _deadline is None else
               _locked(self._state.lock, _deadline, self.path)):
-            busy_timeout = min(timeout, 5)
-            if _deadline is not None:
-                busy_timeout = min(busy_timeout, max(0, _deadline - time.monotonic()))
-            self._db = sqlite3.connect(self.path, timeout=busy_timeout, check_same_thread=False)
-            try:
-                version = self._db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
-                    raise ValueError("unsupported outbox schema version")
-                _enable_wal(self._db, busy_timeout)
-                self._db.execute("PRAGMA synchronous=FULL")
-                with self._db:
-                    self._db.execute("BEGIN IMMEDIATE")
-                    self._db.execute("CREATE TABLE IF NOT EXISTS outbox_meta (destination TEXT NOT NULL)")
-                    self._db.execute("""CREATE TABLE IF NOT EXISTS outbox_pending (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        run_id TEXT NOT NULL, batch_id TEXT NOT NULL,
-                        payload BLOB NOT NULL, accepted INTEGER NOT NULL,
-                        UNIQUE(run_id, batch_id))""")
-                    destinations = self._db.execute("SELECT destination FROM outbox_meta").fetchall()
-                    if not destinations:
-                        self._db.execute("INSERT INTO outbox_meta VALUES (?)", (self._http.url,))
-                    elif destinations != [(self._http.url,)]:
-                        raise ValueError("outbox destination does not match client URL")
-                    self._db.execute("PRAGMA user_version=1")
-            except BaseException:
-                self._db.close()
-                raise
+            self._journal = DirectoryJournal(
+                self.path, self._http.url, timeout=min(timeout, 5), deadline=_deadline,
+                timeout_error=lambda: DeliveryTimeoutError(self.path))
 
     def _check_open(self):
         if os.getpid() != self._pid:
@@ -246,7 +200,7 @@ class DurableOutbox:
             return self._last_error
 
     def enqueue(self, run_id, metrics, *, batch_id=None):
-        """Return the stable ID only after a FULL-synchronous local commit.
+        """Return the stable ID only after fsync and atomic local publication.
 
         IDs are scoped by run. An identical pending enqueue is a no-op; a
         different canonical payload raises BatchConflictError. No network I/O.
@@ -259,32 +213,19 @@ class DurableOutbox:
         if not isinstance(batch_id, str) or not _BATCH_ID.fullmatch(batch_id):
             raise ValueError("batch_id must be 1..128 ASCII letters, digits, dot, underscore or hyphen")
         payload, accepted = _payload(metrics)
-        self._check_open()  # Reject inherited connections before acquiring a forked lock.
+        self._check_open()  # Reject inherited handles before acquiring a forked lock.
         with self._state.lock:
             self._check_open()
-            with self._db:
-                self._db.execute("BEGIN IMMEDIATE")
-                existing = self._db.execute(
-                    "SELECT payload FROM outbox_pending WHERE run_id=? AND batch_id=?",
-                    (run_id, batch_id)).fetchone()
-                if existing:
-                    if existing[0] != payload:
-                        raise BatchConflictError("pending batch ID already has a different payload")
-                else:
-                    count, size = self._db.execute(
-                        "SELECT count(*), coalesce(sum(length(payload)), 0) FROM outbox_pending").fetchone()
-                    if count >= self.max_pending_batches or size + len(payload) > self.max_pending_bytes:
-                        raise OutboxFullError("outbox capacity exceeded; existing batches retained")
-                    self._db.execute(
-                        "INSERT INTO outbox_pending(run_id,batch_id,payload,accepted) VALUES (?,?,?,?)",
-                        (run_id, batch_id, payload, accepted))
+            self._journal.enqueue(
+                run_id, batch_id, payload, accepted,
+                max_bytes=self.max_pending_bytes, max_batches=self.max_pending_batches)
         return batch_id
 
     def pending_count(self):
         self._check_process()
         with self._state.lock:
             self._check_open()
-            return self._db.execute("SELECT count(*) FROM outbox_pending").fetchone()[0]
+            return len(self._journal.snapshot())
 
     def flush(self, max_batches=None):
         """Deliver pending durable PUTs; return deleted batch count or raise.
@@ -303,15 +244,13 @@ class DurableOutbox:
             self._active += 1
         try:
             with self._state.lock:
-                ids = [r[0] for r in self._db.execute("SELECT id FROM outbox_pending ORDER BY id")]
+                ids = self._journal.snapshot()
             count = 0
             for row_id in ids:
                 with self._state.lock:
                     if self._stop.is_set() or (max_batches is not None and count >= max_batches):
                         break
-                    row = self._db.execute(
-                        "SELECT run_id,batch_id,payload,accepted FROM outbox_pending WHERE id=?",
-                        (row_id,)).fetchone()
+                    row = self._journal.read(row_id)
                     if row is None:
                         self._permanent.pop(row_id, None)
                         continue
@@ -346,10 +285,7 @@ class DurableOutbox:
                             or not 0 <= receipt["accepted_at"] <= _MAX_SAFE):
                         raise InvalidReceiptError("receipt does not match the pending batch")
                     with self._state.lock:
-                        with self._db:
-                            deleted = self._db.execute(
-                                "DELETE FROM outbox_pending WHERE id=? AND payload=?",
-                                (row_id, payload)).rowcount
+                        deleted = self._journal.acknowledge(row_id, payload)
                         count += deleted
                         self._state.retries.pop(key, None)
                         self._last_error = None
@@ -380,7 +316,7 @@ class DurableOutbox:
             with self._condition:
                 self._active -= 1
                 if self._detach_close and self._active == 0:
-                    self._db.close()
+                    self._journal.close()
                     self._closed = True
                 self._condition.notify_all()
 
@@ -403,7 +339,7 @@ class DurableOutbox:
                 try:
                     with self._state.lock:
                         if self._automatic and not self._stop.is_set():
-                            ids = {r[0] for r in self._db.execute("SELECT id FROM outbox_pending")}
+                            ids = set(self._journal.snapshot())
                             if not ids - self._permanent.keys():
                                 # Enqueue/start shares this lock: no lost wakeup.
                                 self._threads.remove(threading.current_thread())
@@ -428,11 +364,7 @@ class DurableOutbox:
         deadline = time.monotonic() + timeout
         with _locked(self._state.lock, deadline, self.path):
             self._check_open()
-            sql = "SELECT id FROM outbox_pending"
-            args = () if run_id is None else (run_id,)
-            if run_id is not None:
-                sql += " WHERE run_id=?"
-            targets = {r[0] for r in self._db.execute(sql, args)}
+            targets = set(self._journal.snapshot(run_id, deadline=deadline))
             if targets:
                 try:
                     self.start()
@@ -441,7 +373,7 @@ class DurableOutbox:
         while targets:
             with _locked(self._state.lock, deadline, self.path):
                 self._check_open()
-                pending = {r[0] for r in self._db.execute("SELECT id FROM outbox_pending")}
+                pending = set(self._journal.snapshot(deadline=deadline))
                 targets.intersection_update(pending)
                 if not targets:
                     return
@@ -460,8 +392,8 @@ class DurableOutbox:
         self._closing = True
         self._detach_close = True
         self._stop.set()
-        # Closing the last SQLite connection can checkpoint a large WAL. Keep
-        # that filesystem work off the caller's bounded shutdown path too.
+        # Cleanup may wait for active journal work; keep that off the caller's
+        # bounded shutdown path as well as any outstanding network request.
         cleanup = threading.Thread(target=self._close_stopped, name="nset-close", daemon=True)
         cleanup.start()
         cleanup.join(timeout)
@@ -476,7 +408,7 @@ class DurableOutbox:
                     self._state.claims.pop(key)
                     self._state.retries.pop(key, None)
             if self._active == 0:
-                self._db.close()
+                self._journal.close()
                 self._closed = True
             self._condition.notify_all()
 
@@ -485,7 +417,7 @@ class DurableOutbox:
             raise RuntimeError("create a new Client after fork")
 
     def close(self):
-        """Stop/join delivery and close SQLite without flushing or dropping rows."""
+        """Stop/join delivery and close the journal without flushing or dropping records."""
         self._check_process()
         owner = False
         try:
@@ -500,7 +432,7 @@ class DurableOutbox:
                 thread.join()
             with self._condition:
                 self._condition.wait_for(lambda: self._active == 0)
-                self._db.close()
+                self._journal.close()
                 self._closed = True
         finally:
             if owner:

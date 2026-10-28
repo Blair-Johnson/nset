@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -17,16 +16,11 @@ from unittest.mock import patch
 from support import Server, isolated_env
 from nset_client import (APIError, Client, DeliveryError, DeliveryTimeoutError,
                          OutboxFullError, Run)
-from test_outbox import receipt
+from test_outbox import journal_files, journal_rows as pending, legacy_outbox, receipt
 
 
 def private_path(root, url):
-    return Path(root) / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.sqlite3"
-
-
-def pending(path):
-    with contextlib.closing(sqlite3.connect(path)) as db:
-        return db.execute("SELECT run_id,batch_id,payload FROM outbox_pending ORDER BY id").fetchall()
+    return Path(root) / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.journal"
 
 
 class DefaultDeliveryTests(unittest.TestCase):
@@ -76,10 +70,16 @@ class DefaultDeliveryTests(unittest.TestCase):
                 self.assertNotIn(b'timestamp', stored[2].split(b'},')[0])
                 rows[0]["value"] = 999
                 self.assertEqual(pending(client.spool_path)[0], stored)
+                self.assertTrue(client.spool_path.is_dir())
+                files = journal_files(client.spool_path)
+                self.assertTrue(files)
                 if os.name != "nt":
-                    self.assertEqual(client.spool_path.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(client.spool_path.stat().st_mode & 0o777, 0o700)
                     self.assertEqual(client.spool_path.parent.stat().st_mode & 0o777, 0o700)
-                self.assertNotIn(b'never-persist-this-token', client.spool_path.read_bytes())
+                    for name in files:
+                        self.assertEqual((client.spool_path / name).stat().st_mode & 0o777, 0o600)
+                for data in files.values():
+                    self.assertNotIn(b'never-persist-this-token', data)
                 started = time.monotonic()
                 with self.assertRaises(DeliveryTimeoutError) as caught:
                     client.close(timeout=.05)
@@ -195,7 +195,7 @@ class DefaultDeliveryTests(unittest.TestCase):
                 client.close(timeout=2)
         self.assertEqual([r[0] for r in pending(client.spool_path)], ["bad"])
 
-    def test_capacity_validation_and_transaction_failure_never_report_acceptance(self):
+    def test_capacity_validation_and_publish_failure_never_report_acceptance(self):
         client = self.client()
         run = Run(client, {"id": "run"})
         with patch("nset_client.outbox.Transport.request", side_effect=OSError("offline")):
@@ -207,10 +207,11 @@ class DefaultDeliveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run.log_metrics({"v": float("nan")}, step=2)
             box.max_pending_batches = 100
-            with box._state.lock:
-                box._db.execute("CREATE TRIGGER fail_insert BEFORE INSERT ON outbox_pending BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
-            with self.assertRaises(sqlite3.IntegrityError):
-                run.log_metrics({"v": 2}, step=1)
+            before = journal_files(client.spool_path)
+            with patch("nset_client.journal.os.replace", side_effect=OSError("disk failure")):
+                with self.assertRaisesRegex(OSError, "disk failure"):
+                    run.log_metrics({"v": 2}, step=1)
+            self.assertEqual(journal_files(client.spool_path), before)
         self.assertEqual(len(pending(client.spool_path)), 1)
 
     def test_concurrent_clients_and_runs_share_safe_spool(self):
@@ -279,8 +280,8 @@ class DefaultDeliveryTests(unittest.TestCase):
             release.set()
             thread.join(2)
 
-    def test_late_spool_fsync_does_not_block_flush_or_close(self):
-        from nset_client.client import _sync_directory
+    def test_late_journal_open_does_not_block_flush_or_close(self):
+        from nset_client.journal import DirectoryJournal
         from nset_client.outbox import DurableOutbox
         for operation in ("flush", "close"):
             with self.subTest(operation=operation):
@@ -290,18 +291,28 @@ class DefaultDeliveryTests(unittest.TestCase):
                 box.enqueue("run", [{"key": "v", "step": 0, "value": 1}])
                 before = pending(writer.spool_path)
                 entered, release, opened = threading.Event(), threading.Event(), threading.Event()
-                attachments = []
-                def sync(path):
+                attachments, threads = [], []
+                original_start = threading.Thread.start
+                def start_thread(thread):
+                    threads.append(thread)
+                    return original_start(thread)
+                def join_threads():
+                    for thread in threads:
+                        thread.join(2)
+                    for thread in threads:
+                        self.assertFalse(thread.is_alive(), thread.name)
+                def open_journal(*args, **kwargs):
                     entered.set()
                     release.wait(3)
-                    _sync_directory(path)
+                    return DirectoryJournal(*args, **kwargs)
                 def create(*args, **kwargs):
                     attached = DurableOutbox(*args, **kwargs)
                     attachments.append(attached)
                     opened.set()
                     return attached
-                with patch("nset_client.client._sync_directory", side_effect=sync), \
-                     patch("nset_client.client.DurableOutbox", side_effect=create):
+                with patch("nset_client.outbox.DirectoryJournal", side_effect=open_journal), \
+                     patch("nset_client.client.DurableOutbox", side_effect=create), \
+                     patch("threading.Thread.start", new=start_thread):
                     try:
                         start = time.monotonic()
                         with self.assertRaises(DeliveryTimeoutError):
@@ -309,13 +320,24 @@ class DefaultDeliveryTests(unittest.TestCase):
                         self.assertLess(time.monotonic() - start, .5)
                         self.assertTrue(entered.is_set())
                         self.assertIsNone(reader._outbox)
+                        release.set()
+                        self.assertTrue(opened.wait(2))
+                        join_threads()
+                        self.assertTrue(attachments[0]._closed)
                     finally:
                         release.set()
-                    self.assertTrue(opened.wait(2))
-                    deadline = time.monotonic() + 2
-                    while not attachments[0]._closed and time.monotonic() < deadline:
-                        time.sleep(.01)
-                    self.assertTrue(attachments[0]._closed)
+                        join_threads()
+                        # A timed-out attach leaves the reader open. Attach its
+                        # retry synchronously so zero-budget fixture cleanup
+                        # cannot launch another opener during temp removal.
+                        if not reader._closed:
+                            reader._delivery()
+                        for client in (reader, writer):
+                            with contextlib.suppress(DeliveryError):
+                                client.close(timeout=0)
+                        join_threads()
+                    self.assertTrue(all(attached._closed for attached in attachments))
+                    self.assertTrue(box._closed)
                 self.assertEqual(pending(writer.spool_path), before)
 
     def test_cleanup_start_failure_detaches_claim_and_preserves_delivery_error(self):
@@ -430,11 +452,27 @@ class DefaultDeliveryTests(unittest.TestCase):
         with patch("nset_client.outbox.Transport.request", side_effect=receipt):
             Run(client, {"id": "run"}).log_metrics({"v": 1}, step=0)
             client.flush(timeout=2)
-            with contextlib.closing(sqlite3.connect(client.spool_path)) as db:
-                self.assertEqual(db.execute("SELECT destination FROM outbox_meta").fetchall(), [(client.http.url,)])
+            metadata = json.loads((client.spool_path / "destination.json").read_bytes())
+            self.assertEqual(metadata, {"version": 1, "destination": client.http.url})
+            for data in journal_files(client.spool_path).values():
+                self.assertNotIn(client.http.token.encode(), data)
             with patch("nset_client.client._spool_path", return_value=client.spool_path):
                 with self.assertRaisesRegex(ValueError, "destination"):
                     self.client(url="http://different-server")
+
+    def test_existing_sqlite_at_configured_spool_is_rejected_and_preserved(self):
+        from nset_client.client import _private_spool
+        client = self.client()
+        client.close(timeout=0)
+        _private_spool(client.spool_path)
+        legacy_outbox(client.spool_path, client.http.url)
+        Path(str(client.spool_path) + "-wal").write_bytes(b"preserve legacy WAL")
+        Path(str(client.spool_path) + "-shm").write_bytes(b"preserve legacy shared memory")
+        before = journal_files(client.spool_path.parent)
+        with self.assertRaisesRegex(ValueError, "legacy SQLite"):
+            self.client()
+        self.assertEqual(journal_files(client.spool_path.parent), before)
+        self.assertTrue(client.spool_path.is_file())
 
     @unittest.skipUnless(hasattr(os, "fork"), "fork unavailable")
     def test_inherited_client_rejected_before_any_lock(self):
@@ -548,32 +586,32 @@ class DefaultDeliveryTests(unittest.TestCase):
                         future.result(2)
         self.assertEqual(len(pending(client.spool_path)), 1)
 
-    def test_wal_initialization_retries_only_busy_with_a_bound(self):
-        from nset_client.outbox import _enable_wal
-        from unittest.mock import Mock
-        db = Mock()
-        cursor = Mock()
-        cursor.fetchone.return_value = ('wal',)
-        db.execute.side_effect = [sqlite3.OperationalError('database is locked'), cursor]
-        _enable_wal(db, .1)
-        self.assertEqual(db.execute.call_count, 2)
-        db.execute.side_effect = sqlite3.OperationalError('database is locked')
-        start = time.monotonic()
-        with self.assertRaises(sqlite3.OperationalError):
-            _enable_wal(db, .02)
-        self.assertLess(time.monotonic() - start, .2)
-        db.execute.side_effect = sqlite3.OperationalError('disk I/O error')
-        db.reset_mock()
-        with self.assertRaises(sqlite3.OperationalError):
-            _enable_wal(db, .1)
-        self.assertEqual(db.execute.call_count, 1)
+    @unittest.skipIf(os.name == "nt", "POSIX file-lock injection")
+    def test_journal_lock_retries_only_contention_with_a_bound(self):
+        import errno
+        client = self.client()
+        journal = client._delivery()._journal
+        busy = BlockingIOError(errno.EAGAIN, "journal lock is busy")
+        with patch("fcntl.flock", side_effect=[busy, None, None]) as lock:
+            self.assertEqual(journal.snapshot(), [])
+            self.assertEqual(lock.call_count, 3)  # Retry acquisition, then unlock.
+        with patch.object(journal, "_timeout", .02), patch("fcntl.flock", side_effect=busy):
+            start = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                journal.snapshot()
+            self.assertLess(time.monotonic() - start, .2)
+        with patch("fcntl.flock", side_effect=OSError(errno.EIO, "disk I/O error")) as lock:
+            with self.assertRaisesRegex(OSError, "disk I/O error"):
+                journal.snapshot()
+            self.assertEqual(lock.call_count, 1)
+        self.assertEqual(pending(client.spool_path), [])
 
     @unittest.skipIf(os.name == 'nt', 'POSIX symlink permissions')
     def test_spool_symlink_is_rejected_without_touching_target(self):
         client = self.client()
         from nset_client.client import _private_spool
         _private_spool(client.spool_path)
-        client.spool_path.unlink()
+        self.assertFalse(client.spool_path.exists())
         target = Path(self.temp.name) / 'untouched'
         target.write_text('retain me')
         client.spool_path.symlink_to(target)
@@ -599,11 +637,11 @@ class DefaultDeliveryTests(unittest.TestCase):
         self.assertEqual(pending(client.spool_path), [])
 
 
-    def test_final_sqlite_checkpoint_does_not_block_close(self):
+    def test_final_journal_close_does_not_block_client_close(self):
         from unittest.mock import Mock
         client = self.client()
         box = client._delivery()
-        original = box._db
+        original = box._journal
         entered, release = threading.Event(), threading.Event()
         proxy = Mock(wraps=original)
         def close():
@@ -611,7 +649,7 @@ class DefaultDeliveryTests(unittest.TestCase):
             release.wait(3)
             original.close()
         proxy.close.side_effect = close
-        box._db = proxy
+        box._journal = proxy
         try:
             start = time.monotonic()
             client.close(timeout=.05)
@@ -664,8 +702,10 @@ class DefaultDeliveryHTTPTests(unittest.TestCase):
         self.server.start()
         self.assertEqual(self.client.http.request("GET", self.run.path)["status"], "running")
         self.run.finish(timeout=10)
-        rows = self.readback(self.run.id, "v", 2)
-        self.assertEqual([r['value'] for r in rows], [1, 2])
+        # Backoff permits later batches to arrive first; compare logged identity,
+        # not the server's arrival-order sequence.
+        rows = sorted(self.readback(self.run.id, "v", 2), key=lambda row: row['step'])
+        self.assertEqual([(r['step'], r['value']) for r in rows], [(0, 1), (1, 2)])
         self.assertEqual(rows[1]['timestamp'], 123)
 
     def test_response_loss_retries_same_bytes_id_and_acceptance_timestamp(self):

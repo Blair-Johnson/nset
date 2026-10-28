@@ -13,7 +13,7 @@ import {
 } from "./math";
 import type { ViewConfig } from "./config";
 import type { XQuantity } from "./options";
-import type { Run } from "./api";
+import { runStartTime, type Run } from "./api";
 
 export interface PlotRun {
   run: Run;
@@ -57,14 +57,14 @@ export function analyze(data: PlotRun[], config: ViewConfig): Analyzed[] {
         x: { key: paired.key },
       };
     }
-    const observations = canonicalize(raw, config.axis, run.created_at);
+    const observations = canonicalize(raw, config.axis, runStartTime(run));
     const points = config.smoothing
       ? ema(observations, config.alpha)
       : observations;
     if (x) {
       // Smoothing applies to the Y channel only: the X channel (often a
       // cumulative counter) keeps its logged values.
-      const channel = canonicalize(x.raw, config.axis, x.run.created_at);
+      const channel = canonicalize(x.raw, config.axis, runStartTime(x.run));
       const joined = joinXY(points, channel, config.interpolation);
       return {
         run,

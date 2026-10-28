@@ -57,7 +57,7 @@ class DurableHTTPTests(unittest.TestCase):
     def test_capacity_rejection_keeps_outbox_and_replays_after_restart(self):
         self.start(NSET_INGEST_PAUSED="true", NSET_INGEST_MAX_PENDING_BATCHES="1")
         run = self.run_record()
-        with self.client.durable_outbox(self.server.directory / "outbox.sqlite3") as outbox:
+        with self.client.durable_outbox(self.server.directory / "outbox.journal") as outbox:
             outbox.enqueue(run.id, [{"key": "v", "step": 0, "value": 1}], batch_id="first")
             self.assertEqual(outbox.flush(), 1)
             outbox.enqueue(run.id, [{"key": "v", "step": 1, "value": 2}], batch_id="second")
@@ -68,7 +68,7 @@ class DurableHTTPTests(unittest.TestCase):
         self.server.stop()
         self.start(NSET_INGEST_PAUSED="false", NSET_INGEST_MAX_PENDING_BATCHES="1")
         self.applied(run.path + "/ingest/first")
-        with self.client.durable_outbox(self.server.directory / "outbox.sqlite3") as outbox:
+        with self.client.durable_outbox(self.server.directory / "outbox.journal") as outbox:
             self.assertEqual(outbox.flush(), 1)
             self.assertEqual(outbox.pending_count(), 0)
         self.applied(run.path + "/ingest/second")

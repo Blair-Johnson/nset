@@ -8,6 +8,8 @@ export type LiveChange =
       high: number;
       count: number;
       last: Point;
+      /** Absent on older servers; never infer activity from sample timestamps. */
+      runUpdatedAt?: number;
     }
   | { kind: "image"; runId: string; key: string }
   | { kind: "catalog" }
@@ -64,6 +66,7 @@ export function liveReply(value: unknown): LiveReply {
       (!safe(c.high) ||
         !safe(c.count) ||
         c.count < 1 ||
+        (c.runUpdatedAt !== undefined && !safe(c.runUpdatedAt)) ||
         !c.last ||
         c.last.seq !== c.high ||
         !Number.isFinite(c.last.value) ||

@@ -49,6 +49,7 @@ import { setPlotType } from "./plot-types";
 import { addMissingCharts } from "./dashboard-layout";
 import { openChartEditor } from "./chart-editor";
 import { experimentTable, runTable, tableState } from "./browser-tables";
+import { sortedRunIds } from "./trace-order";
 import { renderRunDetail } from "./run-detail";
 import { RunDrawer, runDrawerState, refreshRunSwatches } from "./run-drawer";
 import { RunFilterSession } from "./run-filter-session";
@@ -1667,6 +1668,19 @@ function moveSection(
       workspace.sections = next;
     });
 }
+/** Presentation-only: table and drawer share runStateFor; selections and drafts
+ * deliberately stay in their authored order. Recompute from catalog order for ties. */
+function chartRunOrder(experimentId: string): string[] {
+  return sortedRunIds(
+    catalog.runs.filter((run) => run.experiment_id === experimentId),
+    catalog.series,
+    runStateFor(experimentId),
+  );
+}
+function refreshChartRunOrder(workspace: Workspace) {
+  const order = chartRunOrder(workspace.experimentId);
+  for (const entry of cards.values()) entry.view.setRunOrder(order);
+}
 function renderCharts(workspace: Workspace) {
   if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
     return;
@@ -1681,6 +1695,7 @@ function renderCharts(workspace: Workspace) {
   workspaceToolbar(workspace);
   const dashboard = $("dashboard");
   const keep = new Set<string>();
+  const runOrder = chartRunOrder(workspace.experimentId);
 
   for (const [sectionIndex, section] of workspace.sections.entries()) {
     let node = sectionNodes.get(section.id);
@@ -1842,6 +1857,7 @@ function renderCharts(workspace: Workspace) {
           entry.context = contextKey;
         }
       }
+      entry.view.setRunOrder(runOrder);
       // The header (including its title) is the handle, not the plot or controls.
       const cardHeader = entry.host.querySelector<HTMLElement>(".card-header");
       if (cardHeader) {
@@ -2013,6 +2029,7 @@ function scheduleLiveModel(metadata: boolean) {
         runDrawer?.update(catalog, workspace.selectedRunIds);
         syncChartDetails(workspace);
       } else runDrawer?.updateMetrics(catalog);
+      refreshChartRunOrder(workspace);
     }
   }, 500);
 }

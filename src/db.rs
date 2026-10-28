@@ -1003,7 +1003,7 @@ impl Database {
                     tx.execute("UPDATE runs SET updated_at=? WHERE id=?", params![time, id])?;
                 }
                 tx.commit()?;
-                live.publish_batch(metric_changes(id, changes));
+                live.publish_batch(metric_changes(id, changes, time));
                 Ok(count)
             })
             .await
@@ -1054,8 +1054,9 @@ impl Database {
                 }
             }
             tx.execute("UPDATE runs SET updated_at=MAX(updated_at,?) WHERE id=?", params![accepted_at,id]).map_err(storage_error)?;
+            let run_updated_at: i64 = tx.query_row("SELECT updated_at FROM runs WHERE id=?", [&id], |row| row.get(0)).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
-            live.publish_batch(metric_changes(id, changes));
+            live.publish_batch(metric_changes(id, changes, run_updated_at));
             Ok(())
         }).await
     }
@@ -1400,6 +1401,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metric_activity_hint_uses_effective_durable_run_timestamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let (experiment, _) = db.create_experiment("activity".into()).await.unwrap();
+        let run = db.create_run(new_run(&experiment.id)).await.unwrap();
+        let live = db.live();
+        for (batch_id, accepted_at, sample_time, expected) in [
+            ("old", 1, 8_000_000_000_000_000, run.updated_at),
+            ("new", run.updated_at + 100, 0, run.updated_at + 100),
+        ] {
+            let cursor = live.cursor();
+            db.apply_ingest(
+                run.id.clone(),
+                batch_id.into(),
+                vec![1],
+                accepted_at,
+                MetricBatch {
+                    metrics: vec![MetricInput {
+                        key: "loss".into(),
+                        step: 0,
+                        timestamp: Some(sample_time),
+                        value: 1.0,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+            let response = live.poll(cursor).await.unwrap();
+            let payload = serde_json::to_value(&response).unwrap();
+            let stored = db.catalog().await.unwrap().runs[0].updated_at;
+            assert_eq!(stored, expected);
+            assert_eq!(payload["changes"][0]["runUpdatedAt"], stored);
+            assert_eq!(payload["changes"][0]["last"]["timestamp"], sample_time);
+            let cursor = live.cursor();
+            db.apply_ingest(
+                run.id.clone(),
+                batch_id.into(),
+                vec![1],
+                accepted_at,
+                MetricBatch {
+                    metrics: vec![MetricInput {
+                        key: "loss".into(),
+                        step: 0,
+                        timestamp: Some(sample_time),
+                        value: 1.0,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(live.cursor(), cursor);
+        }
+    }
+
+    #[tokio::test]
     async fn compatibility_metadata_preserves_finite_float_bits() {
         let directory = tempfile::tempdir().unwrap();
         let db = Database::open(directory.path()).unwrap();
@@ -1684,6 +1740,7 @@ fn record_metric(
 fn metric_changes(
     run_id: String,
     changes: std::collections::BTreeMap<String, (usize, Metric)>,
+    run_updated_at: i64,
 ) -> Vec<Change> {
     changes
         .into_iter()
@@ -1691,6 +1748,7 @@ fn metric_changes(
             run_id: run_id.clone(),
             key,
             high: last.seq,
+            run_updated_at: Some(run_updated_at),
             count,
             last,
         })

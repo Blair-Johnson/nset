@@ -72,7 +72,7 @@ def measure(args, server):
     try:
         for i, run in enumerate(runs):
             sender = Client(server.url, token=server.token, timeout=10)
-            spool = sender.durable_outbox(server.directory / f"outbox-{i}.sqlite3")
+            spool = sender.durable_outbox(server.directory / f"outbox-{i}.journal")
             spools.append(spool)
             rows = [{"key": "sentinel", "step": n, "timestamp": 1_000_000 + n, "value": float(n)}
                     for n in range(i, args.points, args.clients)]

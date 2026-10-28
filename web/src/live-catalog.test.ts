@@ -53,3 +53,48 @@ test("quiet/metadata-only notifications do not replace the catalog", () => {
     before,
   );
 });
+
+test("server activity updates runs immutably and ignores sample clocks, overlap and replay", () => {
+  const run = (id: string) => ({
+    id,
+    experiment_id: "e",
+    name: id,
+    status: "running" as const,
+    params: {},
+    tags: {},
+    created_at: 10,
+    updated_at: 100,
+  });
+  const before = { ...base(), runs: [run("r"), run("other")] };
+  const activity = (
+    high: number,
+    timestamp: number,
+    runUpdatedAt?: number,
+  ): LiveChange => ({
+    kind: "metric",
+    runId: "r",
+    key: "a",
+    high,
+    count: 1,
+    last: { seq: high, step: high, timestamp, value: 1 },
+    ...(runUpdatedAt === undefined ? {} : { runUpdatedAt }),
+  });
+  // Even a newer activity time cannot override the catalog transaction watermark.
+  assert.equal(applyMetricHints(before, [activity(10, 0, 999)]), before);
+  const future = applyMetricHints(before, [activity(11, 999999)]);
+  assert.equal(future.runs[0], before.runs[0]);
+  assert.equal(future.runs[0].updated_at, 100);
+  const changes = [activity(12, 0, 120), activity(13, 1, 110)];
+  const next = applyMetricHints(future, changes);
+  assert.equal(next.runs[0].updated_at, 120);
+  assert.notEqual(next.runs[0], before.runs[0]);
+  assert.equal(next.runs[1], before.runs[1]);
+  assert.equal(before.runs[0].updated_at, 100);
+  assert.equal(next.series[0].last_timestamp, 1);
+  assert.equal(applyMetricHints(next, changes), next);
+  const legacy = applyMetricHints(next, [activity(14, 999999)]);
+  assert.equal(legacy.runs[0], next.runs[0]);
+  const backfill = applyMetricHints(legacy, [activity(15, 0, 130)]);
+  assert.equal(backfill.runs[0].updated_at, 130);
+  assert.equal(backfill.series[0].last_timestamp, 0);
+});

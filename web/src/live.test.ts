@@ -143,3 +143,31 @@ test("invalid feed messages cannot be acknowledged", () => {
   );
   assert.deepEqual(liveReply(reply), reply);
 });
+
+test("metric activity timestamp is optional for old servers but validated when present", () => {
+  const change = {
+    kind: "metric",
+    runId: "r",
+    key: "loss",
+    high: 1,
+    count: 1,
+    last: { seq: 1, step: 0, timestamp: 999999, value: 1 },
+  };
+  const payload = (c: unknown) => ({ ...reply, changes: [c] });
+  assert.doesNotThrow(() => liveReply(payload(change)));
+  for (const runUpdatedAt of [0, 1234, Number.MAX_SAFE_INTEGER])
+    assert.doesNotThrow(() => liveReply(payload({ ...change, runUpdatedAt })));
+  for (const runUpdatedAt of [
+    null,
+    "1234",
+    -1,
+    0.5,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])
+    assert.throws(
+      () => liveReply(payload({ ...change, runUpdatedAt })),
+      /Invalid live metric/,
+    );
+});

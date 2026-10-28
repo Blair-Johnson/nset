@@ -3,35 +3,38 @@ import hashlib
 from itertools import islice
 import os
 from pathlib import Path
-import stat
-import sys
+import tempfile
 import threading
 import time
 from urllib.parse import quote
 from .transport import Transport
+from .journal import private_directory, sync_directory as _sync_directory
 from .outbox import DeliveryTimeoutError, DurableOutbox, _locked, _seconds
 
 
 def _spool_path(url):
-    """Stable destination identity, independent of rotating access tokens."""
-    if sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    elif os.name == "nt":
-        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    """Stable URL directory in operator-selected scheduler/node temporary storage.
+
+    Environment variables are configuration, not filesystem-locality detection.
+    Configure NSET_SPOOL_DIR to a node-local root when scheduler/TMPDIR settings
+    point at shared storage. Never fall back to HOME or XDG state storage.
+    """
+    root = None
+    for variable in ("NSET_SPOOL_DIR", "SLURM_TMPDIR", "PBS_JOBFS", "TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(variable)
+        if value:
+            root = Path(value)
+            if not root.is_absolute():
+                raise ValueError(f"{variable} must be an absolute journal root directory")
+            break
+    if root is None:
+        root = Path(tempfile.gettempdir() if os.name == "nt" else "/tmp")
+    if os.name == "nt":
+        import getpass
+        user = hashlib.sha256(getpass.getuser().encode()).hexdigest()[:16]
     else:
-        root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
-        if not root.is_absolute():
-            root = Path.home() / ".local" / "state"
-    return root / "nset" / "outbox" / hashlib.sha256(url.encode()).hexdigest() / "scalars.sqlite3"
-
-
-def _sync_directory(path):
-    if os.name != "nt":
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        user = str(os.getuid())
+    return root / f"nset-{user}" / "outbox" / hashlib.sha256(url.encode()).hexdigest()
 
 
 def _mkdir(path):
@@ -48,24 +51,16 @@ def _mkdir(path):
 
 
 def _private_spool(path):
-    # Only our own directories are required to be private, not Application Support.
-    for directory in (path.parent.parent.parent, path.parent.parent, path.parent):
+    # The selected root may be shared /tmp; only our user subtree must be private.
+    for directory in (path.parent.parent, path.parent):
         _mkdir(directory)
-        info = directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or (os.name != "nt" and (
-                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077)):
-            raise PermissionError("nset spool directories must be private and not symlinks")
+        private_directory(directory)
+    # DirectoryJournal creates/checks the final directory and rejects existing
+    # SQLite files without touching their contents.
     if path.is_symlink():
-        raise PermissionError("nset spool must not be a symlink")
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and (
-                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077)):
-            raise PermissionError("nset spool must be a private regular file")
-    finally:
-        os.close(fd)
-    _sync_directory(path.parent)
+        raise PermissionError("nset journal must not be a symlink")
+    if path.is_dir():
+        private_directory(path)
 
 
 class Client:
@@ -102,8 +97,8 @@ class Client:
             return self._outbox
 
     def _attach_existing(self, deadline):
-        # Caller owns the lifecycle lock. Opening SQLite can sync/checkpoint;
-        # a late result must be closed by its helper, not strand a connection
+        # Caller owns the lifecycle lock. Opening a journal can wait on disk;
+        # a late result must be closed by its helper, not strand an outbox
         # or extend a bounded flush/close on the caller's thread.
         if self.http.url != self._destination:
             raise ValueError("destination changed; create a new Client for the new URL")
@@ -145,7 +140,7 @@ class Client:
         self._check_open()
         with self._lock:
             box = self._delivery()
-            # Validation and FULL-synchronous local commit precede success.
+            # Validation, file fsync and atomic local publication precede success.
             box.enqueue(run_id, metrics)
             try:
                 box.start()
@@ -232,7 +227,7 @@ class Client:
         return False
 
     def durable_outbox(self, path, **options):
-        """Open an explicit plaintext, locally durable scalar spool (not started)."""
+        """Open an explicit plaintext node-local journal directory (not started)."""
         from .outbox import DurableOutbox
         return DurableOutbox(self, path, **options)
 

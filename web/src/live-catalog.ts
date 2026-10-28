@@ -13,10 +13,18 @@ export function applyMetricHints(
   const indices = new Map(
     series.map((s, i) => [JSON.stringify([s.run_id, s.key, s.kind]), i]),
   );
+  const runs = [...catalog.runs];
+  const runIndices = new Map(runs.map((run, i) => [run.id, i]));
   let changed = false;
   for (const change of changes) {
     if (change.kind !== "metric" || change.high <= baseline) continue;
     high = Math.max(high, change.high);
+    const runIndex = runIndices.get(change.runId);
+    if (runIndex !== undefined && change.runUpdatedAt !== undefined) {
+      const run = runs[runIndex];
+      if (change.runUpdatedAt > run.updated_at)
+        runs[runIndex] = { ...run, updated_at: change.runUpdatedAt };
+    }
     const key = JSON.stringify([change.runId, change.key, "metric"]);
     const index = indices.get(key);
     const count =
@@ -38,5 +46,5 @@ export function applyMetricHints(
     } else series[index] = summary;
     changed = true;
   }
-  return changed ? { ...catalog, metric_seq: high, series } : catalog;
+  return changed ? { ...catalog, metric_seq: high, series, runs } : catalog;
 }
