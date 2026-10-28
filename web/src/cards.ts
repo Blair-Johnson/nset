@@ -24,6 +24,8 @@ import { element, isAbort, message } from "./utils";
 import type {
   CardActions,
   CardContext,
+  Catalog,
+  SeriesRef,
   ChartSpec,
   ChartMeasurement,
   InteractionMode,
@@ -102,6 +104,13 @@ export class ChartCard {
   private detailsOpen = false;
   private measurementRevision = 0;
   private loading?: Promise<void>;
+  private unwatch?: () => void;
+  private watchKey = "";
+  private sourceKey?: string;
+  private liveDirty = false;
+  private liveAbort?: AbortController;
+  private liveTimer?: ReturnType<typeof setTimeout>;
+  private liveLast = 0;
   private legendValues: [HTMLElement, Analyzed][] = [];
   private clipping = element("div", "card-clipping");
   private plot?: PlotPanel;
@@ -192,6 +201,9 @@ export class ChartCard {
     }
     this.root.addEventListener("toggle", () => this.measureFolds(), {
       capture: true,
+      signal: this.lifetime.signal,
+    });
+    document.addEventListener("visibilitychange", () => this.updateActive(), {
       signal: this.lifetime.signal,
     });
     this.updateActive();
@@ -1016,16 +1028,278 @@ export class ChartCard {
     this.measureFolds();
   }
 
+  private demanded(): boolean {
+    return (
+      this.active &&
+      (this.visible || this.full) &&
+      !this.destroyed &&
+      document.visibilityState !== "hidden"
+    );
+  }
+  private sourceSignature(sources: ResolvedSeries[]): string {
+    return JSON.stringify(
+      sources.map((s) => [
+        s.id,
+        s.label,
+        s.run.created_at,
+        s.x && [
+          s.x.ref.runId,
+          s.x.ref.key,
+          s.x.ref.kind,
+          s.x.label,
+          s.x.run.created_at,
+        ],
+      ]),
+    );
+  }
+  private liveRefs(): SeriesRef[] {
+    const refs = this.sources.flatMap((s) => [s, ...(s.x ? [s.x.ref] : [])]);
+    return [
+      ...new Map(
+        refs.map(({ runId, key, kind }) => [
+          JSON.stringify([runId, key, kind]),
+          { runId, key, kind },
+        ]),
+      ).values(),
+    ];
+  }
+  private stopLive(): void {
+    this.unwatch?.();
+    this.unwatch = undefined;
+    this.watchKey = "";
+    clearTimeout(this.liveTimer);
+    this.liveTimer = undefined;
+    this.liveAbort?.abort();
+    this.liveAbort = undefined;
+  }
+  private syncLiveWatch(): void {
+    if (!this.demanded() || this.images || this.spec.records) return;
+    const refs = this.liveRefs();
+    const key = JSON.stringify(refs);
+    if (this.unwatch && key === this.watchKey) return;
+    this.unwatch?.();
+    this.unwatch = undefined;
+    this.watchKey = key;
+    if (!refs.length) return;
+    const generation = this.generation;
+    this.unwatch = this.context.store.watch?.(refs, () => {
+      if (generation !== this.generation || !this.demanded()) return;
+      this.liveDirty = true;
+      this.scheduleLive();
+    });
+  }
+  private scheduleLive(): void {
+    if (
+      !this.liveDirty ||
+      !this.demanded() ||
+      !this.loaded ||
+      this.abort ||
+      this.liveAbort ||
+      this.liveTimer !== undefined ||
+      this.images
+    )
+      return;
+    this.liveTimer = setTimeout(
+      () => {
+        this.liveTimer = undefined;
+        if (!this.demanded()) return;
+        if (this.plot?.interacting()) {
+          this.liveLast = performance.now();
+          this.scheduleLive();
+        } else void this.loadLive();
+      },
+      Math.max(0, this.liveLast + 100 - performance.now()),
+    );
+  }
+  /** Load complete cached snapshots; never clear old pixels while catching up. */
+  private async loadLive(): Promise<void> {
+    if (!this.demanded() || this.abort || this.liveAbort || !this.liveDirty)
+      return;
+    this.liveDirty = false;
+    this.liveLast = performance.now();
+    const controller = new AbortController();
+    this.liveAbort = controller;
+    const generation = this.generation;
+    try {
+      const recordResult = this.spec.records
+        ? await loadRecordPlot(
+            this.context.api,
+            this.spec.records,
+            this.context.catalog,
+            this.context.selectedRunIds,
+            controller.signal,
+          )
+        : undefined;
+      const raw =
+        recordResult?.data ??
+        (await loadPlotRuns(
+          this.sources,
+          this.context.store,
+          controller.signal,
+        ));
+      if (
+        this.destroyed ||
+        generation !== this.generation ||
+        controller.signal.aborted
+      )
+        return;
+      if (this.plot?.interacting()) {
+        this.liveDirty = true;
+        return;
+      }
+      if (
+        !recordResult &&
+        raw.length === this.raw.length &&
+        raw.every((series, i) => {
+          const previous = this.raw[i];
+          return (
+            series.raw === previous.raw &&
+            series.x?.raw === previous.x?.raw &&
+            series.run.name === previous.run.name &&
+            series.run.created_at === previous.run.created_at &&
+            series.x?.run.name === previous.x?.run.name &&
+            series.x?.run.created_at === previous.x?.run.created_at
+          );
+        })
+      )
+        return;
+      const data = analyze(raw, this.spec.config);
+      const previous = {
+        data: this.data,
+        raw: this.raw,
+        sources: this.sources,
+      };
+      this.data = data;
+      this.raw = raw;
+      if (recordResult) this.sources = recordResult.sources;
+      try {
+        const display = this.displayConfig();
+        this.plot?.updateData(
+          data,
+          this.spec.outliers === "robust"
+            ? robustConfig(data, display)
+            : display,
+          this.pins,
+        );
+      } catch (error) {
+        this.data = previous.data;
+        this.raw = previous.raw;
+        this.sources = previous.sources;
+        throw error;
+      }
+      this.renderLegend();
+      this.renderResults();
+      this.renderHover();
+      this.status.textContent = data.some((s) => s.points.length)
+        ? ""
+        : "No measurements yet";
+      if (recordResult) this.notice.textContent = recordResult.warning;
+    } catch (error) {
+      if (
+        generation !== this.generation ||
+        controller.signal.aborted ||
+        this.destroyed
+      )
+        return;
+      this.liveDirty = true;
+      this.status.textContent = `Could not update chart; showing previous data: ${message(error)}`;
+      // Retry is bounded, and the cache retains the dirty snapshot on failure.
+      this.liveLast = performance.now() + 900;
+    } finally {
+      if (this.liveAbort === controller) {
+        this.liveAbort = undefined;
+        this.scheduleLive();
+      }
+    }
+  }
+  /** Feed metadata is not a context replacement and must never edit the view. */
+  updateCatalog(catalog: Catalog): void {
+    if (this.destroyed) return;
+    const before =
+      this.sourceKey ??
+      this.sourceSignature(
+        resolveSources(
+          this.spec,
+          this.context.selectedRunIds,
+          this.context.catalog,
+        ),
+      );
+    this.context = { ...this.context, catalog };
+    if (this.images) {
+      const sources = resolveSources(
+        this.spec,
+        this.context.selectedRunIds,
+        catalog,
+      );
+      if (
+        JSON.stringify(sources.map((s) => s.id)) !==
+        JSON.stringify(this.sources.map((s) => s.id))
+      ) {
+        this.sources = sources;
+        this.images.setSources(sources);
+      }
+      return;
+    }
+    const sources = resolveSources(
+      this.spec,
+      this.context.selectedRunIds,
+      catalog,
+    );
+    const after = this.sourceSignature(sources);
+    // Keep current metadata even when dependency identities and labels are stable.
+    this.sources = sources;
+    if (before === after) return;
+    this.cancel();
+    this.sources = sources;
+    this.sourceKey = after;
+    if (!this.spec.records) {
+      const expected =
+        this.spec.source.mode === "explicit"
+          ? new Set(
+              this.spec.source.series.map((ref) =>
+                JSON.stringify([ref.runId, ref.key, ref.kind]),
+              ),
+            ).size
+          : 0;
+      this.notice.textContent =
+        expected > sources.length
+          ? `${expected - sources.length} series unavailable`
+          : "";
+    }
+    this.liveDirty = true;
+    if (!this.raw.length) this.loaded = false;
+    this.updateActive();
+  }
+  refreshLiveImages(runId?: string, key?: string): void {
+    if (this.destroyed || !this.images) return;
+    if (
+      runId !== undefined &&
+      !this.sources.some(
+        (s) => s.runId === runId && (key === undefined || s.key === key),
+      )
+    )
+      return;
+    this.images.refreshLive();
+  }
+  /** rx snapshots have no scalar sequence cursor. Coarse invalidation is demand gated. */
+  refreshLiveRecords(): void {
+    if (this.destroyed || !this.spec.records) return;
+    this.liveDirty = true;
+    this.scheduleLive();
+  }
   private cancel() {
+    this.stopLive();
     this.generation++;
     this.abort?.abort();
     this.abort = undefined;
   }
   private updateActive() {
-    const active =
-      this.active && (this.visible || this.full) && !this.destroyed;
+    const active = this.demanded();
     this.images?.setActive(active);
     if (!active) {
+      if (this.loaded && (this.context.store.watch || this.spec.records))
+        this.liveDirty = true;
+      this.stopLive();
       if (this.abort) {
         this.cancel();
         this.loaded = false;
@@ -1033,6 +1307,8 @@ export class ChartCard {
       return;
     }
     if (!this.loaded) void this.ensureLoaded();
+    this.syncLiveWatch();
+    this.scheduleLive();
   }
   private ensureLoaded(): Promise<void> {
     if (!this.loaded) {
@@ -1066,6 +1342,8 @@ export class ChartCard {
       this.context.selectedRunIds,
       this.context.catalog,
     ));
+    this.sourceKey = this.sourceSignature(sources);
+    this.syncLiveWatch();
     const expected =
       this.spec.source.mode === "explicit"
         ? new Set(
@@ -1162,7 +1440,10 @@ export class ChartCard {
       this.renderResults();
       this.status.textContent = `Could not load chart: ${message(error)}`;
     } finally {
-      if (generation === this.generation) this.abort = undefined;
+      if (generation === this.generation) {
+        this.abort = undefined;
+        this.scheduleLive();
+      }
     }
   }
   setContext(context: CardContext): void {
@@ -1220,6 +1501,8 @@ export class ChartCard {
     // Explicit user reveal may precede IntersectionObserver's next delivery.
     this.visible = true;
     const ready = this.ensureLoaded();
+    this.syncLiveWatch();
+    this.scheduleLive();
     const generation = this.generation;
     await ready;
     if (
@@ -1408,6 +1691,8 @@ export class ChartCard {
     this.measurementRevision++;
     this.cancel();
     this.loaded = false;
+    this.sourceKey = undefined;
+    this.liveDirty = false;
     this.data = [];
     this.raw = [];
     this.legend.replaceChildren();

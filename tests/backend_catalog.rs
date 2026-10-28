@@ -134,7 +134,7 @@ async fn catalog_auth_empty_shape_and_security_headers() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         app.catalog().await,
-        json!({"experiments":[],"runs":[],"series":[]})
+        json!({"metric_seq":0,"experiments":[],"runs":[],"series":[]})
     );
     let (status, _, error) = app
         .request(
@@ -250,7 +250,8 @@ async fn catalog_all_experiments_kinds_duplicates_and_latest_insertions_are_read
     let hidden_path = image_files[0].0.with_extension("hidden");
     std::fs::rename(&image_files[0].0, &hidden_path).unwrap();
     let catalog = app.catalog().await;
-    assert_eq!(catalog.as_object().unwrap().len(), 3);
+    assert_eq!(catalog.as_object().unwrap().len(), 4);
+    assert_eq!(catalog["metric_seq"], 6);
     assert_eq!(
         catalog["experiments"],
         app.json("GET", "/api/experiments", Value::Null).await["experiments"]

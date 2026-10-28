@@ -58,6 +58,14 @@ fn run(config: ServeConfig) -> Result<()> {
         let mut state =
             AppState::open_with_ingest_options(&config.db_path, token, &concurrency, ingest)?;
         state.rx = rx;
+        let _rx_changes = state
+            .rx
+            .as_ref()
+            .map(|source| {
+                let live = state.db.live();
+                source.watch_changes(move || live.publish(nset::live::Change::Rx))
+            })
+            .transpose()?;
         tracing::info!(
             http_workers = concurrency.http_workers,
             read_workers = concurrency.read_workers,

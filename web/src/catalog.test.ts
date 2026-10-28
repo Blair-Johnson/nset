@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Api } from "./api";
+import { Api, HttpError } from "./api";
 import { fetchCatalog, MetricStore } from "./catalog";
 import type { Point } from "./math";
 import type { SeriesRef } from "./workspace-types";
@@ -301,4 +301,329 @@ test("catalog response entry budgets remain independent of unlimited local JSON"
       /Catalog entry exceeds JSON/,
     );
   }
+});
+
+function liveApi() {
+  const initial = deferredApi();
+  const tails: {
+    refs: import("./api").MetricTailRequest[];
+    signal: AbortSignal;
+    resolve: (result: import("./api").MetricTailSnapshot[]) => void;
+    reject: (error: unknown) => void;
+  }[] = [];
+  initial.api.metricTails = (refs, signal) =>
+    new Promise((resolve, reject) =>
+      tails.push({ refs, signal: signal!, resolve, reject }),
+    );
+  return { ...initial, tails };
+}
+const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
+function tailResult(
+  call: ReturnType<typeof liveApi>["tails"][number],
+  seq: number,
+) {
+  return call.refs.map((ref) => ({
+    runId: ref.runId,
+    key: ref.key,
+    snapshot: seq,
+    points: seq > ref.after ? [{ seq, step: 1, timestamp: 2, value: seq }] : [],
+  }));
+}
+
+test("catalog accepts an optional safe native metric watermark", async () => {
+  for (const metric_seq of [0, 123, Number.MAX_SAFE_INTEGER]) {
+    const api = new Api(
+      () => "",
+      async () => Response.json({ ...metadata(), metric_seq }),
+    );
+    assert.equal((await fetchCatalog(api)).metric_seq, metric_seq);
+  }
+  for (const metric_seq of [-1, 1.2, Number.MAX_SAFE_INTEGER + 1, "1", null]) {
+    const api = new Api(
+      () => "",
+      async () => Response.json({ ...metadata(), metric_seq }),
+    );
+    await assert.rejects(fetchCatalog(api), /metric_seq/);
+  }
+});
+
+test("watch deduplicates shared X/Y refs and coalesces dirty series in one batch", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  let changes = 0;
+  const stop = store.watch([ref("x"), ref("y"), ref("x")], () => changes++);
+  const stopShared = store.watch([ref("x")], () => {});
+  assert.equal(calls.length, 2);
+  calls.forEach((call) => call.resolve(points));
+  await tick();
+  changes = 0;
+  for (let i = 0; i < 20; i++) store.markDirty([ref("x"), ref("y"), ref("x")]);
+  assert.equal(tails.length, 0);
+  await wait();
+  assert.equal(tails.length, 1);
+  assert.equal(tails[0].refs.length, 2);
+  tails[0].resolve(tailResult(tails[0], 9));
+  await tick();
+  assert.equal(changes, 1);
+  assert.deepEqual(
+    (await store.load(ref("x"))).map((p) => p.seq),
+    [1, 9],
+  );
+  assert.deepEqual(
+    (await store.load(ref("y"))).map((p) => p.step),
+    [1, 1],
+  );
+  stop();
+  stopShared();
+  store.clear();
+});
+
+test("dirty hints racing initial loads and catchup survive publication", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  const stop = store.watch([ref("a")], () => {});
+  store.markDirty([ref("a")]);
+  calls[0].resolve(points);
+  await tick();
+  await wait();
+  assert.equal(tails.length, 1);
+  assert.equal(tails[0].refs[0].after, 1);
+  store.markDirty([ref("a")]);
+  tails[0].resolve(tailResult(tails[0], 7));
+  await tick();
+  await wait();
+  assert.equal(tails.length, 2);
+  assert.equal(tails[1].refs[0].after, 7);
+  tails[1].resolve(tailResult(tails[1], 12));
+  await tick();
+  assert.deepEqual(
+    (await store.load(ref("a"))).map((p) => p.seq),
+    [1, 7, 12],
+  );
+  stop();
+  store.clear();
+});
+
+test("dirty inactive caches wait for demand and evicted histories start fresh", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api, 4, 1);
+  const first = store.load(ref("a"));
+  calls[0].resolve(points);
+  await first;
+  store.markDirty([ref("a"), ref("missing")]);
+  await wait();
+  assert.equal(calls.length, 1);
+  assert.equal(tails.length, 0);
+  const fresh = store.load(ref("a"));
+  await wait();
+  tails[0].resolve(tailResult(tails[0], 5));
+  assert.equal((await fresh).length, 2);
+  const b = store.load(ref("b"));
+  calls[1].resolve(points);
+  await b;
+  store.markDirty([ref("a")]);
+  const reloaded = store.load(ref("a"));
+  assert.equal(calls.length, 3);
+  calls[2].resolve(points);
+  await reloaded;
+  store.clear();
+});
+
+test("hidden tabs suspend and abort tails but leave initial loads intact", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  let changes = 0;
+  const stop = store.watch([ref("a")], () => changes++);
+  store.setLiveEnabled(false);
+  assert.equal(calls[0].signal.aborted, false);
+  calls[0].resolve(points);
+  await tick();
+  store.markDirty();
+  await wait();
+  assert.equal(tails.length, 0);
+  store.setLiveEnabled(true);
+  await wait();
+  assert.equal(tails.length, 1);
+  store.setLiveEnabled(false);
+  assert.equal(tails[0].signal.aborted, true);
+  tails[0].resolve(tailResult(tails[0], 50));
+  await tick();
+  assert.equal(changes, 1);
+  store.setLiveEnabled(true);
+  await wait();
+  assert.equal(tails[1].refs[0].after, 1);
+  tails[1].resolve(tailResult(tails[1], 7));
+  await tick();
+  assert.deepEqual(
+    (await store.load(ref("a"))).map((p) => p.seq),
+    [1, 7],
+  );
+  stop();
+  store.clear();
+});
+
+test("epoch reset refetches pinned prefixes and ignores noncooperative stale tails", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  let changes = 0;
+  const stop = store.watch([ref("a")], () => changes++);
+  calls[0].resolve(points);
+  await tick();
+  const displayed = await store.load(ref("a"));
+  store.markDirty();
+  await wait();
+  store.resetLive();
+  assert.equal(tails[0].signal.aborted, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(displayed, points);
+  tails[0].resolve(tailResult(tails[0], 99));
+  await tick();
+  assert.equal(changes, 1);
+  const newPoints = [{ seq: 2, step: 1, timestamp: 1, value: 2 }];
+  calls[1].resolve(newPoints);
+  await tick();
+  assert.deepEqual(await store.load(ref("a")), newPoints);
+  stop();
+  store.clear();
+});
+
+test("failed catchup retains the complete prefix and retries with backoff", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  const statuses: (string | null)[] = [];
+  store.setLiveStatusListener((error) => statuses.push(error));
+  let changes = 0;
+  const stop = store.watch([ref("a")], () => changes++);
+  calls[0].resolve(points);
+  await tick();
+  const displayed = await store.load(ref("a"));
+  store.markDirty();
+  await wait();
+  tails[0].reject(new Error("offline"));
+  await tick();
+  assert.deepEqual(displayed, points);
+  assert.equal(changes, 1);
+  assert.equal(statuses.at(-1), "offline");
+  await wait(100);
+  assert.equal(tails.length, 1);
+  await wait(200);
+  assert.equal(tails.length, 2);
+  assert.equal(tails[1].refs[0].after, 1);
+  tails[1].resolve(tailResult(tails[1], 8));
+  await tick();
+  assert.deepEqual(
+    (await store.load(ref("a"))).map((p) => p.seq),
+    [1, 8],
+  );
+  assert.equal(statuses.at(-1), null);
+  stop();
+  store.clear();
+});
+
+test("more than 24 watched prefixes stay pinned and batches cap at 64 streams", async () => {
+  let initial = 0;
+  const batches: number[] = [];
+  const api = {
+    async metrics() {
+      initial++;
+      return points;
+    },
+    async metricTails(refs: import("./api").MetricTailRequest[]) {
+      batches.push(refs.length);
+      return refs.map((ref) => ({ ...ref, points: [], snapshot: ref.after }));
+    },
+  } as unknown as Api;
+  const store = new MetricStore(api);
+  const refs = Array.from({ length: 70 }, (_, i) => ref(String(i)));
+  const stop = store.watch(refs, () => {});
+  await Promise.all(refs.map((ref) => store.load(ref)));
+  await Promise.all(refs.map((ref) => store.load(ref)));
+  assert.equal(initial, 70);
+  store.markDirty();
+  await wait(250);
+  assert.deepEqual(batches, [64, 6]);
+  await Promise.all(refs.map((ref) => store.load(ref)));
+  assert.equal(initial, 70);
+  stop();
+  store.clear();
+});
+
+test("reset also rejects initial waiters and prevents stale initial cache commits", async () => {
+  const { api, calls } = liveApi(),
+    store = new MetricStore(api, 1);
+  const stop = store.watch([ref("a")], () => {});
+  const original = store.load(ref("a"));
+  const rejected = assert.rejects(original, { name: "AbortError" });
+  store.resetLive();
+  assert.equal(calls[0].signal.aborted, true);
+  assert.equal(calls.length, 1);
+  calls[0].resolve([{ ...points[0], value: -999 }]);
+  await rejected;
+  await tick();
+  assert.equal(calls.length, 2);
+  calls[1].resolve(points);
+  await tick();
+  assert.deepEqual(await store.load(ref("a")), points);
+  stop();
+  store.clear();
+});
+
+test("auth failures retain dirtiness but do not automatically retry", async () => {
+  const { api, calls, tails } = liveApi(),
+    store = new MetricStore(api);
+  const stop = store.watch([ref("a")], () => {});
+  calls[0].resolve(points);
+  await tick();
+  store.markDirty();
+  await wait();
+  tails[0].reject(new HttpError("Unauthorized", 401));
+  await tick();
+  await wait(350);
+  assert.equal(tails.length, 1);
+  const retry = store.load(ref("a"));
+  await wait();
+  assert.equal(tails.length, 2);
+  tails[1].resolve(tailResult(tails[1], 3));
+  assert.deepEqual(
+    (await retry).map((point) => point.seq),
+    [1, 3],
+  );
+  stop();
+  store.clear();
+});
+
+test("a final dirty series recovers after a long outage without fresh hints", async (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { api, calls, tails } = liveApi();
+  const store = new MetricStore(api);
+  const stop = store.watch([ref("a")], () => {});
+  t.after(() => {
+    stop();
+    store.clear();
+  });
+  calls[0].resolve(points);
+  await tick();
+  store.markDirty();
+  now += 100;
+  t.mock.timers.tick(100);
+  await tick();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    assert.equal(tails.length, attempt + 1);
+    assert.equal(tails[attempt].refs[0].after, 1);
+    tails[attempt].reject(new HttpError("temporarily offline", 503));
+    await tick();
+    now += 10000;
+    t.mock.timers.tick(10000);
+    await tick();
+  }
+  assert.equal(tails.length, 9);
+  tails[8].resolve(tailResult(tails[8], 9));
+  await tick();
+  assert.deepEqual(
+    (await store.load(ref("a"))).map((p) => p.seq),
+    [1, 9],
+  );
+  assert.equal(calls.length, 1);
 });

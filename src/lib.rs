@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod errors;
 pub mod ingest;
+pub mod live;
 pub mod models;
 pub mod rx;
 mod view_config;

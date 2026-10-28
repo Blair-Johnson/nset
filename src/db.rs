@@ -2,6 +2,7 @@
 //! each with a bounded queue, own their connections for their entire lifetime.
 use crate::{
     errors::{ApiError, Result},
+    live::{Change, Live},
     models::*,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -74,6 +75,7 @@ pub struct Database {
     readers: Arc<Vec<Actor>>,
     next_reader: Arc<AtomicUsize>,
     images: Arc<PathBuf>,
+    live: Live,
 }
 fn setup(connection: &Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(5))?;
@@ -482,6 +484,7 @@ impl Database {
             readers: Arc::new(readers),
             next_reader: Arc::new(AtomicUsize::new(0)),
             images: Arc::new(images),
+            live: Live::new(),
         })
     }
     /// Configured queue capacities: the single writer, then each read-only actor.
@@ -494,6 +497,11 @@ impl Database {
                 .map(|reader| reader.0.sender.as_ref().unwrap().max_capacity())
                 .collect(),
         )
+    }
+
+    /// Shared process-local feed, also available to external-source invalidators.
+    pub fn live(&self) -> Live {
+        self.live.clone()
     }
 
     fn reader(&self) -> &Actor {
@@ -723,6 +731,7 @@ impl Database {
         input: NewRun,
         mut metadata: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx =
@@ -744,6 +753,7 @@ impl Database {
                     params![namespace, key, raw],
                 )?;
                 tx.commit()?;
+                live.publish(Change::Catalog);
                 Ok(metadata)
             })
             .await
@@ -807,8 +817,13 @@ impl Database {
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
+                let metric_seq =
+                    tx.query_row("SELECT COALESCE(MAX(seq),0) FROM metrics", [], |row| {
+                        row.get(0)
+                    })?;
                 tx.commit()?;
                 Ok(Catalog {
+                    metric_seq,
                     experiments,
                     runs,
                     series,
@@ -836,6 +851,7 @@ impl Database {
     }
     pub async fn create_experiment(&self, name: String) -> Result<(Experiment, bool)> {
         name_check(&name)?;
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -865,6 +881,7 @@ impl Database {
                     params![experiment.id, experiment.name, experiment.created_at],
                 )?;
                 tx.commit()?;
+                live.publish(Change::Catalog);
                 Ok((experiment, true))
             })
             .await
@@ -885,11 +902,13 @@ impl Database {
         name_check(&input.name)?;
         object_keys(&input.params)?;
         object_keys(&input.tags)?;
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 let run = insert_run(&tx, input)?;
                 tx.commit()?;
+                live.publish(Change::Catalog);
                 Ok(run)
             })
             .await
@@ -908,10 +927,12 @@ impl Database {
         {
             return Err(ApiError::bad("invalid run status"));
         }
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 let mut run = get_run(&tx, &id)?;
+                let prior = (run.status.clone(), run.params.clone(), run.tags.clone());
                 if let Some(status) = patch.status {
                     run.status = status;
                 }
@@ -928,6 +949,9 @@ impl Database {
                         }
                     }
                 }
+                if prior == (run.status.clone(), run.params.clone(), run.tags.clone()) {
+                    return Ok(run);
+                }
                 run.updated_at = now();
                 tx.execute(
                     "UPDATE runs SET status=?,params=?,tags=?,updated_at=? WHERE id=?",
@@ -940,6 +964,7 @@ impl Database {
                     ],
                 )?;
                 tx.commit()?;
+                live.publish(Change::Catalog);
                 Ok(run)
             })
             .await
@@ -951,12 +976,14 @@ impl Database {
         for metric in &batch.metrics {
             metric.validate()?;
         }
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 require_run(&tx, &id)?;
                 let count = batch.metrics.len();
                 let time = now();
+                let mut changes = std::collections::BTreeMap::new();
                 {
                     let mut insert = tx.prepare_cached(
                         "INSERT INTO metrics(run_id,key,step,timestamp,value) VALUES(?,?,?,?,?)",
@@ -969,12 +996,14 @@ impl Database {
                             metric.timestamp.unwrap_or(time),
                             metric.value
                         ])?;
+                        record_metric(&mut changes, tx.last_insert_rowid(), metric, time);
                     }
                 }
                 if count > 0 {
                     tx.execute("UPDATE runs SET updated_at=? WHERE id=?", params![time, id])?;
                 }
                 tx.commit()?;
+                live.publish_batch(metric_changes(id, changes));
                 Ok(count)
             })
             .await
@@ -997,6 +1026,7 @@ impl Database {
         }
         crate::ingest::validate_batch(&batch)?;
         safe(accepted_at)?;
+        let live = self.live();
         self.writer.call(move |conn| {
             let tx = conn.transaction().map_err(storage_error)?;
             let receipt: Option<(Vec<u8>, i64, i64)> = tx.query_row(
@@ -1014,15 +1044,18 @@ impl Database {
             }
             tx.execute("INSERT INTO ingest_receipts(run_id,batch_id,digest,accepted,accepted_at) VALUES(?,?,?,?,?)",
                 params![id,batch_id,digest,batch.metrics.len() as i64,accepted_at]).map_err(storage_error)?;
+            let mut changes = std::collections::BTreeMap::new();
             {
                 let mut insert = tx.prepare_cached(
                     "INSERT INTO metrics(run_id,key,step,timestamp,value) VALUES(?,?,?,?,?)").map_err(storage_error)?;
                 for metric in batch.metrics {
                     insert.execute(params![id,metric.key,metric.step,metric.timestamp.unwrap_or(accepted_at),metric.value]).map_err(storage_error)?;
+                    record_metric(&mut changes, tx.last_insert_rowid(), metric, accepted_at);
                 }
             }
             tx.execute("UPDATE runs SET updated_at=MAX(updated_at,?) WHERE id=?", params![accepted_at,id]).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
+            live.publish_batch(metric_changes(id, changes));
             Ok(())
         }).await
     }
@@ -1065,6 +1098,56 @@ impl Database {
             Ok(MetricPage {points,next_after,snapshot,total})
         }).await
     }
+    pub async fn metrics_tail(&self, query: MetricTailQuery) -> Result<MetricTailResponse> {
+        if query.series.len() > 64 {
+            return Err(ApiError::bad("at most 64 streams per request"));
+        }
+        let limit = query.limit.unwrap_or(1000);
+        if !(1..=1000).contains(&limit) {
+            return Err(ApiError::bad("limit must be 1..1000"));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for stream in &query.series {
+            name_check(&stream.run_id)?;
+            name_check(&stream.key)?;
+            safe(stream.after)?;
+            if let Some(snapshot) = stream.snapshot {
+                safe(snapshot)?;
+                if stream.after > snapshot {
+                    return Err(ApiError::bad("after exceeds snapshot"));
+                }
+            }
+            if !unique.insert((&stream.run_id, &stream.key)) {
+                return Err(ApiError::bad("duplicate stream"));
+            }
+        }
+        drop(unique);
+        self.reader().call(move |conn| {
+            let tx = conn.transaction()?;
+            let mut series = Vec::with_capacity(query.series.len());
+            for stream in query.series {
+                require_run(&tx, &stream.run_id)?;
+                let high: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(seq),0) FROM metrics WHERE run_id=? AND key=?",
+                    params![stream.run_id, stream.key], |row| row.get(0))?;
+                let snapshot = stream.snapshot.unwrap_or(high);
+                if snapshot > high { return Err(ApiError::bad("snapshot exceeds stream high-water mark")); }
+                if stream.after > snapshot { return Err(ApiError::bad("after exceeds snapshot")); }
+                let mut points: Vec<Metric> = tx.prepare_cached(
+                    "SELECT seq,key,step,timestamp,value FROM metrics WHERE run_id=? AND key=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?"
+                )?.query_map(params![stream.run_id, stream.key, stream.after, snapshot, (limit + 1) as i64], |row| {
+                    Ok(Metric { seq: row.get(0)?, key: row.get(1)?, step: row.get(2)?, timestamp: row.get(3)?, value: row.get(4)? })
+                })?.collect::<rusqlite::Result<_>>()?;
+                let more = points.len() > limit;
+                if more { points.pop(); }
+                let next_after = if more { points.last().map(|point| point.seq) } else { None };
+                series.push(MetricTailPage { run_id: stream.run_id, key: stream.key, points, snapshot, next_after });
+            }
+            tx.commit()?;
+            Ok(MetricTailResponse { series })
+        }).await
+    }
+
     pub async fn insert_image(
         &self,
         run_id: String,
@@ -1076,6 +1159,7 @@ impl Database {
         safe(query.step)?;
         safe(query.timestamp)?;
         let directory = self.images.clone();
+        let live = self.live();
         self.writer
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -1126,6 +1210,10 @@ impl Database {
                     }
                     return Err(error);
                 }
+                live.publish(Change::Image {
+                    run_id: image.run_id.clone(),
+                    key: image.key.clone(),
+                });
                 Ok(image)
             })
             .await
@@ -1187,6 +1275,128 @@ mod tests {
             params: Object::new(),
             tags: Object::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_accepted_metric_writer_still_publishes_after_commit() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let (experiment, _) = db.create_experiment("cancel-live".into()).await.unwrap();
+        let run = db.create_run(new_run(&experiment.id)).await.unwrap();
+        let live = db.live();
+        let cursor = live.cursor();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = db.writer.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .call(move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let batch = MetricBatch {
+            metrics: vec![MetricInput {
+                key: "x".into(),
+                step: 0,
+                timestamp: Some(0),
+                value: 1.0,
+            }],
+        };
+        let mut write = Box::pin(db.insert_metrics(run.id, batch));
+        assert!(matches!(
+            write.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        drop(write);
+        assert_eq!(live.cursor(), cursor);
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), live.poll(cursor))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response.changes[0],
+            Change::Metric {
+                count: 1,
+                high: 1,
+                ..
+            }
+        ));
+        assert_eq!(db.catalog().await.unwrap().metric_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn replayed_projection_and_compat_creation_publish_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(directory.path()).unwrap();
+        let (experiment, _) = db.create_experiment("live-replay".into()).await.unwrap();
+        let live = db.live();
+        let before = live.cursor();
+        let metadata = db
+            .compat_create_run(
+                "test".into(),
+                "one".into(),
+                new_run(&experiment.id),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let first = live.poll(before).await.unwrap();
+        assert_eq!(first.changes.len(), 1);
+        assert!(matches!(first.changes[0], Change::Catalog));
+        let cursor = live.cursor();
+        db.compat_create_run(
+            "test".into(),
+            "one".into(),
+            new_run(&experiment.id),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor, live.cursor());
+        let run = metadata["native_id"].as_str().unwrap().to_string();
+        let batch = MetricBatch {
+            metrics: vec![MetricInput {
+                key: "x".into(),
+                step: 0,
+                timestamp: Some(1),
+                value: 1.0,
+            }],
+        };
+        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, batch.clone())
+            .await
+            .unwrap();
+        let first = live.poll(cursor).await.unwrap();
+        assert_eq!(first.changes.len(), 1);
+        assert!(matches!(
+            first.changes[0],
+            Change::Metric {
+                count: 1,
+                high: 1,
+                ..
+            }
+        ));
+        let cursor = live.cursor();
+        db.apply_ingest(run.clone(), "batch".into(), vec![1], 2, batch.clone())
+            .await
+            .unwrap();
+        assert_eq!(cursor, live.cursor());
+        assert!(
+            db.apply_ingest(run, "batch".into(), vec![2], 2, batch)
+                .await
+                .is_err()
+        );
+        assert_eq!(cursor, live.cursor());
     }
 
     #[tokio::test]
@@ -1449,4 +1659,40 @@ mod tests {
         dropping.join().unwrap();
         contender.try_lock_exclusive().unwrap();
     }
+}
+
+// Collect only one last observation and count per affected key within this transaction.
+fn record_metric(
+    changes: &mut std::collections::BTreeMap<String, (usize, Metric)>,
+    seq: i64,
+    input: MetricInput,
+    time: i64,
+) {
+    let point = Metric {
+        seq,
+        key: input.key.clone(),
+        step: input.step,
+        timestamp: input.timestamp.unwrap_or(time),
+        value: if input.value == 0.0 { 0.0 } else { input.value },
+    };
+    let entry = changes
+        .entry(input.key)
+        .or_insert_with(|| (0, point.clone()));
+    entry.0 += 1;
+    entry.1 = point;
+}
+fn metric_changes(
+    run_id: String,
+    changes: std::collections::BTreeMap<String, (usize, Metric)>,
+) -> Vec<Change> {
+    changes
+        .into_iter()
+        .map(|(key, (count, last))| Change::Metric {
+            run_id: run_id.clone(),
+            key,
+            high: last.seq,
+            count,
+            last,
+        })
+        .collect()
 }

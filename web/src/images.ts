@@ -1,5 +1,5 @@
 import OpenSeadragon from "openseadragon";
-import { Api, type Run, type ImageFrame } from "./api";
+import { Api, HttpError, type Run, type ImageFrame } from "./api";
 import { boundedIndex, element, isAbort, message, Latest } from "./utils";
 import { plotIcon, type PlotIconName } from "./plot-icons";
 import type { ResolvedSeries } from "./workspace-types";
@@ -36,6 +36,12 @@ export class ImagePanel {
   private resume = false;
   private resumeFrame = false;
   private metadataPending = false;
+  private liveDirty = false;
+  private liveQueued = false;
+  private liveAbort?: AbortController;
+  private liveError?: string;
+  private liveRetry?: ReturnType<typeof setTimeout>;
+  private liveFailures = 0;
   private compact: boolean;
   private runs: Run[] = [];
   private frames: ImageFrame[] = [];
@@ -324,6 +330,7 @@ export class ImagePanel {
     if (this.destroyed || this.active === active) return;
     this.active = active;
     if (!active) {
+      this.cancelLive();
       this.resume = this.metadataPending;
       this.resumeFrame =
         !this.resume && !!this.requested && this.requested !== this.displayed;
@@ -342,6 +349,7 @@ export class ImagePanel {
           void this.load();
           return;
         }
+        this.queueLive();
         if (this.resumeFrame) {
           this.resumeFrame = false;
           void this.show(this.index);
@@ -393,6 +401,168 @@ export class ImagePanel {
   }
   async refresh() {
     await this.load();
+  }
+  /** Invalidate metadata without changing the viewer, camera, or playback. */
+  refreshLive(): void {
+    if (this.destroyed) return;
+    this.liveDirty = true;
+    this.queueLive();
+  }
+  private cancelLive(): void {
+    clearTimeout(this.liveRetry);
+    this.liveRetry = undefined;
+    this.liveFailures = 0;
+    if (this.liveAbort) {
+      this.liveDirty = true;
+      this.liveAbort.abort();
+      this.liveAbort = undefined;
+    }
+  }
+  private queueLive(): void {
+    if (
+      this.destroyed ||
+      !this.active ||
+      !this.liveDirty ||
+      this.liveQueued ||
+      this.liveRetry !== undefined ||
+      this.liveAbort ||
+      this.metadataPending ||
+      this.resume ||
+      !this.runSelect.value
+    )
+      return;
+    this.liveQueued = true;
+    queueMicrotask(() => {
+      this.liveQueued = false;
+      void this.loadLive();
+    });
+  }
+  private async loadLive(): Promise<void> {
+    if (
+      this.destroyed ||
+      !this.active ||
+      !this.liveDirty ||
+      this.liveAbort ||
+      this.metadataPending ||
+      this.resume ||
+      !this.runSelect.value
+    )
+      return;
+    const run = this.runSelect.value;
+    const controller = new AbortController();
+    this.liveAbort = controller;
+    this.liveDirty = false;
+    let again = false;
+    try {
+      const response = await this.api.json<{ images: ImageFrame[] }>(
+        `/runs/${encodeURIComponent(run)}/images`,
+        controller.signal,
+      );
+      if (controller.signal.aborted || this.liveAbort !== controller) return;
+      // Full lists are merged by identity, never by timestamp/step as a cursor.
+      const selected = this.frames[this.index]?.id;
+      const previousKey = this.keySelect.value;
+      this.all = this.mergeFrames(this.all, response.images);
+      this.updateKeys(run, previousKey);
+      this.frames = this.all.filter(
+        (frame) => frame.key === this.keySelect.value,
+      );
+      const index = this.frames.findIndex((frame) => frame.id === selected);
+      this.index = index >= 0 ? index : 0;
+      this.slider.max = String(Math.max(0, this.frames.length - 1));
+      this.slider.value = String(this.index);
+      this.slider.disabled = !this.frames.length;
+      const displayed = this.frames.find(
+        (frame) => frame.id === this.displayed,
+      );
+      if (displayed) this.updateFrameInfo(displayed);
+      if (this.liveError && this.status.textContent === this.liveError)
+        this.status.textContent = "";
+      this.liveError = undefined;
+      this.liveFailures = 0;
+      // Preserve initial frame-zero behavior when an empty series first arrives.
+      if (!this.displayed && !this.requested && this.frames.length)
+        void this.show(0);
+      again = this.liveDirty;
+    } catch (error) {
+      if (controller.signal.aborted || this.liveAbort !== controller) return;
+      again = this.liveDirty;
+      this.liveDirty = true;
+      this.liveError = `Image updates unavailable: ${message(error)}`;
+      this.status.textContent = this.liveError;
+      if (
+        !(error instanceof HttpError) ||
+        error.status >= 500 ||
+        [408, 429].includes(error.status)
+      ) {
+        const delay = Math.min(
+          10000,
+          1000 * 2 ** Math.min(this.liveFailures++, 4),
+        );
+        this.liveRetry = setTimeout(() => {
+          this.liveRetry = undefined;
+          this.queueLive();
+        }, delay);
+      }
+    } finally {
+      if (this.liveAbort === controller) {
+        this.liveAbort = undefined;
+        // Successful idle sources do no work. Failed metadata catches up with
+        // capped backoff even when the final image was the last event.
+        if (again) this.queueLive();
+      }
+    }
+  }
+  private mergeFrames(
+    previous: ImageFrame[],
+    incoming: ImageFrame[],
+  ): ImageFrame[] {
+    return [
+      ...new Map(
+        [...previous, ...incoming].map((frame) => [frame.id, frame]),
+      ).values(),
+    ].sort(
+      (a, b) =>
+        a.step - b.step ||
+        a.timestamp - b.timestamp ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+  }
+  private updateKeys(run: string, previousKey: string): void {
+    const keys = this.sources
+      ? [
+          ...new Set(
+            this.sources
+              .filter((source) => source.runId === run)
+              .map((source) => source.key),
+          ),
+        ]
+      : [...new Set(this.all.map((frame) => frame.key))].sort();
+    const options = [...this.keySelect.options];
+    if (
+      options.length !== keys.length ||
+      options.some((option, index) => option.value !== keys[index])
+    ) {
+      this.keySelect.replaceChildren();
+      for (const key of keys) {
+        const option = element("option", "", key);
+        option.value = key;
+        this.keySelect.append(option);
+      }
+    }
+    if (keys.includes(previousKey)) this.keySelect.value = previousKey;
+    this.keySelect.hidden = this.compact && keys.length <= 1;
+  }
+  private updateFrameInfo(frame: ImageFrame): void {
+    const index = this.frames.findIndex(
+      (candidate) => candidate.id === frame.id,
+    );
+    this.info.textContent = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} / ${frame.key}  ·  step ${frame.step}  ·  ${new Date(frame.timestamp).toISOString()}  ·  ${index + 1} of ${this.frames.length}`;
+    if (this.compact) {
+      this.info.textContent = `Step ${frame.step} · ${index + 1} / ${this.frames.length}`;
+      this.info.title = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} · ${frame.key} · ${new Date(frame.timestamp).toISOString()}`;
+    }
+    this.info.dataset.step = String(frame.step);
   }
   /** Fit the current image without clearing its source, frame, or cache. */
   fit(): void {
@@ -677,6 +847,9 @@ export class ImagePanel {
   }
   private async load() {
     if (this.destroyed) return;
+    this.cancelLive();
+    this.liveDirty = false;
+    this.liveError = undefined;
     this.resume = false;
     this.resumeFrame = false;
     const previousKey = this.keySelect.value;
@@ -684,6 +857,7 @@ export class ImagePanel {
     this.metadataAbort?.abort();
     this.metadataAbort = new AbortController();
     this.reset();
+    this.metadataPending = false;
     this.keySelect.replaceChildren();
     const run = this.runSelect.value;
     if (!run) {
@@ -698,29 +872,17 @@ export class ImagePanel {
         this.metadataAbort.signal,
       );
       if (!this.metadata.current(generation)) return;
-      this.all = response.images;
-      const keys = this.sources
-        ? [
-            ...new Set(
-              this.sources
-                .filter((source) => source.runId === run)
-                .map((source) => source.key),
-            ),
-          ]
-        : [...new Set(this.all.map((f) => f.key))].sort();
-      for (const key of keys) {
-        const o = element("option", "", key);
-        o.value = key;
-        this.keySelect.append(o);
-      }
-      if (keys.includes(previousKey)) this.keySelect.value = previousKey;
-      this.keySelect.hidden = this.compact && keys.length <= 1;
+      this.all = this.mergeFrames([], response.images);
+      this.updateKeys(run, previousKey);
       this.filter();
     } catch (error) {
       if (this.metadata.current(generation) && !isAbort(error))
         this.status.textContent = message(error);
     } finally {
-      if (this.metadata.current(generation)) this.metadataPending = false;
+      if (this.metadata.current(generation)) {
+        this.metadataPending = false;
+        this.queueLive();
+      }
     }
   }
   private filter() {
@@ -790,8 +952,11 @@ export class ImagePanel {
     if (!this.displayed) this.info.textContent = "Frame unavailable";
     const retry = element("button", "", "Retry frame");
     retry.type = "button";
-    const index = this.index;
-    retry.onclick = () => void this.show(index);
+    const id = this.frames[this.index]?.id;
+    retry.onclick = () => {
+      const index = this.frames.findIndex((frame) => frame.id === id);
+      if (index >= 0) void this.show(index);
+    };
     const detail = element("span", "", text);
     this.status.replaceChildren(detail, retry);
   }
@@ -866,16 +1031,16 @@ export class ImagePanel {
       } else this.viewer.viewport.fitBounds(bounds, true);
       this.displayed = frame.id;
       this.viewer.forceRedraw();
-      this.info.textContent = `${this.runs.find((r) => r.id === frame.run_id)?.name ?? "Run"} / ${frame.key}  ·  step ${frame.step}  ·  ${new Date(frame.timestamp).toISOString()}  ·  ${index + 1} of ${this.frames.length}`;
-      if (this.compact) {
-        this.info.textContent = `Step ${frame.step} · ${index + 1} / ${this.frames.length}`;
-        this.info.title = `${this.runs.find((run) => run.id === frame.run_id)?.name ?? "Run"} · ${frame.key} · ${new Date(frame.timestamp).toISOString()}`;
-      }
-      this.info.dataset.step = String(frame.step);
+      // Metadata may have inserted earlier frames while this image decoded.
+      this.index = this.frames.findIndex(
+        (candidate) => candidate.id === frame.id,
+      );
+      this.slider.value = String(this.index);
+      this.updateFrameInfo(this.frames[this.index] ?? frame);
       this.evict(frame.id);
       const prefetch = new AbortController();
       this.prefetchAbort = prefetch;
-      const next = this.frames[index + 1];
+      const next = this.frames[this.index + 1];
       if (next)
         void this.blob(next, prefetch.signal)
           .then(() => this.evict(frame.id))
@@ -1006,8 +1171,11 @@ export class ImagePanel {
     const generation = this.playback.next();
     const current = () => this.playing && this.playback.current(generation);
     // Resume an interrupted/failed frame rather than silently jumping past it.
-    let nextIndex =
-      this.requested !== this.displayed ? this.index : this.index + 1;
+    let nextId =
+      this.requested !== this.displayed
+        ? this.frames[this.index]?.id
+        : undefined;
+    let previousId = nextId ? undefined : this.frames[this.index]?.id;
     let consecutive = 0;
     let skipped = 0;
     let lastSkipped: number | undefined;
@@ -1028,12 +1196,16 @@ export class ImagePanel {
     };
     const advance = async (retry = false) => {
       if (!current()) return;
-      if (nextIndex >= this.frames.length) {
+      const nextIndex = nextId
+        ? this.frames.findIndex((frame) => frame.id === nextId)
+        : this.frames.findIndex((frame) => frame.id === previousId) + 1;
+      if (nextIndex < 0 || nextIndex >= this.frames.length) {
         this.stop();
         this.status.textContent = summary();
         return;
       }
       const frame = this.frames[nextIndex];
+      nextId = frame.id;
       const result = await this.showFrame(
         nextIndex,
         retry ? `Retrying step ${frame.step}… ${summary()}`.trim() : summary(),
@@ -1061,12 +1233,16 @@ export class ImagePanel {
         }
       } else consecutive = 0;
       this.status.textContent = summary();
-      nextIndex++;
+      previousId = frame.id;
+      nextId = undefined;
       schedule();
     };
     schedule();
   }
   clear() {
+    this.cancelLive();
+    this.liveDirty = false;
+    this.liveError = undefined;
     this.resume = false;
     this.resumeFrame = false;
     this.metadataPending = false;

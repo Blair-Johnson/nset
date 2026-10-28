@@ -60,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/views", get(crate::views::list))
         .route("/views/{id}", get(crate::views::get))
         .route("/catalog", get(catalog))
+        .route("/live", get(live_cursor).post(live_poll))
+        .route("/metrics/tail", post(metrics_tail))
         .route("/rx/catalog", get(crate::rx::catalog))
         .merge(
             Router::new()
@@ -333,4 +335,29 @@ async fn durable_status(
     State(state): State<AppState>,
 ) -> Result<Json<crate::ingest::IngestStatus>> {
     Ok(Json(state.ingest.status().await?))
+}
+
+async fn live_cursor(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"cursor": state.db.live().cursor()}))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LivePollRequest {
+    cursor: String,
+}
+async fn live_poll(
+    State(state): State<AppState>,
+    Json(input): Json<LivePollRequest>,
+) -> Result<Json<crate::live::PollResponse>> {
+    if input.cursor.len() > 512 {
+        return Err(ApiError::bad("cursor is too long"));
+    }
+    // No SQLite actor or write-admission slot is held while waiting.
+    Ok(Json(state.db.live().poll(input.cursor).await?))
+}
+async fn metrics_tail(
+    State(state): State<AppState>,
+    Json(query): Json<MetricTailQuery>,
+) -> Result<Json<MetricTailResponse>> {
+    Ok(Json(state.db.metrics_tail(query).await?))
 }

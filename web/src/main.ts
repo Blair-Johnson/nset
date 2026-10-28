@@ -12,6 +12,8 @@ import "./section-drag.css";
 import { SectionDrag } from "./section-drag";
 import { ChartDrag } from "./chart-drag";
 import { Api, type Run } from "./api";
+import { LiveUpdates, type LiveChange, type LiveStatus } from "./live";
+import { applyMetricHints } from "./live-catalog";
 import {
   ServerWorkspace,
   fetchServerView,
@@ -300,6 +302,7 @@ const experimentState = tableState();
 const drawerStates = new Map<string, ReturnType<typeof runDrawerState>>();
 const runFilterSessions = new Map<string, RunFilterSession>();
 let cleanupRunTable: (() => void) | undefined;
+let liveTable: { updateCatalog(next: Catalog): void } | undefined;
 let runDrawer: RunDrawer | undefined;
 function filterSessionFor(experimentId: string) {
   let session = runFilterSessions.get(experimentId);
@@ -372,6 +375,7 @@ function refreshRunFilterSessions() {
     filterSessionFor(experimentId);
 }
 function disposeRunTable() {
+  liveTable = undefined;
   cleanupRunTable?.();
   cleanupRunTable = undefined;
 }
@@ -814,9 +818,13 @@ function renderPage() {
   if (!route.experimentId) {
     suspendDashboard();
     pageHeader("", "");
-    $("page").replaceChildren(
-      experimentTable(catalog, (id) => navigate(id), experimentState),
+    const table = experimentTable(
+      catalog,
+      (id) => navigate(id),
+      experimentState,
     );
+    liveTable = table;
+    $("page").replaceChildren(table);
   } else {
     const experiment = catalog.experiments.find(
       (e) => e.id === route.experimentId,
@@ -890,6 +898,7 @@ function renderPage() {
         () => !!workspace.pendingSelectedRunIds?.length,
       );
       cleanupRunTable = () => table.destroy();
+      liveTable = table;
       table
         .querySelector(".table-toolbar")
         ?.prepend(viewSwitch(experiment.id, "runs"));
@@ -1950,8 +1959,148 @@ function applyChartFilter(workspace: Workspace) {
   syncChartDetails(workspace);
 }
 
+let liveState: LiveStatus = "stopped";
+let liveCacheError: string | null = null;
+let liveCacheErrorTimer: ReturnType<typeof setTimeout> | undefined;
+let liveCacheErrorVisible = false;
+let liveModelTimer: ReturnType<typeof setTimeout> | undefined;
+let liveMetadataPending = false;
+function paintLiveHealth() {
+  if (!connected) return;
+  const unhealthy =
+    liveState === "reconnecting" ||
+    liveState === "unauthorized" ||
+    liveCacheErrorVisible;
+  const text =
+    liveState === "unauthorized"
+      ? "Authentication required"
+      : unhealthy
+        ? "Reconnecting…"
+        : "Connected";
+  if ($("connection").textContent !== text) $("connection").textContent = text;
+  $("connection").classList.toggle("connected", !unhealthy);
+  if ($("connection").dataset.live !== liveState)
+    $("connection").dataset.live = liveState;
+}
+store.setLiveStatusListener((error) => {
+  liveCacheError = error;
+  if (!error) {
+    clearTimeout(liveCacheErrorTimer);
+    liveCacheErrorTimer = undefined;
+    liveCacheErrorVisible = false;
+  } else if (!liveCacheErrorTimer && !liveCacheErrorVisible) {
+    liveCacheErrorTimer = setTimeout(() => {
+      liveCacheErrorTimer = undefined;
+      liveCacheErrorVisible = !!liveCacheError;
+      paintLiveHealth();
+    }, 3000);
+  }
+  paintLiveHealth();
+});
+function scheduleLiveModel(metadata: boolean) {
+  liveMetadataPending ||= metadata;
+  if (liveModelTimer || document.hidden) return;
+  liveModelTimer = setTimeout(() => {
+    liveModelTimer = undefined;
+    if (!connected || document.hidden) return;
+    const metadata = liveMetadataPending;
+    liveMetadataPending = false;
+    if (metadata) refreshRunFilterSessions();
+    liveTable?.updateCatalog(catalog);
+    const workspace = activeChartWorkspace();
+    if (workspace) {
+      if (metadata) {
+        runDrawer?.update(catalog, workspace.selectedRunIds);
+        syncChartDetails(workspace);
+      } else runDrawer?.updateMetrics(catalog);
+    }
+  }, 500);
+}
+function liveCatalogInstalled(next: Catalog, metadata: boolean) {
+  catalog = next;
+  for (const entry of cards.values()) entry.view.updateCatalog(catalog);
+  scheduleLiveModel(metadata);
+}
+async function repairLiveCatalog(signal: AbortSignal, rxOnly = false) {
+  const generation = catalogGeneration;
+  let next: Catalog;
+  if (rxOnly && catalog.rx) {
+    const id = catalog.rx.id;
+    next = await appendRxCatalog(
+      api,
+      {
+        ...catalog,
+        rx: undefined,
+        experiments: catalog.experiments.filter((e) => e.id !== id),
+        runs: catalog.runs.filter((r) => !r.rx),
+        series: catalog.series.filter(
+          (s) => !catalog.runs.some((r) => r.id === s.run_id && r.rx),
+        ),
+      },
+      signal,
+    );
+  } else next = await fetchCatalog(api, signal);
+  if (signal.aborted || !connected || generation !== catalogGeneration)
+    throw new DOMException("Aborted", "AbortError");
+  // A transient external-source error is not an authoritative empty catalog.
+  // Leave the hint unacknowledged so quiet runs recover without another write.
+  if (next.rx?.error) throw new Error(next.rx.error);
+  liveCatalogInstalled(next, true);
+}
+async function applyLiveChanges(changes: LiveChange[], signal: AbortSignal) {
+  const metadata = changes.some(
+    (c) =>
+      c.kind === "catalog" ||
+      c.kind === "image" ||
+      (c.kind === "metric" && !catalog.runs.some((r) => r.id === c.runId)),
+  );
+  const rx = changes.some((c) => c.kind === "rx");
+  if (metadata || rx) await repairLiveCatalog(signal, !metadata && rx);
+  if (signal.aborted) return;
+  const next = applyMetricHints(catalog, changes);
+  if (next !== catalog) liveCatalogInstalled(next, false);
+  store.markDirty(
+    changes
+      .filter((c) => c.kind === "metric")
+      .map((c) => ({ runId: c.runId, key: c.key, kind: "metric" as const })),
+  );
+  for (const entry of cards.values()) {
+    if (rx) entry.view.refreshLiveRecords();
+    for (const change of changes)
+      if (change.kind === "image")
+        entry.view.refreshLiveImages(change.runId, change.key);
+  }
+}
+const live = new LiveUpdates(() => token, {
+  changes: applyLiveChanges,
+  reset: async (signal) => {
+    await repairLiveCatalog(signal);
+    if (signal.aborted) return;
+    store.resetLive();
+    for (const entry of cards.values()) {
+      entry.view.refreshLiveRecords();
+      entry.view.refreshLiveImages();
+    }
+  },
+  status: (state) => {
+    liveState = state;
+    paintLiveHealth();
+  },
+});
+function stopLive() {
+  live.stop();
+  store.setLiveEnabled(false);
+  clearTimeout(liveModelTimer);
+  clearTimeout(liveCacheErrorTimer);
+  liveModelTimer = liveCacheErrorTimer = undefined;
+  liveMetadataPending = false;
+  liveCacheErrorVisible = false;
+  liveCacheError = null;
+  liveState = "stopped";
+}
 async function connect(refresh = false) {
   stopServerPoll();
+  stopLive();
   catalogRefreshing = true;
   for (const session of runFilterSessions.values()) session.invalidate();
   const generation = ++catalogGeneration;
@@ -1966,6 +2115,7 @@ async function connect(refresh = false) {
   $("login-error").textContent = "";
   error();
   try {
+    const liveCursor = await live.prepare(signal);
     const next = await fetchCatalog(api, signal);
     if (generation !== catalogGeneration || signal.aborted) return;
     store.clear();
@@ -1985,6 +2135,9 @@ async function connect(refresh = false) {
           : workspaceFor(currentRoute().experimentId);
       renderCharts(workspace);
     } else renderPage();
+    store.setLiveEnabled(!document.hidden);
+    live.setVisible(!document.hidden);
+    live.start(liveCursor);
     void pollServerViews();
     if (catalog.rx?.error) error(catalog.rx.error);
   } catch (e) {
@@ -1992,9 +2145,12 @@ async function connect(refresh = false) {
     catalogRefreshing = false;
     for (const session of runFilterSessions.values())
       session.invalidate(message(e));
-    if (connected)
+    if (connected) {
       error(`Could not refresh. Previous data is still shown. ${message(e)}`);
-    else {
+      store.setLiveEnabled(!document.hidden);
+      live.setVisible(!document.hidden);
+      live.start();
+    } else {
       $("login-error").textContent = message(e);
       if (!$<HTMLDialogElement>("login-dialog").open)
         $<HTMLDialogElement>("login-dialog").showModal();
@@ -2017,6 +2173,7 @@ $("login-form").onsubmit = (e) => {
 };
 $("refresh").onclick = () => void connect(true);
 $("logout").onclick = () => {
+  stopLive();
   disposeServerView();
   serverViews = [];
   detailRequest?.abort();
@@ -2084,10 +2241,16 @@ document.addEventListener(
   true,
 );
 document.addEventListener("visibilitychange", () => {
+  live.setVisible(!document.hidden);
+  store.setLiveEnabled(connected && !document.hidden);
   if (document.hidden) stopServerPoll();
-  else if (connected) void pollServerViews();
+  else if (connected) {
+    void pollServerViews();
+    scheduleLiveModel(liveMetadataPending);
+  }
 });
 window.addEventListener("beforeunload", () => {
+  stopLive();
   disposeServerView();
   detailRequest?.abort();
   detailRequest = undefined;

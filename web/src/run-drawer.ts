@@ -605,6 +605,12 @@ export class RunDrawer {
       focused.focus({ preventScroll: true });
     this.filter();
   }
+  /** Scalar summaries can change ordering without rebuilding controls or filters. */
+  updateMetrics(catalog: Catalog) {
+    if (!this.catalog) return;
+    this.order = createRunOrder(this.runs, catalog.series);
+    this.update(this.catalog, [...this.selected]);
+  }
   restoreScroll() {
     this.list.scrollTop = this.state.scrollTop;
   }

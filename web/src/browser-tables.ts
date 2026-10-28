@@ -2,6 +2,7 @@ import type { Catalog } from "./workspace-types";
 import type { Experiment, Run } from "./api";
 import { element } from "./utils";
 import { runSwatch } from "./run-drawer";
+import { runColor } from "./series-colors";
 import { RunFilterControl, RunFilterSession } from "./run-filter-session";
 import { parameterLabel } from "./run-table-fields";
 import { createRunOrder, runSortState, type RunSortState } from "./run-order";
@@ -54,12 +55,15 @@ const input = (label: string, value: string) => {
 };
 const cell = (text: string, className = "") => element("td", className, text);
 const pageSize = 50;
+const setText = (node: HTMLElement, text: string) => {
+  if (node.textContent !== text) node.textContent = text;
+};
 
 export function experimentTable(
   catalog: Catalog,
   onOpen: (id: string) => void,
   state = tableState(),
-): HTMLElement {
+): HTMLElement & { updateCatalog(next: Catalog): void } {
   const host = element("section", "browser-panel");
   const tools = element("div", "table-toolbar");
   const search = input("Search experiments", state.query);
@@ -96,8 +100,12 @@ export function experimentTable(
   const pager = element("div", "table-pager");
   host.append(tools, wrap, pager);
   const counts = new Map<string, number>();
-  for (const run of catalog.runs)
-    counts.set(run.experiment_id, (counts.get(run.experiment_id) ?? 0) + 1);
+  let renderedBody = "";
+  function refreshCounts() {
+    counts.clear();
+    for (const run of catalog.runs)
+      counts.set(run.experiment_id, (counts.get(run.experiment_id) ?? 0) + 1);
+  }
   function render() {
     const q = state.query.trim().toLowerCase();
     const rows = catalog.experiments
@@ -115,39 +123,67 @@ export function experimentTable(
       state.page,
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
     );
-    count.textContent = `${rows.length} ${rows.length === 1 ? "experiment" : "experiments"}`;
-    body.replaceChildren();
-    for (const experiment of rows.slice(
+    setText(
+      count,
+      `${rows.length} ${rows.length === 1 ? "experiment" : "experiments"}`,
+    );
+    const pageRows = rows.slice(
       state.page * pageSize,
       (state.page + 1) * pageSize,
-    )) {
-      const tr = element("tr");
-      const name = cell("");
-      name.append(
-        button(
+    );
+    const signature = JSON.stringify([
+      pageRows.map((experiment) => [
+        experiment,
+        counts.get(experiment.id) ?? 0,
+      ]),
+      !!catalog.experiments.length,
+    ]);
+    if (signature !== renderedBody) {
+      renderedBody = signature;
+      const active = document.activeElement;
+      const focusedId =
+        active instanceof HTMLButtonElement && body.contains(active)
+          ? active.dataset.experimentId
+          : undefined;
+      const { scrollTop, scrollLeft } = wrap;
+      body.replaceChildren();
+      for (const experiment of pageRows) {
+        const tr = element("tr");
+        const name = cell("");
+        const link = button(
           experiment.name,
           () => onOpen(experiment.id),
           "text-link experiment-link",
-        ),
-      );
-      tr.append(
-        name,
-        cell(String(counts.get(experiment.id) ?? 0)),
-        cell(timeLabel(experiment.created_at), "muted"),
-      );
-      body.append(tr);
-    }
-    if (!rows.length) {
-      const tr = element("tr");
-      const td = cell(
-        catalog.experiments.length
-          ? "No experiments match your search."
-          : "No experiments yet. Log a run to get started.",
-        "empty-table",
-      );
-      td.colSpan = 3;
-      tr.append(td);
-      body.append(tr);
+        );
+        link.dataset.experimentId = experiment.id;
+        name.append(link);
+        tr.append(
+          name,
+          cell(String(counts.get(experiment.id) ?? 0)),
+          cell(timeLabel(experiment.created_at), "muted"),
+        );
+        body.append(tr);
+      }
+      if (!rows.length) {
+        const tr = element("tr");
+        const td = cell(
+          catalog.experiments.length
+            ? "No experiments match your search."
+            : "No experiments yet. Log a run to get started.",
+          "empty-table",
+        );
+        td.colSpan = 3;
+        tr.append(td);
+        body.append(tr);
+      }
+      if (focusedId)
+        Array.from(
+          body.querySelectorAll<HTMLButtonElement>("[data-experiment-id]"),
+        )
+          .find((link) => link.dataset.experimentId === focusedId)
+          ?.focus({ preventScroll: true });
+      wrap.scrollTop = scrollTop;
+      wrap.scrollLeft = scrollLeft;
     }
     pagination(pager, rows.length, state, render);
   }
@@ -156,8 +192,15 @@ export function experimentTable(
     state.page = 0;
     render();
   };
+  refreshCounts();
   render();
-  return host;
+  return Object.assign(host, {
+    updateCatalog(next: Catalog) {
+      catalog = next;
+      refreshCounts();
+      render();
+    },
+  });
 }
 function pagination(
   host: HTMLElement,
@@ -165,6 +208,9 @@ function pagination(
   state: TableState,
   render: () => void,
 ) {
+  const signature = `${total}:${state.page}`;
+  if (host.dataset.pagination === signature) return;
+  host.dataset.pagination = signature;
   const active = document.activeElement;
   const focusedAction =
     active instanceof HTMLButtonElement && host.contains(active)
@@ -212,7 +258,7 @@ export function runTable(
   session?: RunFilterSession,
   getSelection?: () => string[],
   hasPendingSelection?: () => boolean,
-): HTMLElement & { destroy(): void } {
+): HTMLElement & { updateCatalog(next: Catalog): void; destroy(): void } {
   const host = element("section", "browser-panel");
   const filterSession = session ?? new RunFilterSession();
   if (!session) filterSession.setSearch(state.query, state.status);
@@ -223,26 +269,31 @@ export function runTable(
   let renderedPending = false;
   let renderedError = "";
   let selection = new Set(selectedIds);
-  const runs = catalog.runs.filter((r) => r.experiment_id === experiment.id);
+  let runs = catalog.runs.filter((r) => r.experiment_id === experiment.id);
+  let runRevision = JSON.stringify(runs);
   filterSession.setRuns(
     runs,
     catalog,
     catalog.rx?.id === experiment.id ? catalog.rx : undefined,
   );
-  const { summaries, parameters, sort } = createRunOrder(runs, catalog.series);
-  const keys = [
+  let { summaries, parameters, sort } = createRunOrder(runs, catalog.series);
+  let keys = [
     ...new Set([...summaries.values()].flatMap((m) => [...m.keys()])),
   ].sort();
   if (state.metrics === null) state.metrics = keys.slice(0, 3);
   state.parameters ??= [];
-  const parameterFields = new Map(
+  let parameterFields = new Map(
     [...parameters.values()].flatMap((fields) => [...fields]),
   );
   // Friendly dotted labels, except where a literal-dot key would make two fields
   // read identically; those keep their exact JSONPath so they stay distinguishable.
   const labelCounts = new Map<string, number>();
-  for (const field of parameterFields.values())
-    labelCounts.set(field.label, (labelCounts.get(field.label) ?? 0) + 1);
+  function refreshLabels() {
+    labelCounts.clear();
+    for (const field of parameterFields.values())
+      labelCounts.set(field.label, (labelCounts.get(field.label) ?? 0) + 1);
+  }
+  refreshLabels();
   const parameterName = (key: string) => {
     const label = parameterFields.get(key)?.label;
     return label && labelCounts.get(label) === 1 ? label : key;
@@ -274,46 +325,80 @@ export function runTable(
     group: HTMLElement;
     options: { label: HTMLElement; search: string }[];
   }[] = [];
-  for (const [kind, title, fields] of [
-    [
-      "metrics",
-      "Metrics · latest",
-      keys.map((key) => [key, key.toLowerCase()]),
-    ],
-    [
-      "parameters",
-      "Parameters",
-      [...parameterFields]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, field]) => [key, field.search]),
-    ],
-  ] as const) {
-    const group = element("fieldset", "column-group");
-    group.append(element("legend", "", title));
-    const options: { label: HTMLElement; search: string }[] = [];
-    for (const [key, searchable] of fields) {
-      const label = element("label", "check-option");
-      const check = element("input");
-      check.type = "checkbox";
-      check.checked = state[kind]!.includes(key);
-      check.onchange = () => {
-        state[kind] = check.checked
-          ? [...state[kind]!, key]
-          : state[kind]!.filter((k) => k !== key);
-        render();
-      };
-      label.append(
-        check,
-        element("span", "", kind === "parameters" ? parameterName(key) : key),
-      );
-      label.title = kind === "metrics" ? `${key} · latest logged value` : key;
-      group.append(label);
-      options.push({ label, search: searchable });
+  let renderedColumns = "";
+  function renderColumns() {
+    const signature = JSON.stringify([
+      keys,
+      [...parameterFields].map(([key, field]) => [
+        key,
+        field.label,
+        field.search,
+      ]),
+    ]);
+    if (signature === renderedColumns) return;
+    renderedColumns = signature;
+    const active = document.activeElement;
+    const focused =
+      active instanceof HTMLInputElement && choices.contains(active)
+        ? { kind: active.dataset.columnKind, key: active.dataset.columnKey }
+        : undefined;
+    const scrollTop = choices.scrollTop;
+    groups.length = 0;
+    choices.replaceChildren();
+    for (const [kind, title, fields] of [
+      [
+        "metrics",
+        "Metrics · latest",
+        keys.map((key) => [key, key.toLowerCase()]),
+      ],
+      [
+        "parameters",
+        "Parameters",
+        [...parameterFields]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, field]) => [key, field.search]),
+      ],
+    ] as const) {
+      const group = element("fieldset", "column-group");
+      group.append(element("legend", "", title));
+      const options: { label: HTMLElement; search: string }[] = [];
+      for (const [key, searchable] of fields) {
+        const label = element("label", "check-option");
+        const check = element("input");
+        check.type = "checkbox";
+        check.dataset.columnKind = kind;
+        check.dataset.columnKey = key;
+        check.checked = state[kind]!.includes(key);
+        check.onchange = () => {
+          state[kind] = check.checked
+            ? [...state[kind]!, key]
+            : state[kind]!.filter((k) => k !== key);
+          render();
+        };
+        label.append(
+          check,
+          element("span", "", kind === "parameters" ? parameterName(key) : key),
+        );
+        label.title = kind === "metrics" ? `${key} · latest logged value` : key;
+        group.append(label);
+        options.push({ label, search: searchable });
+      }
+      groups.push({ group, options });
+      choices.append(group);
     }
-    groups.push({ group, options });
-    choices.append(group);
+
+    filterColumns(false);
+    if (focused)
+      Array.from(choices.querySelectorAll<HTMLInputElement>("input"))
+        .find(
+          (check) =>
+            check.dataset.columnKind === focused.kind &&
+            check.dataset.columnKey === focused.key,
+        )
+        ?.focus({ preventScroll: true });
+    choices.scrollTop = scrollTop;
   }
-  function filterColumns() {
+  function filterColumns(resetScroll = true) {
     const query = columnSearch.value.trim().toLowerCase();
     state.columnQuery = columnSearch.value;
     let matches = 0;
@@ -327,9 +412,9 @@ export function runTable(
       matches += count;
     }
     empty.hidden = matches > 0;
-    choices.scrollTop = 0;
+    if (resetScroll) choices.scrollTop = 0;
   }
-  columnSearch.oninput = filterColumns;
+  columnSearch.oninput = () => filterColumns();
   columns.onkeydown = (event) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
@@ -337,7 +422,7 @@ export function runTable(
     columnsSummary.focus();
   };
   columnMenu.append(columnSearch, choices, empty);
-  filterColumns();
+  renderColumns();
   columns.append(columnMenu);
   const chartButton = button("View charts", onCharts, "primary");
   const selected = element("span", "selection-count");
@@ -387,7 +472,7 @@ export function runTable(
       body.querySelector("tr")?.getBoundingClientRect().height || 35;
     const rows = Math.ceil(Math.max(0, hiddenPx - 1) / rowHeight);
     below.hidden = rows <= 0;
-    below.textContent = `↓ ${rows} more below`;
+    setText(below, `↓ ${rows} more below`);
   };
   wrap.addEventListener("scroll", updateBelow, { passive: true });
   const observer = new ResizeObserver(updateBelow);
@@ -404,7 +489,8 @@ export function runTable(
   window.addEventListener("resize", fit);
   const fitFrame = requestAnimationFrame(fit);
   function changed(clearPending = false) {
-    if (onSelection([...selection], clearPending) === false) selection = new Set(selectedIds);
+    if (onSelection([...selection], clearPending) === false)
+      selection = new Set(selectedIds);
     else {
       selectedIds = getSelection?.() ?? [...selection];
       selection = new Set(selectedIds);
@@ -417,9 +503,12 @@ export function runTable(
       state,
     );
   }
+  let renderedHeader = "";
+  let renderedBody = "";
   function render() {
     if (destroyed) return;
-    // Filtering/sorting rebuilds the header and rows. Retain identity, not a detached
+    const { scrollTop, scrollLeft } = wrap;
+    // When filtering/sorting or live data rebuild controls, retain identity, not a detached
     // element or row index (names may repeat and sorting may change).
     const active = document.activeElement;
     const focused =
@@ -432,6 +521,13 @@ export function runTable(
       active instanceof HTMLButtonElement && head.contains(active)
         ? active.dataset.sortKey
         : undefined;
+    const focusedButton =
+      active instanceof HTMLButtonElement && body.contains(active)
+        ? {
+            runId: active.closest<HTMLTableRowElement>("tr")?.dataset.runId,
+            color: active.classList.contains("run-color-button"),
+          }
+        : undefined;
     let restoreFocus: HTMLElement | undefined;
     const rows = visible();
     renderedRows = rows;
@@ -441,132 +537,179 @@ export function runTable(
       state.page,
       Math.max(0, Math.ceil(rows.length / pageSize) - 1),
     );
-    selected.textContent = `${selection.size} selected`;
+    setText(selected, `${selection.size} selected`);
     clear.hidden = !selection.size && !hasPendingSelection?.();
     chartButton.disabled = !selection.size;
-    head.replaceChildren();
-    body.replaceChildren();
-    const header = element("tr");
-    const choose = element("th");
-    const all = element("input");
-    all.type = "checkbox";
-    all.dataset.selectAll = "";
-    if (focusedAll) restoreFocus = all;
-    all.setAttribute("aria-label", "Select all matching runs");
-    all.checked = rows.length > 0 && rows.every((r) => selection.has(r.id));
-    all.indeterminate = !all.checked && rows.some((r) => selection.has(r.id));
-    all.onchange = () => {
-      for (const r of rows) {
-        if (all.checked) selection.add(r.id);
-        else selection.delete(r.id);
-      }
-      changed();
-    };
-    choose.append(all);
-    header.append(choose);
-    for (const [key, label] of [
+    const headerFields = [
       ["name", "Run"],
       ["status", "Status"],
       ["created_at", "Created"],
       ...state.metrics!.map((k) => [`metric:${k}`, `${k} · latest`]),
       ...state.parameters!.map((k) => [`parameter:${k}`, parameterName(k)]),
-    ]) {
-      const th = element("th");
-      th.setAttribute(
-        "aria-sort",
-        state.sort === key
-          ? state.descending
-            ? "descending"
-            : "ascending"
-          : "none",
-      );
-      const control = button(
-        label + (state.sort === key ? (state.descending ? " ↓" : " ↑") : ""),
-        () => {
-          state.descending = state.sort === key ? !state.descending : false;
-          state.sort = key;
-          render();
-        },
-        "sort-button",
-      );
-      control.dataset.sortKey = key;
-      if (focusedSort === key) restoreFocus = control;
-      control.title = key.startsWith("metric:") ? "Latest logged value" : label;
-      if (key.startsWith("metric:")) th.classList.add("number-header");
-      if (key.startsWith("parameter:")) {
-        th.classList.add("parameter-header");
-        control.title = `Parameter ${label}`;
-      }
-      th.append(control);
-      header.append(th);
-    }
-    head.append(header);
-    for (const run of rows.slice(
-      state.page * pageSize,
-      (state.page + 1) * pageSize,
-    )) {
-      const tr = element("tr");
-      tr.dataset.runId = run.id;
-      const td = cell("");
-      const check = element("input");
-      check.type = "checkbox";
-      check.checked = selection.has(run.id);
-      check.dataset.runId = run.id;
-      if (focusedRunId === run.id) restoreFocus = check;
-      check.setAttribute("aria-label", `Select ${run.name}`);
-      check.onchange = () => {
-        if (check.checked) selection.add(run.id);
-        else selection.delete(run.id);
+    ];
+    const headerSignature = JSON.stringify([
+      headerFields,
+      state.sort,
+      state.descending,
+    ]);
+    if (headerSignature !== renderedHeader) {
+      renderedHeader = headerSignature;
+      head.replaceChildren();
+      const header = element("tr");
+      const choose = element("th");
+      const all = element("input");
+      all.type = "checkbox";
+      all.dataset.selectAll = "";
+      if (focusedAll) restoreFocus = all;
+      all.setAttribute("aria-label", "Select all matching runs");
+      all.onchange = () => {
+        for (const r of visible()) {
+          if (all.checked) selection.add(r.id);
+          else selection.delete(r.id);
+        }
         changed();
       };
-      td.append(check);
-      const name = cell("");
-      const identity = element("div", "run-identity");
-      const link = button(run.name, () => onDetails(run), "text-link run-link");
-      link.title = run.name;
-      identity.append(link, runSwatch(catalog, run.id));
-      name.append(identity);
-      const stateCell = cell("");
-      stateCell.append(
-        element(
-          "span",
-          `status status-${run.status}`,
-          run.status[0].toUpperCase() + run.status.slice(1),
-        ),
-      );
-      tr.append(td, name, stateCell, cell(timeLabel(run.created_at), "muted"));
-      for (const key of state.metrics!) {
-        const summary = summaries.get(run.id)?.get(key);
-        const metric = cell(numberLabel(summary?.last_value), "number-cell");
-        if (summary)
-          metric.title = `Latest logged value · Step ${summary.last_step} · ${summary.count.toLocaleString()} logged values`;
-        tr.append(metric);
+      choose.append(all);
+      header.append(choose);
+      for (const [key, label] of headerFields) {
+        const th = element("th");
+        th.setAttribute(
+          "aria-sort",
+          state.sort === key
+            ? state.descending
+              ? "descending"
+              : "ascending"
+            : "none",
+        );
+        const control = button(
+          label + (state.sort === key ? (state.descending ? " ↓" : " ↑") : ""),
+          () => {
+            state.descending = state.sort === key ? !state.descending : false;
+            state.sort = key;
+            render();
+          },
+          "sort-button",
+        );
+        control.dataset.sortKey = key;
+        if (focusedSort === key) restoreFocus = control;
+        control.title = key.startsWith("metric:")
+          ? "Latest logged value"
+          : label;
+        if (key.startsWith("metric:")) th.classList.add("number-header");
+        if (key.startsWith("parameter:")) {
+          th.classList.add("parameter-header");
+          control.title = `Parameter ${label}`;
+        }
+        th.append(control);
+        header.append(th);
       }
-      for (const key of state.parameters!) {
-        const value = parameters.get(run.id)?.get(key)?.value;
-        const parameter = cell(parameterLabel(value), "parameter-cell");
-        parameter.title = `${parameterName(key)}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
-        tr.append(parameter);
-      }
-      body.append(tr);
+      head.append(header);
     }
-    if (!rows.length && !filterSession.error) {
-      const tr = element("tr");
-      const td = cell(
-        runs.length
-          ? filterSession.pending
-            ? ""
-            : "No runs match your filters."
-          : "No runs in this experiment yet.",
-        "empty-table",
-      );
-      td.colSpan = 4 + state.metrics!.length + state.parameters!.length;
-      tr.append(td);
-      body.append(tr);
+    const all = head.querySelector<HTMLInputElement>("[data-select-all]")!;
+    if (focusedAll) restoreFocus = all;
+    all.checked = rows.length > 0 && rows.every((r) => selection.has(r.id));
+    all.indeterminate = !all.checked && rows.some((r) => selection.has(r.id));
+    const pageRows = rows.slice(
+      state.page * pageSize,
+      (state.page + 1) * pageSize,
+    );
+    const bodySignature = JSON.stringify([
+      headerFields,
+      pageRows.map((run) => [
+        run,
+        selection.has(run.id),
+        runColor(catalog, run.id),
+        state.metrics!.map((key) => summaries.get(run.id)?.get(key)),
+        state.parameters!.map((key) => parameters.get(run.id)?.get(key)?.value),
+      ]),
+      !!runs.length,
+      renderedPending,
+      renderedError,
+    ]);
+    if (bodySignature !== renderedBody) {
+      renderedBody = bodySignature;
+      body.replaceChildren();
+      for (const run of pageRows) {
+        const tr = element("tr");
+        tr.dataset.runId = run.id;
+        const td = cell("");
+        const check = element("input");
+        check.type = "checkbox";
+        check.checked = selection.has(run.id);
+        check.dataset.runId = run.id;
+        if (focusedRunId === run.id) restoreFocus = check;
+        check.setAttribute("aria-label", `Select ${run.name}`);
+        check.onchange = () => {
+          if (check.checked) selection.add(run.id);
+          else selection.delete(run.id);
+          changed();
+        };
+        td.append(check);
+        const name = cell("");
+        const identity = element("div", "run-identity");
+        const link = button(
+          run.name,
+          () => {
+            const current = runs.find((candidate) => candidate.id === run.id);
+            if (current) onDetails(current);
+          },
+          "text-link run-link",
+        );
+        link.title = run.name;
+        const swatch = runSwatch(catalog, run.id);
+        identity.append(link, swatch);
+        if (focusedButton?.runId === run.id)
+          restoreFocus = focusedButton.color
+            ? (swatch.querySelector<HTMLButtonElement>("button") ?? undefined)
+            : link;
+        name.append(identity);
+        const stateCell = cell("");
+        stateCell.append(
+          element(
+            "span",
+            `status status-${run.status}`,
+            run.status[0].toUpperCase() + run.status.slice(1),
+          ),
+        );
+        tr.append(
+          td,
+          name,
+          stateCell,
+          cell(timeLabel(run.created_at), "muted"),
+        );
+        for (const key of state.metrics!) {
+          const summary = summaries.get(run.id)?.get(key);
+          const metric = cell(numberLabel(summary?.last_value), "number-cell");
+          if (summary)
+            metric.title = `Latest logged value · Step ${summary.last_step} · ${summary.count.toLocaleString()} logged values`;
+          tr.append(metric);
+        }
+        for (const key of state.parameters!) {
+          const value = parameters.get(run.id)?.get(key)?.value;
+          const parameter = cell(parameterLabel(value), "parameter-cell");
+          parameter.title = `${parameterName(key)}: ${value === undefined ? "Missing parameter" : parameterLabel(value)}`;
+          tr.append(parameter);
+        }
+        body.append(tr);
+      }
+      if (!rows.length && !filterSession.error) {
+        const tr = element("tr");
+        const td = cell(
+          runs.length
+            ? filterSession.pending
+              ? ""
+              : "No runs match your filters."
+            : "No runs in this experiment yet.",
+          "empty-table",
+        );
+        td.colSpan = 4 + state.metrics!.length + state.parameters!.length;
+        tr.append(td);
+        body.append(tr);
+      }
     }
     pagination(pager, rows.length, state, render);
     const shown = Math.min(pageSize, rows.length - state.page * pageSize);
-    summary.textContent = [
+    const summaryText = [
       `${runs.length} run${runs.length === 1 ? "" : "s"}`,
       rows.length !== runs.length ? `${rows.length} matching` : "",
       rows.length > pageSize ? `${Math.max(0, shown)} on this page` : "",
@@ -574,9 +717,12 @@ export function runTable(
     ]
       .filter(Boolean)
       .join(" · ");
+    setText(summary, summaryText);
     cancelAnimationFrame(belowFrame);
     belowFrame = requestAnimationFrame(updateBelow);
     restoreFocus?.focus({ preventScroll: true });
+    wrap.scrollTop = scrollTop;
+    wrap.scrollLeft = scrollLeft;
   }
   search.oninput = () => {
     state.query = search.value;
@@ -599,7 +745,8 @@ export function runTable(
     selection = new Set(ids);
     clear.hidden = !selection.size && !hasPendingSelection?.();
     selected.title = hasPendingSelection?.()
-      ? "Some selected runs await filter evidence and are not plotted. Clear cancels them too." : "";
+      ? "Some selected runs await filter evidence and are not plotted. Clear cancels them too."
+      : "";
     // Scan progress may change without changing any verified matches. Keep the
     // table (and keyboard focus) intact until its actual row set changes.
     const rows = visible();
@@ -615,6 +762,33 @@ export function runTable(
   filterSlot.append(filterControl.root);
   render();
   return Object.assign(host, {
+    updateCatalog(next: Catalog) {
+      if (destroyed) return;
+      catalog = next;
+      runs = catalog.runs.filter((run) => run.experiment_id === experiment.id);
+      ({ summaries, parameters, sort } = createRunOrder(runs, catalog.series));
+      keys = [
+        ...new Set(
+          [...summaries.values()].flatMap((fields) => [...fields.keys()]),
+        ),
+      ].sort();
+      parameterFields = new Map(
+        [...parameters.values()].flatMap((fields) => [...fields]),
+      );
+      refreshLabels();
+      renderColumns();
+      // Shared sessions are refreshed by the caller on metadata changes only.
+      // A metric tick must not reset filter proofs or reconcile workspace selection.
+      const nextRunRevision = JSON.stringify(runs);
+      if (!session && nextRunRevision !== runRevision)
+        filterSession.setRuns(
+          runs,
+          catalog,
+          catalog.rx?.id === experiment.id ? catalog.rx : undefined,
+        );
+      runRevision = nextRunRevision;
+      render();
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;

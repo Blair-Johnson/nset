@@ -78,6 +78,8 @@ pub struct Run {
 /// Compact discovery metadata; observations and image contents stay on their own routes.
 #[derive(Serialize, Debug)]
 pub struct Catalog {
+    /// Global committed metric high-water captured in the catalog read snapshot.
+    pub metric_seq: i64,
     pub experiments: Vec<Experiment>,
     pub runs: Vec<Run>,
     pub series: Vec<CatalogSeries>,
@@ -149,7 +151,7 @@ impl MetricInput {
 pub struct MetricBatch {
     pub metrics: Vec<MetricInput>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Metric {
     pub seq: i64,
     pub key: String,
@@ -187,4 +189,36 @@ pub struct ImageQuery {
     pub step: i64,
     #[serde(default = "now")]
     pub timestamp: i64,
+}
+
+/// Count-free, per-stream keyset pagination. All streams share one read snapshot.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricTailQuery {
+    pub series: Vec<MetricTailStream>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub limit: Option<usize>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricTailStream {
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    pub key: String,
+    pub after: i64,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub snapshot: Option<i64>,
+}
+#[derive(Serialize)]
+pub struct MetricTailResponse {
+    pub series: Vec<MetricTailPage>,
+}
+#[derive(Serialize)]
+pub struct MetricTailPage {
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    pub key: String,
+    pub points: Vec<Metric>,
+    pub snapshot: i64,
+    pub next_after: Option<i64>,
 }

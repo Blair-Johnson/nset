@@ -66,6 +66,16 @@ W&B file, media, and Artifact uploads/downloads, sweeps, registries, full Public
 
 These adapters implement a scoped tracking subset. The locked SDK test environment uses mlflow-skinny 3.17.2 and W&B 0.31.0; other versions need validation. See [development checks](contributing.md#checks).
 
+## Live monitoring
+
+The UI follows committed, query-visible data automatically. It keeps one authenticated long poll per visible tab, batches changed native scalar streams, and fetches only observations beyond each stream's sequence cursor. Hidden tabs suspend updates and catch up when shown again. The existing Connected indicator reflects channel health, not training frequency: empty responses keep an idle run connected, while sustained failures show Reconnecting. A durable-ingest receipt alone does not trigger an update; projection into the query database does.
+
+For custom consumers, `GET /api/live` returns `{cursor}`. Capture it before loading the catalog and histories, then repeatedly `POST /api/live` with `{cursor}`. Responses contain `{cursor, reset, changes}`; unchanged cursors wait up to 20 seconds and return an empty healthy response. Changes identify metric streams (`kind`, `runId`, `key`, `high`, transaction-local `count`, and `last` observation), image streams, catalog metadata, or the external rx source. A restart or expired replay window returns `reset: true`: reload authoritative state, then resume from the returned cursor. The bounded feed is a notification mechanism, not a durable event journal. Acknowledge a cursor only after retaining its work for retry.
+
+`POST /api/metrics/tail` accepts `{series: [{runId, key, after, snapshot?}], limit?}` for up to 64 native streams, with 1–1000 points per stream per page (default 1000). Each result supplies `points`, `snapshot`, and `next_after` alongside its identity. Pin the returned snapshot while paging; after completion, retain that snapshot as the next `after` and omit the snapshot to open a new window. Sequence numbers, not steps or timestamps, identify observations. Unlike full-history reads, tails do not count historical rows. The catalog's `metric_seq` watermark prevents double-counting summary hints already included in its snapshot. All endpoints require the normal Bearer header; tokens do not belong in URLs.
+
+External rx changes are detected with one read-only database monitor, including WAL commits and file replacement. Active rx charts currently refresh their selected record queries rather than tailing them incrementally. Image changes refresh metadata without resetting the selected frame or camera. Native notifications cover the server's writer and durable projection, not unsupported direct writes to its SQLite files.
+
 ## Server storage and recovery
 
 Keep the `--db-path` directory on local storage. Stop the server before backing up the whole directory together: `nset.sqlite3`, `ingest.sqlite3`, native images, `nset.lock`, and any SQLite WAL/SHM sidecars. Restore them from the same backup. Native client spools and W&B offline runs also need retention until delivery is confirmed.

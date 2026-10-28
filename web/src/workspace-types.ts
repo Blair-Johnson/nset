@@ -13,6 +13,8 @@ export interface CatalogSeries {
   last_value: number | null;
 }
 export interface Catalog {
+  /** Native metric watermark captured with this catalog snapshot. */
+  metric_seq?: number;
   rx?: {
     id: string;
     name: string;
@@ -116,6 +118,11 @@ export interface MetricLoader {
     onProgress?: (done: number, total: number) => void,
   ): Promise<Point[]>;
   clear(): void;
+  watch?(refs: SeriesRef[], onChange: () => void): () => void;
+  markDirty?(refs?: SeriesRef[]): void;
+  setLiveEnabled?(enabled: boolean): void;
+  resetLive?(): void;
+  setLiveStatusListener?(callback: (error: string | null) => void): void;
 }
 export interface CardContext {
   api: Api;

@@ -192,7 +192,13 @@ export class PlotNavigation {
     // Fit is captured after trusted configured range resolution. Interactive limits
     // must not be fed back through hard editor ranges or native x->y autoscaling.
     for (const axis of ["x", "y"] as const) {
-      u.scales[axis].range = (_u, lo, hi) => [lo, hi];
+      // Native setSeries(show) still requests an automatic range with null
+      // bounds even when auto is false. Visibility must not erase the camera
+      // (including when every trace is hidden); explicit navigation stays exact.
+      u.scales[axis].range = (_u, lo, hi) => [
+        lo ?? u.scales[axis].min!,
+        hi ?? u.scales[axis].max!,
+      ];
       u.scales[axis].auto = () => false;
     }
     u.cursor.drag!.x = u.cursor.drag!.y = u.cursor.drag!.setScale = false;
@@ -294,11 +300,20 @@ export class PlotNavigation {
       zoomed: !sameView(view, this.fit),
     };
   }
+  /** Live data must not change coordinates beneath an uncommitted gesture. */
+  interacting(): boolean {
+    return !!this.gesture || this.contacts.size > 0 || !!this.wheelPending;
+  }
+  /** Replace the reset target, retaining both the camera and every Back entry. */
+  updateFit(fit: Viewport): void {
+    const follow = !this.snapshot()?.zoomed;
+    this.fit = copyView(fit);
+    if (follow) this.apply(copyView(fit), false);
+  }
   /** Re-apply a zoomed camera and its back-history; an un-zoomed plot keeps its new fit. */
   restore(snapshot: NavigationSnapshot) {
-    if (!snapshot.zoomed) return;
     for (const view of snapshot.history) this.history.push(view);
-    this.apply(copyView(snapshot.view), false);
+    if (snapshot.zoomed) this.apply(copyView(snapshot.view), false);
   }
   /** Display a view exactly (e.g. a camera handed over from another panel). */
   show(view: Viewport) {
@@ -441,8 +456,11 @@ export class PlotNavigation {
     return false;
   }
   private nativeEvent = (e: Event) => {
-    if (this.options.mode !== "navigate" ||
-        (!e.type.startsWith("touch") && !this.touchInput)) return;
+    if (
+      this.options.mode !== "navigate" ||
+      (!e.type.startsWith("touch") && !this.touchInput)
+    )
+      return;
     if (e.cancelable) e.preventDefault();
     e.stopImmediatePropagation();
   };

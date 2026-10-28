@@ -1,5 +1,11 @@
 import { appendRxCatalog } from "./records";
-import type { Api, Experiment, Run } from "./api";
+import {
+  HttpError,
+  MetricProtocolError,
+  type Api,
+  type Experiment,
+  type Run,
+} from "./api";
 import { assertSafe } from "./config";
 import type { Point } from "./math";
 import type {
@@ -80,7 +86,10 @@ export async function fetchCatalog(
   const data = record(JSON.parse(body));
   if (
     Object.keys(data).some(
-      (key) => !["experiments", "runs", "series", "rx_enabled"].includes(key),
+      (key) =>
+        !["experiments", "runs", "series", "rx_enabled", "metric_seq"].includes(
+          key,
+        ),
     )
   )
     throw new Error("Unknown catalog field.");
@@ -141,7 +150,16 @@ export async function fetchCatalog(
   distinct(
     series.map((s) => seriesId({ runId: s.run_id, key: s.key, kind: s.kind })),
   );
-  const catalog = { experiments, runs, series };
+  const catalog: Catalog = { experiments, runs, series };
+  if (data.metric_seq !== undefined) {
+    if (
+      typeof data.metric_seq !== "number" ||
+      !Number.isSafeInteger(data.metric_seq) ||
+      data.metric_seq < 0
+    )
+      throw new Error("Invalid catalog metric_seq.");
+    catalog.metric_seq = data.metric_seq;
+  }
   return data.rx_enabled === true
     ? appendRxCatalog(api, catalog, signal)
     : catalog;
@@ -154,21 +172,41 @@ interface Subscriber {
   progress?: (done: number, total: number) => void;
   cleanup: () => void;
 }
-interface Request {
+interface Watch {
+  callback: () => void;
+}
+interface Entry {
   key: string;
   ref: SeriesRef;
-  controller: AbortController;
+  points?: Point[];
+  snapshot: number;
+  dirty: number;
+  clean: number;
+  full: boolean;
+  watchers: Set<Watch>;
   subscribers: Set<Subscriber>;
+  request?: Request;
+  failures: number;
+  retryAt: number;
+}
+interface Request {
+  entry: Entry;
+  controller: AbortController;
   generation: number;
+  version: number;
   progress?: [number, number];
 }
-/** Cache contains only complete Api.metrics snapshots; pending entries are never published. */
+/** Only complete snapshots are published. Watched prefixes are pinned beyond the LRU budget. */
 export class MetricStore implements MetricLoader {
-  private readonly cache = new Map<string, Point[]>();
-  private readonly requests = new Map<string, Request>();
+  private readonly entries = new Map<string, Entry>();
   private queue: Request[] = [];
   private active = 0;
   private generation = 0;
+  private enabled = true;
+  private timer?: ReturnType<typeof setTimeout>;
+  private tail?: AbortController;
+  private status?: (error: string | null) => void;
+  private error: string | null = null;
   constructor(
     private readonly api: Api,
     private readonly maxConcurrent = 4,
@@ -184,6 +222,32 @@ export class MetricStore implements MetricLoader {
     )
       throw new Error("Invalid metric store limits.");
   }
+  private entry(ref: SeriesRef): Entry {
+    const key = seriesId(ref);
+    let entry = this.entries.get(key);
+    if (!entry) {
+      entry = {
+        key,
+        ref: { ...ref },
+        snapshot: 0,
+        dirty: 0,
+        clean: -1,
+        full: true,
+        watchers: new Set(),
+        subscribers: new Set(),
+        failures: 0,
+        retryAt: 0,
+      };
+      this.entries.set(key, entry);
+    }
+    return entry;
+  }
+  private demanded(entry: Entry): boolean {
+    return entry.watchers.size > 0 || entry.subscribers.size > 0;
+  }
+  private dirty(entry: Entry): boolean {
+    return entry.full || !entry.points || entry.clean !== entry.dirty;
+  }
   load(
     ref: SeriesRef,
     signal?: AbortSignal,
@@ -192,46 +256,35 @@ export class MetricStore implements MetricLoader {
     if (signal?.aborted) return Promise.reject(aborted());
     if (ref.kind !== "metric")
       return Promise.reject(new Error("MetricStore loads metric series only."));
-    const key = seriesId(ref);
-    const cached = this.cache.get(key);
-    if (cached) {
-      const generation = this.generation;
-      this.cache.delete(key);
-      this.cache.set(key, cached);
+    const entry = this.entry(ref);
+    if (!this.dirty(entry)) {
+      const generation = this.generation,
+        points = entry.points!;
+      this.touch(entry);
       return new Promise((resolve, reject) =>
         queueMicrotask(() => {
-          if (signal?.aborted || generation !== this.generation) {
-            reject(aborted());
-            return;
-          }
-          this.notify(onProgress, cached.length, cached.length);
-          resolve(cached);
+          if (signal?.aborted || generation !== this.generation)
+            return reject(aborted());
+          this.notify(onProgress, points.length, points.length);
+          resolve(points);
         }),
       );
     }
-    let request = this.requests.get(key);
-    if (!request) {
-      request = {
-        key,
-        ref: { ...ref },
-        controller: new AbortController(),
-        subscribers: new Set(),
-        generation: this.generation,
-      };
-      this.requests.set(key, request);
-      this.queue.push(request);
-    }
-    const entry = request;
+    entry.failures = 0;
+    entry.retryAt = 0;
     return new Promise((resolve, reject) => {
       const cancel = () => {
         entry.subscribers.delete(subscriber);
         subscriber.cleanup();
         reject(aborted());
-        if (!entry.subscribers.size) {
-          entry.controller.abort();
-          if (this.requests.get(key) === entry) this.requests.delete(key);
-          this.queue = this.queue.filter((item) => item !== entry);
+        if (!this.demanded(entry) && entry.request) {
+          entry.request.controller.abort();
+          this.queue = this.queue.filter(
+            (request) => request !== entry.request,
+          );
+          entry.request = undefined;
         }
+        this.evict();
       };
       const subscriber: Subscriber = {
         resolve,
@@ -241,20 +294,131 @@ export class MetricStore implements MetricLoader {
       };
       entry.subscribers.add(subscriber);
       signal?.addEventListener("abort", cancel, { once: true });
-      if (entry.progress) this.notify(onProgress, ...entry.progress);
-      this.pump();
+      if (entry.request?.progress)
+        this.notify(onProgress, ...entry.request.progress);
+      this.ensure(entry, true);
     });
   }
+  watch(refs: SeriesRef[], onChange: () => void): () => void {
+    const watch: Watch = { callback: onChange };
+    const entries = [
+      ...new Map(
+        refs
+          .filter((ref) => ref.kind === "metric")
+          .map((ref) => [seriesId(ref), this.entry(ref)]),
+      ).values(),
+    ];
+    for (const entry of entries) {
+      entry.watchers.add(watch);
+      entry.failures = 0;
+      entry.retryAt = 0;
+      this.ensure(entry);
+    }
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      for (const entry of entries) {
+        entry.watchers.delete(watch);
+        if (!this.demanded(entry) && entry.request) {
+          entry.request.controller.abort();
+          this.queue = this.queue.filter(
+            (request) => request !== entry.request,
+          );
+          entry.request = undefined;
+        }
+      }
+      this.evict();
+    };
+  }
+  markDirty(refs?: SeriesRef[]): void {
+    const entries =
+      refs === undefined
+        ? [...this.entries.values()]
+        : [
+            ...new Set(
+              refs
+                .filter((ref) => ref.kind === "metric")
+                .map((ref) => this.entries.get(seriesId(ref)))
+                .filter((entry): entry is Entry => !!entry),
+            ),
+          ];
+    for (const entry of entries) {
+      entry.dirty++;
+      entry.failures = 0;
+      entry.retryAt = 0;
+    }
+    this.schedule();
+  }
+  setLiveEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (!enabled) {
+      this.stopTimer();
+      this.tail?.abort();
+    } else {
+      for (const entry of this.entries.values()) this.ensure(entry);
+      this.schedule();
+    }
+  }
+  setLiveStatusListener(callback: (error: string | null) => void): void {
+    this.status = callback;
+    try {
+      callback(this.error);
+    } catch {
+      /* UI callback isolation. */
+    }
+  }
+  /** Invalidate authoritative prefixes, not arrays already retained by cards. */
+  resetLive(): void {
+    this.invalidate();
+    for (const entry of this.entries.values()) {
+      entry.full = true;
+      entry.dirty++;
+      entry.failures = 0;
+      entry.retryAt = 0;
+      this.ensure(entry);
+    }
+    this.evict();
+  }
   clear(): void {
+    this.invalidate();
+    for (const entry of this.entries.values()) {
+      entry.points = undefined;
+      entry.snapshot = 0;
+      entry.full = true;
+      entry.dirty++;
+      entry.failures = 0;
+      entry.retryAt = 0;
+    }
+    this.evict();
+    // Preserve subscriptions; a coalesced revalidation allows callers to dispose old cards first.
+    this.schedule();
+  }
+  private invalidate(): void {
     this.generation++;
-    this.cache.clear();
+    this.stopTimer();
+    this.tail?.abort();
     this.queue = [];
-    for (const entry of this.requests.values()) {
-      entry.controller.abort();
+    for (const entry of this.entries.values()) {
+      entry.request?.controller.abort();
+      entry.request = undefined;
       this.settle(entry, undefined, aborted());
     }
-    this.requests.clear();
-    // Active slots remain occupied until aborted transports actually settle.
+    this.report(null);
+    // Initial slots and the batch flight remain occupied until transport settles.
+  }
+  private stopTimer(): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+  private report(error: string | null): void {
+    if (this.error === error) return;
+    this.error = error;
+    try {
+      this.status?.(error);
+    } catch {
+      /* UI callback isolation. */
+    }
   }
   private notify(
     callback: Subscriber["progress"],
@@ -264,60 +428,239 @@ export class MetricStore implements MetricLoader {
     try {
       callback?.(done, total);
     } catch {
-      /* A UI callback cannot corrupt shared loading. */
+      /* UI callback isolation. */
     }
   }
-  private settle(entry: Request, points?: Point[], error?: unknown): void {
+  private changed(entries: Entry[]): void {
+    const watchers = new Set(entries.flatMap((entry) => [...entry.watchers]));
+    for (const watch of watchers) {
+      try {
+        watch.callback();
+      } catch {
+        /* UI callback isolation. */
+      }
+    }
+    if (
+      ![...this.entries.values()].some(
+        (entry) => this.demanded(entry) && entry.failures,
+      )
+    )
+      this.report(null);
+  }
+  private settle(entry: Entry, points?: Point[], error?: unknown): void {
     for (const subscriber of entry.subscribers) {
       subscriber.cleanup();
-      if (points) subscriber.resolve(points);
-      else subscriber.reject(error);
+      if (points) {
+        this.notify(subscriber.progress, points.length, points.length);
+        subscriber.resolve(points);
+      } else subscriber.reject(error);
     }
     entry.subscribers.clear();
   }
-  private pump(): void {
-    while (this.active < this.maxConcurrent && this.queue.length) {
-      const entry = this.queue.shift()!;
-      if (entry.controller.signal.aborted || !entry.subscribers.size) continue;
-      this.active++;
-      void this.execute(entry);
+  private touch(entry: Entry): void {
+    this.entries.delete(entry.key);
+    this.entries.set(entry.key, entry);
+  }
+  private evict(): void {
+    let count = [...this.entries.values()].filter(
+      (entry) => !!entry.points,
+    ).length;
+    for (const [key, entry] of this.entries) {
+      if (this.demanded(entry) || entry.request) continue;
+      if (!entry.points || count > this.maxEntries) {
+        if (entry.points) count--;
+        this.entries.delete(key);
+      }
     }
   }
-  private async execute(entry: Request): Promise<void> {
-    try {
-      const points = await this.api.metrics(
-        entry.ref.runId,
-        entry.ref.key,
-        entry.controller.signal,
-        (done, total) => {
-          if (
-            entry.generation !== this.generation ||
-            entry.controller.signal.aborted
-          )
-            return;
-          entry.progress = [done, total];
-          for (const subscriber of entry.subscribers)
-            this.notify(subscriber.progress, done, total);
-        },
-      );
-      if (
-        entry.generation !== this.generation ||
-        entry.controller.signal.aborted
-      )
-        throw aborted();
-      if (this.maxEntries > 0) {
-        this.cache.set(entry.key, points);
-        while (this.cache.size > this.maxEntries)
-          this.cache.delete(this.cache.keys().next().value!);
-      }
-      this.settle(entry, points);
-    } catch (error) {
-      this.settle(entry, undefined, error);
-    } finally {
-      if (this.requests.get(entry.key) === entry)
-        this.requests.delete(entry.key);
-      this.active--;
+  private ensure(entry: Entry, explicit = false): void {
+    if (
+      (!this.enabled && !explicit) ||
+      !this.demanded(entry) ||
+      !this.dirty(entry) ||
+      entry.request ||
+      entry.retryAt > Date.now()
+    )
+      return;
+    if (
+      entry.full ||
+      !entry.points ||
+      typeof this.api.metricTails !== "function"
+    ) {
+      const request: Request = {
+        entry,
+        controller: new AbortController(),
+        generation: this.generation,
+        version: entry.dirty,
+      };
+      entry.request = request;
+      this.queue.push(request);
       this.pump();
+    } else this.schedule();
+  }
+  private pump(): void {
+    while (this.active < this.maxConcurrent && this.queue.length) {
+      const request = this.queue.shift()!;
+      if (
+        request.controller.signal.aborted ||
+        request.entry.request !== request ||
+        !this.demanded(request.entry)
+      )
+        continue;
+      this.active++;
+      void this.execute(request);
+    }
+  }
+  private valid(request: Request): boolean {
+    return (
+      request.generation === this.generation &&
+      !request.controller.signal.aborted &&
+      request.entry.request === request
+    );
+  }
+  private async execute(request: Request): Promise<void> {
+    const entry = request.entry;
+    try {
+      const progress = (done: number, total: number) => {
+        if (!this.valid(request)) return;
+        request.progress = [done, total];
+        for (const subscriber of entry.subscribers)
+          this.notify(subscriber.progress, done, total);
+      };
+      const result =
+        typeof this.api.metricsSnapshot === "function"
+          ? await this.api.metricsSnapshot(
+              entry.ref.runId,
+              entry.ref.key,
+              request.controller.signal,
+              progress,
+            )
+          : await this.api
+              .metrics(
+                entry.ref.runId,
+                entry.ref.key,
+                request.controller.signal,
+                progress,
+              )
+              .then((points) => ({
+                points,
+                snapshot: points.at(-1)?.seq ?? 0,
+              }));
+      if (!this.valid(request)) return;
+      entry.points = result.points;
+      entry.snapshot = result.snapshot;
+      entry.full = false;
+      entry.clean = request.version;
+      entry.failures = 0;
+      entry.retryAt = 0;
+      this.touch(entry);
+      this.settle(entry, result.points);
+      this.changed([entry]);
+    } catch (error) {
+      if (this.valid(request)) this.failed(entry, error);
+    } finally {
+      if (entry.request === request) entry.request = undefined;
+      this.active--;
+      this.evict();
+      this.pump();
+      this.schedule();
+    }
+  }
+  private failed(entry: Entry, error: unknown): void {
+    entry.failures++;
+    const retry =
+      !(error instanceof MetricProtocolError) &&
+      (!(error instanceof HttpError) ||
+        error.status === 408 ||
+        error.status === 429 ||
+        error.status >= 500);
+    entry.retryAt = retry
+      ? Date.now() + Math.min(10000, 250 * 2 ** Math.min(entry.failures - 1, 6))
+      : Infinity;
+    this.settle(entry, undefined, error);
+    if (entry.watchers.size)
+      this.report(error instanceof Error ? error.message : String(error));
+  }
+  private schedule(): void {
+    if (!this.enabled || this.timer !== undefined) return;
+    const candidates = [...this.entries.values()].filter(
+      (entry) =>
+        this.demanded(entry) &&
+        this.dirty(entry) &&
+        !entry.request &&
+        Number.isFinite(entry.retryAt),
+    );
+    if (!candidates.length) return;
+    const delay = Math.max(
+      100,
+      Math.min(...candidates.map((entry) => entry.retryAt - Date.now())),
+    );
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      for (const entry of this.entries.values()) {
+        if (
+          entry.full ||
+          !entry.points ||
+          typeof this.api.metricTails !== "function"
+        )
+          this.ensure(entry);
+      }
+      if (!this.tail) void this.catchup();
+    }, delay);
+  }
+  private async catchup(): Promise<void> {
+    if (!this.enabled || this.tail) return;
+    const entries = [...this.entries.values()]
+      .filter(
+        (entry) =>
+          this.demanded(entry) &&
+          this.dirty(entry) &&
+          !entry.full &&
+          entry.points &&
+          !entry.request &&
+          entry.retryAt <= Date.now(),
+      )
+      .slice(0, 64);
+    if (!entries.length) {
+      this.schedule();
+      return;
+    }
+    const versions = entries.map((entry) => entry.dirty);
+    const generation = this.generation;
+    const controller = new AbortController();
+    this.tail = controller;
+    try {
+      const result = await this.api.metricTails(
+        entries.map((entry) => ({
+          runId: entry.ref.runId,
+          key: entry.ref.key,
+          after: entry.snapshot,
+        })),
+        controller.signal,
+      );
+      if (controller.signal.aborted || generation !== this.generation) return;
+      // Api.metricTails returns request order and has validated every page of every stream.
+      for (const [index, entry] of entries.entries()) {
+        if (this.entries.get(entry.key) !== entry) continue;
+        entry.points = entry.points!.concat(result[index].points);
+        entry.snapshot = result[index].snapshot;
+        entry.clean = versions[index];
+        entry.failures = 0;
+        entry.retryAt = 0;
+        this.touch(entry);
+      }
+      for (const entry of entries) {
+        if (!this.dirty(entry)) this.settle(entry, entry.points);
+      }
+      this.changed(entries);
+    } catch (error) {
+      if (!controller.signal.aborted && generation === this.generation)
+        for (const entry of entries)
+          if (this.entries.get(entry.key) === entry) this.failed(entry, error);
+    } finally {
+      if (this.tail === controller) this.tail = undefined;
+      this.evict();
+      this.schedule();
     }
   }
 }

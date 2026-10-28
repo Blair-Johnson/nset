@@ -19,7 +19,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        mpsc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -167,12 +172,25 @@ fn validate_schema(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+fn validate_reader_schema(conn: &Connection) -> Result<()> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(source_sql_error)?;
+    if !matches!(version, 8 | 9) {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rx source uses an unsupported schema; this reader supports SQLite schemas 8 and 9 and does not migrate databases",
+        ));
+    }
+    validate_schema(conn)
+}
 #[derive(Clone)]
 pub struct Source {
     path: PathBuf,
     pub id: String,
     pub name: String,
     slots: Arc<Semaphore>,
+    watcher_active: Arc<AtomicBool>,
     run_filter_key: [u8; 32],
 }
 impl Source {
@@ -223,6 +241,7 @@ impl Source {
                 .to_string_lossy()
                 .into_owned(),
             slots: Arc::new(Semaphore::new(2)),
+            watcher_active: Arc::new(AtomicBool::new(false)),
             run_filter_key: {
                 let mut key = [0; 32];
                 key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -231,7 +250,7 @@ impl Source {
             },
         })
     }
-    fn connection(&self) -> Result<Connection> {
+    fn open_readonly(&self) -> Result<Connection> {
         let mut header = [0; 16];
         let mut file = std::fs::File::open(&self.path).map_err(unavailable)?;
         if let Err(error) = file.read_exact(&mut header) {
@@ -265,21 +284,16 @@ impl Source {
             .map_err(unavailable)?;
         conn.pragma_update(None, "query_only", true)
             .map_err(unavailable)?;
+        Ok(conn)
+    }
+    fn connection(&self) -> Result<Connection> {
+        let conn = self.open_readonly()?;
         let deadline = Instant::now() + Duration::from_millis(750);
         conn.progress_handler(1000, Some(move || Instant::now() > deadline))
             .map_err(unavailable)?;
         conn.execute_batch("BEGIN DEFERRED")
             .map_err(source_sql_error)?;
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(source_sql_error)?;
-        if !matches!(version, 8 | 9) {
-            return Err(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "rx source uses an unsupported schema; this reader supports SQLite schemas 8 and 9 and does not migrate databases",
-            ));
-        }
-        validate_schema(&conn)?;
+        validate_reader_schema(&conn)?;
         Ok(conn)
     }
     fn generation(&self) -> Result<String> {
@@ -301,6 +315,40 @@ impl Source {
             Ok(format!("{:?}", metadata.created().map_err(unavailable)?))
         }
     }
+    /// Start the single coarse change monitor for this source (including clones).
+    ///
+    /// The callback runs on a dedicated thread after external commits, source
+    /// replacement, or unavailable/recovered transitions. It must be quick and
+    /// nonblocking. No callback is sent for the initial healthy baseline or an
+    /// unchanged poll. An initially unavailable source sends one invalidation
+    /// and keeps retrying. These are invalidations, not durable event delivery
+    /// or incremental rx history: active queries must still reload snapshots.
+    ///
+    /// Retain the guard for the server lifetime; dropping it wakes and joins the
+    /// worker. Calling this again while a guard is live returns an error rather
+    /// than creating a connection/poller per client.
+    pub fn watch_changes(&self, callback: impl Fn() + Send + 'static) -> Result<ChangeWatch> {
+        self.watcher_active
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .map_err(|_| ApiError::bad("rx source already has a change watcher"))?;
+        let active = ActiveWatch(self.watcher_active.clone());
+        let source = self.clone();
+        // Establish the baseline before returning: commits after registration
+        // must not disappear into an asynchronously established initial value.
+        let connection = ChangeConnection::open(&source).ok();
+        let (stop, stopped) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("rx-changes".into())
+            .spawn(move || {
+                let _active = active;
+                watch_source(source, connection, stopped, callback);
+            })
+            .map_err(ApiError::internal)?;
+        Ok(ChangeWatch {
+            stop,
+            worker: Some(worker),
+        })
+    }
     async fn execute<T: Send + 'static>(
         &self,
         f: impl FnOnce(Source) -> Result<T> + Send + 'static,
@@ -319,6 +367,141 @@ impl Source {
         .map_err(ApiError::internal)?
     }
 }
+const CHANGE_POLL: Duration = Duration::from_millis(500);
+const CHANGE_BACKOFF_MAX: Duration = Duration::from_secs(4);
+
+/// Owns the external rx monitor. Drop stops it, including interrupting backoff.
+#[must_use = "dropping the guard stops the rx change monitor"]
+pub struct ChangeWatch {
+    stop: mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Drop for ChangeWatch {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            // Also allow a callback to release its own guard without self-join.
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+struct ActiveWatch(Arc<AtomicBool>);
+impl Drop for ActiveWatch {
+    fn drop(&mut self) {
+        self.0.store(false, AtomicOrdering::Release);
+    }
+}
+
+struct ChangeConnection {
+    conn: Connection,
+    generation: String,
+    data_version: i64,
+}
+impl ChangeConnection {
+    fn deadline(conn: &Connection) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_millis(750);
+        conn.progress_handler(1000, Some(move || Instant::now() > deadline))
+            .map_err(unavailable)
+    }
+    fn data_version(conn: &Connection) -> Result<i64> {
+        debug_assert!(conn.is_autocommit());
+        conn.pragma_query_value(None, "data_version", |row| row.get(0))
+            .map_err(source_sql_error)
+    }
+    fn validate(conn: &Connection) -> Result<()> {
+        // Short schema-only snapshot; never leave a transaction across a wait,
+        // callback, or data_version query, and never scan runs/event JSON.
+        conn.execute_batch("BEGIN DEFERRED")
+            .map_err(source_sql_error)?;
+        let result = validate_reader_schema(conn);
+        conn.execute_batch("ROLLBACK").map_err(source_sql_error)?;
+        result
+    }
+    fn open(source: &Source) -> Result<Self> {
+        let generation = source.generation()?;
+        let conn = source.open_readonly()?;
+        Self::deadline(&conn)?;
+        let data_version = Self::data_version(&conn)?;
+        Self::validate(&conn)?;
+        if source.generation()? != generation {
+            return Err(unavailable(
+                "rx source replaced while opening change monitor",
+            ));
+        }
+        Ok(Self {
+            conn,
+            generation,
+            data_version,
+        })
+    }
+    fn changed(&mut self) -> Result<bool> {
+        // Refresh the deadline on each operation, unlike snapshot connections.
+        Self::deadline(&self.conn)?;
+        let version = Self::data_version(&self.conn)?;
+        if version == self.data_version {
+            return Ok(false);
+        }
+        // Schema changes can also occur without replacing the source inode.
+        Self::validate(&self.conn)?;
+        self.data_version = version;
+        Ok(true)
+    }
+}
+
+fn poll_source(source: &Source, connection: &mut Option<ChangeConnection>) -> Result<bool> {
+    let generation = source.generation()?;
+    if let Some(current) = connection.as_mut() {
+        if current.generation == generation {
+            return current.changed();
+        }
+    }
+    // Close the old inode before opening the new one (and its WAL/SHM files).
+    *connection = None;
+    *connection = Some(ChangeConnection::open(source)?);
+    // Replacement and recovery invalidate even if the new connection happens
+    // to return the same data_version; versions are connection-local values.
+    Ok(true)
+}
+
+fn watch_source(
+    source: Source,
+    mut connection: Option<ChangeConnection>,
+    stopped: mpsc::Receiver<()>,
+    callback: impl Fn(),
+) {
+    if connection.is_none() {
+        callback();
+    }
+    let mut delay = CHANGE_POLL;
+    loop {
+        // Channel disconnect also shuts down. No DB transaction/lock is held
+        // while sleeping or publishing; stop interrupts even maximum backoff.
+        if !matches!(
+            stopped.recv_timeout(delay),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            break;
+        }
+        let was_available = connection.is_some();
+        let changed = match poll_source(&source, &mut connection) {
+            Ok(changed) => {
+                delay = CHANGE_POLL;
+                changed
+            }
+            Err(_) => {
+                connection = None;
+                delay = (delay * 2).min(CHANGE_BACKOFF_MAX);
+                was_available
+            }
+        };
+        if changed {
+            callback();
+        }
+    }
+}
+
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogQuery {
@@ -1360,6 +1543,7 @@ mod tests {
             id: "rx:test".into(),
             name: "fixture".into(),
             slots: Arc::new(Semaphore::new(2)),
+            watcher_active: Arc::new(AtomicBool::new(false)),
             run_filter_key: [7; 32],
         };
         Fixture {
