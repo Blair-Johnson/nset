@@ -1205,13 +1205,17 @@ test("smoothing unit label follows the scalar X transform and its base", async (
   ).toBeVisible();
   await dialog(page).getByLabel("X scale", { exact: true }).selectOption("log");
   await expect(
-    dialog(page).getByLabel("Smoothing sigma (decades)", { exact: true }),
+    dialog(page).getByLabel("Smoothing sigma (equivalent seconds)", {
+      exact: true,
+    }),
   ).toBeVisible();
   await dialog(page)
     .getByLabel("X log base", { exact: true })
     .selectOption("2");
   await expect(
-    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+    dialog(page).getByLabel("Smoothing sigma (equivalent seconds)", {
+      exact: true,
+    }),
   ).toBeVisible();
 });
 
@@ -1232,13 +1236,17 @@ test("XY join transforms are separate from the displayed metric-X scale", async 
     .getByLabel("Join log base", { exact: true })
     .selectOption("2");
   await expect(
-    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+    dialog(page).getByLabel("Smoothing sigma (equivalent steps)", {
+      exact: true,
+    }),
   ).toBeVisible();
   await dialog(page)
     .getByLabel("X scale", { exact: true })
     .selectOption("asinh");
   await expect(
-    dialog(page).getByLabel("Smoothing sigma (doublings)", { exact: true }),
+    dialog(page).getByLabel("Smoothing sigma (equivalent steps)", {
+      exact: true,
+    }),
   ).toBeVisible();
   await dialog(page)
     .getByLabel("Matched at", { exact: true })
@@ -1250,7 +1258,9 @@ test("XY join transforms are separate from the displayed metric-X scale", async 
     .getByLabel("Join asinh threshold (seconds)", { exact: true })
     .fill("2.5");
   await expect(
-    dialog(page).getByLabel("Smoothing sigma (asinh units)", { exact: true }),
+    dialog(page).getByLabel("Smoothing sigma (equivalent seconds)", {
+      exact: true,
+    }),
   ).toBeVisible();
   await dialog(page)
     .getByRole("button", { name: "Save changes", exact: true })

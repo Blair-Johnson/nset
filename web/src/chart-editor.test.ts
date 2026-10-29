@@ -195,10 +195,10 @@ test("editor smoothing units follow scalar X or independent XY join transforms",
   const config = defaults();
   assert.equal(smoothingUnit(config, false), "steps");
   config.xScale = "log";
-  assert.equal(smoothingUnit(config, false), "decades");
+  assert.equal(smoothingUnit(config, false), "equivalent steps");
   assert.equal(smoothingUnit(config, true), "steps");
   config.joinScale = "asinh";
-  assert.equal(smoothingUnit(config, true), "asinh units");
+  assert.equal(smoothingUnit(config, true), "equivalent steps");
 });
 
 test("automatic axis titles use actual metric keys, honest mixed labels, and never mutate the card", () => {

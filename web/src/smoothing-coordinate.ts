@@ -1,4 +1,5 @@
 import type { ScaleOptions, ViewConfig } from "./config";
+import type { XY } from "./math";
 
 /** Smoothing lives on the independent coordinate, never metric XY's final X.
  * Linear time uses seconds. Joined time is converted to seconds before every
@@ -67,6 +68,58 @@ export function smoothingCoordinate(
   };
 }
 
+/** Map raw-equivalent steps/seconds to the coordinate's units, preserving the
+ * fraction of the full chart span. Supply all canonical pre-join channels.
+ * Invalid transformed coordinates do not set the domain. Zero means there is
+ * no representable span/bandwidth to smooth; callers leave observations alone.
+ */
+export function smoothingBandwidth(
+  config: ViewConfig,
+  joined: boolean,
+  channels: readonly (readonly XY[])[],
+  coordinate = smoothingCoordinate(config, joined),
+): number {
+  const sigma = config.smoothingSigma;
+  // Preserve the existing linear path exactly (including Gaussian validation).
+  if ((joined ? config.joinScale : config.xScale) === "linear") return sigma;
+  if (!Number.isFinite(sigma) || sigma <= 0)
+    throw new RangeError("sigma must be finite and positive");
+  let min = Infinity,
+    max = -Infinity;
+  for (const channel of channels) {
+    for (const [x] of channel) {
+      if (!Number.isFinite(x) || !Number.isFinite(coordinate.transform(x)))
+        continue;
+      min = Math.min(min, x);
+      max = Math.max(max, x);
+    }
+  }
+  if (!(max > min)) return 0;
+  const transformedSpan = coordinate.transform(max) - coordinate.transform(min);
+  if (!(transformedSpan > 0) || !Number.isFinite(transformedSpan)) return 0;
+  const divisor = config.axis === "step" ? 1 : 1000;
+  const difference = max - min;
+  const rawSpan = difference / divisor;
+  const mapped = sigma * (transformedSpan / rawSpan);
+  if (rawSpan >= 2 ** -1022 && Number.isFinite(mapped) && mapped > 0)
+    return mapped;
+  // Avoid intermediate overflow/underflow, including rounding a subnormal
+  // millisecond span when converting to seconds before taking its logarithm.
+  const scale = Math.max(Math.abs(min), Math.abs(max));
+  const logRawSpan =
+    (Number.isFinite(difference)
+      ? Math.log(difference)
+      : Math.log(scale) + Math.log(max / scale - min / scale)) -
+    Math.log(divisor);
+  return Math.min(
+    Number.MAX_VALUE,
+    Math.exp(Math.log(sigma) + Math.log(transformedSpan) - logRawSpan),
+  );
+}
+
 export function smoothingUnit(config: ViewConfig, joined: boolean): string {
-  return smoothingCoordinate(config, joined).unit;
+  const unit = config.axis === "step" ? "steps" : "seconds";
+  return (joined ? config.joinScale : config.xScale) === "linear"
+    ? unit
+    : `equivalent ${unit}`;
 }

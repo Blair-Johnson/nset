@@ -33,7 +33,7 @@ test("global settings summarize all scalar plots including folded sections witho
     axis: "step",
     smoothing: 0,
     smoothingUnit: "steps",
-    smoothingSignature: JSON.stringify(["step", "linear", null]),
+    smoothingSignature: "steps",
   });
   assert.deepEqual(view, before);
   view.sections[0].cards[2].config.axis = "relative";
@@ -101,6 +101,7 @@ test("mixed coordinate signatures refuse positive global sigma but allow Off", (
   ordinary.config.smoothing = true;
   ordinary.config.smoothingSigma = 2;
   xy.x = { mode: "key", key: "x" };
+  xy.config.axis = "relative";
   xy.config.joinScale = "log";
   xy.config.smoothing = true;
   xy.config.smoothingSigma = 3;
@@ -116,33 +117,55 @@ test("mixed coordinate signatures refuse positive global sigma but allow Off", (
   assert.equal(sections[0].cards[0].config.smoothingSigma, 2);
   assert.equal(sections[0].cards[2].config.smoothing, false);
   assert.equal(sections[0].cards[2].config.smoothingSigma, 3);
+  assert.equal(dashboardSettings({ ...view, sections }).smoothing, 0);
 });
 
-test("final metric-X scales do not determine XY smoothing compatibility", () => {
+for (const scale of ["log", "asinh"] as const) {
+  test(`linear and ${scale} charts share sigma and a stable range signature`, () => {
+    const view = workspace();
+    const initialSignature = dashboardSettings(view).smoothingSignature;
+    view.sections = withDashboardSettings(view, { smoothingSigma: 50 });
+    const chart = view.sections[0].cards[2];
+    chart.config.xScale = scale;
+    chart.config.advanced = { scales: { x: { log: 2, asinh: 2 } } };
+    assert.equal(dashboardSettings(view).smoothingSignature, initialSignature);
+    assert.equal(dashboardSettings(view).smoothingUnit, "steps");
+    assert.equal(dashboardSettings(view).smoothing, 50);
+    const image = view.sections[0].cards[1];
+    view.sections = withDashboardSettings(view, { smoothingSigma: 25 });
+    assert.equal(view.sections[0].cards[2].config.xScale, scale);
+    assert.equal(view.sections[0].cards[2].config.smoothingSigma, 25);
+    assert.equal(view.sections[0].cards[1], image);
+    view.sections = withDashboardSettings(view, { smoothingSigma: 0 });
+    assert.equal(dashboardSettings(view).smoothing, 0);
+    view.sections = withDashboardSettings(view, { smoothingSigma: 10 });
+    assert.equal(dashboardSettings(view).smoothing, 10);
+  });
+}
+
+test("XY join transforms share equivalent bandwidth without changing the final metric X", () => {
   const view = workspace();
   const xy = view.sections[0].cards[2];
   xy.x = { mode: "key", key: "x" };
   xy.config.xScale = "log";
+  xy.config.joinScale = "asinh";
   xy.config.advanced = { scales: { x: { log: 2 } } };
   assert.equal(dashboardSettings(view).smoothingUnit, "steps");
-  assert.equal(
-    withDashboardSettings(view, { smoothingSigma: 0.5 })[0].cards[2].config
-      .smoothingSigma,
-    0.5,
-  );
-  xy.config.joinScale = "asinh";
-  assert.equal(dashboardSettings(view).smoothingSignature, null);
+  const sections = withDashboardSettings(view, { smoothingSigma: 0.5 });
+  assert.equal(sections[0].cards[2].config.smoothingSigma, 0.5);
+  assert.equal(sections[0].cards[2].config.xScale, "log");
+  assert.equal(sections[0].cards[2].config.joinScale, "asinh");
 });
 
-test("same unit labels with different effective asinh thresholds remain incompatible", () => {
+test("elapsed and wall-clock bandwidths both use seconds regardless of scale", () => {
   const view = workspace();
-  for (const card of view.sections[0].cards) card.config.xScale = "asinh";
-  view.sections[0].cards[0].config.advanced = { scales: { x: { asinh: 2 } } };
-  assert.equal(dashboardSettings(view).smoothingSignature, null);
-  assert.throws(
-    () => withDashboardSettings(view, { smoothingSigma: 1 }),
-    /Mixed units/,
-  );
+  view.sections[0].cards[0].config.axis = "relative";
+  view.sections[0].cards[2].config.axis = "timestamp";
+  view.sections[0].cards[2].config.xScale = "log";
+  view.sections = withDashboardSettings(view, { smoothingSigma: 0.1 });
+  assert.equal(dashboardSettings(view).smoothingUnit, "seconds");
+  assert.equal(dashboardSettings(view).smoothing, 0.1);
+  assert.equal(dashboardSettings(view).axis, null);
 });
 
 test("paired record plots neither claim smoothing nor receive global edits", () => {

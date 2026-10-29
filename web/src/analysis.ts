@@ -11,7 +11,10 @@ import {
 } from "./math";
 import type { ViewConfig } from "./config";
 import { gaussianLocalLinear } from "./gaussian";
-import { smoothingCoordinate } from "./smoothing-coordinate";
+import {
+  smoothingBandwidth,
+  smoothingCoordinate,
+} from "./smoothing-coordinate";
 import type { XQuantity } from "./options";
 import { runStartTime, type Run } from "./api";
 
@@ -58,7 +61,37 @@ export function analyze(
     if (cached?.signature === signature)
       candidates.set(cached.identity, cached);
   }
-  return data.map(({ run, raw, x, paired }) => {
+  // Canonicalize once, before choosing bandwidth: every run and both pre-join
+  // channels contribute to the full chart domain, never the viewport or density.
+  const prepared = data.map((trace) => ({
+    ...trace,
+    canonical: trace.paired
+      ? []
+      : canonicalize(trace.raw, config.axis, runStartTime(trace.run)),
+    xCanonical:
+      !trace.paired && trace.x
+        ? canonicalize(trace.x.raw, config.axis, runStartTime(trace.x.run))
+        : undefined,
+  }));
+  const channels = prepared.flatMap(({ canonical, xCanonical }) =>
+    xCanonical ? [canonical, xCanonical] : [canonical],
+  );
+  const bandwidths = new Map<
+    boolean,
+    { coordinate: ReturnType<typeof smoothingCoordinate>; sigma: number }
+  >();
+  if (config.smoothing) {
+    for (const { x, paired } of prepared) {
+      const joined = !!x;
+      if (paired || bandwidths.has(joined)) continue;
+      const coordinate = smoothingCoordinate(config, joined);
+      bandwidths.set(joined, {
+        coordinate,
+        sigma: smoothingBandwidth(config, joined, channels, coordinate),
+      });
+    }
+  }
+  return prepared.map(({ run, raw, x, paired, canonical, xCanonical }) => {
     if (paired) {
       const observations = paired.points;
       // Paired records have no independent step/time coordinate. Never infer
@@ -79,23 +112,22 @@ export function analyze(
         x: { key: paired.key },
       };
     }
-    const observations = canonicalize(raw, config.axis, runStartTime(run));
+    const observations = canonical;
     const identity = JSON.stringify([run.id, x?.run.id, x?.key]);
     const prior = candidates.get(identity);
-    const coordinate = config.smoothing
-      ? smoothingCoordinate(config, !!x)
-      : null;
+    const bandwidth = bandwidths.get(!!x);
+    const coordinate = bandwidth?.coordinate;
+    const sigma = bandwidth?.sigma ?? 0;
+    const degenerate =
+      sigma === 0 && (x ? config.joinScale : config.xScale) !== "linear";
     // The helper creates fresh closures. Reuse the old pure transform only
     // when ALL settings match, so Gaussian can verify transform identity.
     const transform = prior?.transform ?? coordinate?.transform;
     const smooth = (channel: XY[], old?: Channel): XY[] =>
-      transform
-        ? gaussianLocalLinear(
-            channel,
-            config.smoothingSigma,
-            transform,
-            old?.smoothed,
-          )
+      transform && !degenerate
+        ? // Gaussian also checks sigma: a changed chart domain must invalidate
+          // otherwise-identical settings and transform, even for untouched runs.
+          gaussianLocalLinear(channel, sigma, transform, old?.smoothed)
         : channel;
     const points = smooth(observations, prior?.y);
     const remember = (trace: Analyzed, xChannel?: Channel): Analyzed => {
@@ -112,7 +144,7 @@ export function analyze(
     if (x) {
       // Both scalar channels are independently smoothed on the common axis,
       // before joining. Observation markers still join the untouched channels.
-      const channel = canonicalize(x.raw, config.axis, runStartTime(x.run));
+      const channel = xCanonical!;
       const smoothed = smooth(channel, prior?.x);
       const joined = joinXY(points, smoothed, config.interpolation);
       return remember(

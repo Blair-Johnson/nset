@@ -57,6 +57,7 @@ export interface ViewConfig {
   axis: "step" | "timestamp" | "relative";
   interpolation: "linear" | "pchip";
   smoothing: boolean;
+  /** Steps/seconds; nonlinear axes preserve sigma/full-data-span after transform. */
   smoothingSigma: number;
   joinScale: Scale;
   joinLog: 2 | 10;

@@ -209,6 +209,8 @@ test("failed callbacks restore saved values and preserve focus", async ({
   await expect(valueButton(page)).toHaveText("4.5 steps");
   await commitSigma(page, 5);
   await expect(sigma(page)).toHaveValue("4.5");
+  await expect(slider(page)).toHaveAttribute("max", "4.5");
+  await expect(slider(page)).toHaveAttribute("step", "0.0045");
   await expect(sigma(page)).toBeFocused();
   await expect(page.getByRole("status")).toContainText(
     "Could not save dashboard smoothing",
@@ -257,4 +259,73 @@ test("compact smoothing fits a narrow viewport, including mixed units and exact 
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("rebuilt mixed-unit controls keep an all-disabled summary Off", async ({
+  page,
+}) => {
+  await fixture(page, null, 0, null);
+  await expect(slider(page)).toHaveValue("0");
+  await expect(slider(page)).toHaveAttribute("aria-valuetext", "Off");
+  await expect(valueButton(page)).toHaveText("Off");
+  await expect(valueButton(page)).toBeDisabled();
+  // Genuine step/time mixing still forbids re-enabling a numeric bandwidth.
+  await slider(page).press("End");
+  await expect(slider(page)).toHaveValue("0");
+  await expect(valueButton(page)).toHaveText("Off");
+  expect((await state(page)).sigmas).toEqual([]);
+});
+
+test("failed mixed-unit Off restores the mixed summary and keyboard focus", async ({
+  page,
+}) => {
+  await fixture(page, null, null, null);
+  await page.evaluate(() => {
+    (window as any).__controls.failSmoothing = true;
+  });
+  await slider(page).press("Home");
+  await expect(slider(page)).toHaveValue("1");
+  await expect(slider(page)).toHaveAttribute("max", "1");
+  await expect(slider(page)).toBeFocused();
+  await expect(valueButton(page)).toHaveText("Mixed units");
+  await expect(page.getByRole("status")).toContainText(
+    "Previous setting restored",
+  );
+  expect((await state(page)).sigmas).toEqual([0]);
+  await page.evaluate(() => {
+    (window as any).__controls.failSmoothing = false;
+  });
+  await slider(page).press("Home");
+  await expect(valueButton(page)).toHaveText("Off");
+  await expect(page.getByRole("status")).toBeEmpty();
+  expect((await state(page)).sigmas).toEqual([0, 0]);
+});
+
+test("a repeated pointer Off gesture commits after a failed save", async ({
+  page,
+}) => {
+  await fixture(page, null, null, null);
+  const range = slider(page);
+  const dragOff = async () => {
+    const box = (await range.boundingBox())!;
+    await page.mouse.move(box.x + box.width - 8, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x, box.y + box.height / 2, { steps: 8 });
+    await page.mouse.up();
+  };
+  await page.evaluate(() => {
+    (window as any).__controls.failSmoothing = true;
+  });
+  await dragOff();
+  await expect(range).toHaveValue("1");
+  await expect(valueButton(page)).toHaveText("Mixed units");
+  expect((await state(page)).sigmas).toEqual([0]);
+  await page.evaluate(() => {
+    (window as any).__controls.failSmoothing = false;
+  });
+  await dragOff();
+  await expect(range).toHaveValue("0");
+  await expect(valueButton(page)).toHaveText("Off");
+  await expect(page.getByRole("status")).toBeEmpty();
+  expect((await state(page)).sigmas).toEqual([0, 0]);
 });

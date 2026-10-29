@@ -1543,7 +1543,7 @@ export function openChartEditor(options: ChartEditorOptions): {
       Number.MIN_VALUE,
       Infinity,
       false,
-      "Linear: steps or seconds. Log: decades (base 10) or doublings (base 2). Asinh: transformed units.",
+      "Sigma in steps or seconds. Log/asinh axes preserve this fraction of the full data span in transformed coordinates; zoom does not change smoothing. XY charts smooth both channels on the join axis before joining.",
     );
     select(
       panel,

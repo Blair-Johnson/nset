@@ -69,6 +69,76 @@ const scalar = (view: any) =>
   view.sections
     .flatMap((s: any) => s.cards)
     .filter((c: any) => c.kind === "timeseries");
+const dashboardSlider = (page: Page) =>
+  page.getByRole("slider", { name: "Dashboard smoothing", exact: true });
+const smoothingValue = (page: Page) =>
+  page.getByRole("button", { name: "Edit smoothing bandwidth", exact: true });
+async function setDashboardSigma(page: Page, value: number) {
+  await smoothingValue(page).click();
+  const input = page.getByLabel("Dashboard smoothing sigma", { exact: true });
+  await input.fill(String(value));
+  await input.dispatchEvent("change");
+  if (await input.isVisible()) await input.press("Enter");
+}
+async function dragDashboardSigma(page: Page, fraction: number) {
+  const slider = dashboardSlider(page);
+  const box = (await slider.boundingBox())!;
+  const current =
+    Number(await slider.inputValue()) /
+    Number(await slider.getAttribute("max"));
+  await page.mouse.move(
+    box.x + 8 + current * (box.width - 16),
+    box.y + box.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    box.x + 8 + fraction * (box.width - 16),
+    box.y + box.height / 2,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  return Number(await slider.inputValue());
+}
+async function editFirstChart(page: Page) {
+  const card = page.locator('[data-card-kind="timeseries"]').first();
+  await card.getByLabel("Chart actions", { exact: true }).click();
+  await card.getByRole("button", { name: "Edit chart", exact: true }).click();
+  return page.getByRole("dialog", { name: "Edit chart", exact: true });
+}
+async function setFirstChartScale(
+  page: Page,
+  scale: "linear" | "log" | "asinh",
+  unit: "steps" | "seconds",
+) {
+  const editor = await editFirstChart(page);
+  await editor.getByText("X axis options", { exact: true }).click();
+  await editor.getByLabel("X scale", { exact: true }).selectOption(scale);
+  await editor.getByRole("heading", { name: "Smoothing", exact: true }).click();
+  await expect(
+    editor.getByLabel(
+      `Smoothing sigma (${scale === "linear" ? "" : "equivalent "}${unit})`,
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor).toBeHidden();
+}
+async function expectDashboardSigma(page: Page, value: number) {
+  await expect
+    .poll(async () =>
+      scalar(await saved(page)).map((c: any) => ({
+        smoothing: c.config.smoothing,
+        // Off preserves each chart's last positive bandwidth.
+        sigma: value === 0 ? 0 : c.config.smoothingSigma,
+      })),
+    )
+    .toEqual([
+      { smoothing: value > 0, sigma: value },
+      { smoothing: value > 0, sigma: value },
+    ]);
+}
 async function cursor(page: Page, x: number) {
   const card = page.locator('[data-card-kind="timeseries"]').first();
   // Cards may survive a setting change in place (cursors/zoom preserved), so
@@ -307,4 +377,153 @@ test("explicit sub-second bounds replace larger ranges and retain linear resolut
     expect(Number(await slider.inputValue())).toBeCloseTo(max / 1000, 12);
     await expect(slider).toHaveAttribute("max", String(max));
   }
+});
+
+for (const { axis, unit, max } of [
+  { axis: "step", unit: "steps", max: 100 },
+  { axis: "relative", unit: "seconds", max: 1 },
+] as const) {
+  test(`mixed linear/nonlinear ${unit} retain dashboard bandwidth, range and Off`, async ({
+    page,
+  }) => {
+    await fixture(page);
+    await page
+      .getByLabel("Dashboard X axis", { exact: true })
+      .selectOption(axis);
+    await setDashboardSigma(page, max);
+    const slider = dashboardSlider(page);
+    const initial = await dragDashboardSigma(page, 0.75);
+    expect(initial).toBeGreaterThan(max * 0.65);
+    expect(initial).toBeLessThan(max * 0.85);
+    await expectDashboardSigma(page, initial);
+    const signature = await page
+      .locator("#workspace-toolbar")
+      .getAttribute("data-smoothing-signature");
+    expect(signature).toBe(unit);
+
+    // Change only one chart through the real editor; the other stays linear.
+    await setFirstChartScale(page, "log", unit);
+    expect(
+      scalar(await saved(page))
+        .map((c: any) => c.config.xScale)
+        .sort(),
+    ).toEqual(["linear", "log"]);
+    await expect(slider).toBeEnabled();
+    await expect(smoothingValue(page)).toBeEnabled();
+    await expect(smoothingValue(page)).toHaveText(`${initial} ${unit}`);
+    await expect(page.locator("#workspace-toolbar")).toHaveAttribute(
+      "data-smoothing-signature",
+      signature!,
+    );
+    await expect(slider).toHaveAttribute("max", String(max));
+    await expect(slider).toHaveAttribute("step", String(max / 1000));
+    await expect(slider).toHaveValue(String(initial));
+    await expectDashboardSigma(page, initial);
+
+    const dragged = await dragDashboardSigma(page, 0.3);
+    expect(dragged).toBeGreaterThan(max * 0.2);
+    expect(dragged).toBeLessThan(max * 0.4);
+    await expectDashboardSigma(page, dragged);
+    await expect(slider).toHaveAttribute("max", String(max));
+    await slider.press("Home");
+    await expectDashboardSigma(page, 0);
+    await expect(smoothingValue(page)).toHaveText("Off");
+
+    // Each save rebuilds the toolbar: neither scale nor its editor unit can
+    // change the dashboard's raw-unit signature or resurrect smoothing.
+    for (const scale of ["asinh", "linear", "log"] as const) {
+      await setFirstChartScale(page, scale, unit);
+      await expect(smoothingValue(page)).toHaveText("Off");
+      await expect(slider).toHaveValue("0");
+      await expect(slider).toHaveAttribute("max", String(max));
+      await expect(page.locator("#workspace-toolbar")).toHaveAttribute(
+        "data-smoothing-signature",
+        signature!,
+      );
+      await expectDashboardSigma(page, 0);
+    }
+    await slider.press("End");
+    await expectDashboardSigma(page, max);
+    await dragDashboardSigma(page, 0);
+    await expect(slider).toHaveValue("0");
+    await expectDashboardSigma(page, 0);
+    await page
+      .getByRole("button", { name: "Runs", exact: true })
+      .first()
+      .click();
+    await page
+      .getByRole("button", { name: "View charts", exact: true })
+      .click();
+    await expect(smoothingValue(page)).toHaveText("Off");
+    await expect(slider).toHaveValue("0");
+    await expect(slider).toHaveAttribute("max", String(max));
+    await slider.press("End");
+    await expectDashboardSigma(page, max);
+    await page.reload();
+    await expect(slider).toBeEnabled();
+    await expect(slider).toHaveValue(String(max));
+    await expect(slider).toHaveAttribute("max", String(max));
+    await expect(smoothingValue(page)).toHaveText(`${max} ${unit}`);
+    await expectDashboardSigma(page, max);
+    expect(
+      scalar(await saved(page))
+        .map((c: any) => c.config.xScale)
+        .sort(),
+    ).toEqual(["linear", "log"]);
+  });
+}
+
+test("genuinely mixed step/time charts remain Off after toolbar rebuild and reload", async ({
+  page,
+}) => {
+  await fixture(page);
+  await setDashboardSigma(page, 10);
+  const editor = await editFirstChart(page);
+  await editor.getByLabel("X", { exact: true }).selectOption("param:relative");
+  await editor
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await expect(editor).toBeHidden();
+  await expect(smoothingValue(page)).toHaveText("Mixed units");
+  await expect(smoothingValue(page)).toBeDisabled();
+  await dashboardSlider(page).press("Home");
+  await expectDashboardSigma(page, 0);
+  await expect(smoothingValue(page)).toHaveText("Off");
+  await page.getByRole("button", { name: "Runs", exact: true }).first().click();
+  await page.getByRole("button", { name: "View charts", exact: true }).click();
+  await expect(smoothingValue(page)).toHaveText("Off");
+  await expect(dashboardSlider(page)).toHaveValue("0");
+  await page.reload();
+  await expect(smoothingValue(page)).toHaveText("Off");
+  await expect(dashboardSlider(page)).toHaveValue("0");
+  await expectDashboardSigma(page, 0);
+  expect(
+    scalar(await saved(page))
+      .map((c: any) => c.config.axis)
+      .sort(),
+  ).toEqual(["relative", "step"]);
+});
+
+test("failed mixed-scale smoothing save restores bandwidth, range and focus", async ({
+  page,
+}) => {
+  await fixture(page);
+  await setDashboardSigma(page, 100);
+  await setFirstChartScale(page, "log", "steps");
+  const before = scalar(await saved(page));
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === "nset.workspaces.v2") throw Error("quota");
+      return original.call(this, key, value);
+    };
+  });
+  const slider = dashboardSlider(page);
+  await slider.press("Home");
+  await expect(slider).toHaveValue("100");
+  await expect(slider).toHaveAttribute("max", "100");
+  await expect(slider).toBeFocused();
+  await expect(smoothingValue(page)).toHaveText("100 steps");
+  await expect(page.locator("#global-error")).toContainText("Could not save");
+  expect(scalar(await saved(page))).toEqual(before);
 });

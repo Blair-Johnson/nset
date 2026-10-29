@@ -183,7 +183,47 @@ export function createDashboardControls(
       mixedUnits && slider.value !== "0" ? savedSmoothing : sliderValue(),
     );
   };
-  slider.onchange = () => commitSmoothing(sliderValue());
+  // Firefox can omit change when retrying a value after a save-failure rollback.
+  // A release fallback must not race the native change or a newer gesture.
+  let inputRevision = 0;
+  slider.onchange = () => {
+    inputRevision++;
+    commitSmoothing(sliderValue());
+  };
+  slider.onpointerdown = () => {
+    inputRevision++;
+  };
+  slider.onkeydown = () => {
+    inputRevision++;
+  };
+  slider.onkeyup = (event) => {
+    if (
+      [
+        "Home",
+        "End",
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "PageUp",
+        "PageDown",
+      ].includes(event.key)
+    )
+      commitSmoothing(sliderValue());
+  };
+  slider.onpointerup = (event) => {
+    if (event.button !== 0) return;
+    const revision = inputRevision;
+    const value = sliderValue();
+    setTimeout(() => {
+      if (revision === inputRevision && slider.isConnected)
+        commitSmoothing(value);
+    }, 0);
+  };
+  slider.onpointercancel = () => {
+    inputRevision++;
+    restoreSmoothing();
+  };
   sigma.onchange = () =>
     commitSmoothing(
       sigma.value.trim() === "" ? NaN : Number(sigma.value),

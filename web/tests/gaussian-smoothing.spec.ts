@@ -284,27 +284,46 @@ test("sigma changes dense curves, not isolated points, and retains raw marker va
   expect((await read(page, "dense")).points).toEqual(after.observations);
 });
 
-test("display-log spacing gives the same smoothing after multiplicative X rescaling", async ({
+test("log equivalent-step sigma scales with raw X while preserving transformed smoothing", async ({
   page,
 }) => {
   const steps = [1, 10, 100, 1000, 10000],
     values = [0, 0, 20, 0, 0];
+  const sigma = 2500;
+  // Independent equivalent-unit definition, not the production mapping helper.
+  const transformedSigma =
+    (sigma * (Math.log10(10000) - Math.log10(1))) / (10000 - 1);
   await fixture(page, [
-    { id: "log", y: samples(steps, values), config: { xScale: "log" } },
+    {
+      id: "log",
+      y: samples(steps, values),
+      config: { xScale: "log", smoothingSigma: sigma },
+    },
     {
       id: "shifted",
       y: samples(
         steps.map((x) => x * 100),
         values,
       ),
-      config: { xScale: "log" },
+      config: { xScale: "log", smoothingSigma: sigma * 100 },
+    },
+    {
+      id: "relative-log",
+      y: samples(steps, values).map((p) => ({
+        ...p,
+        timestamp: ORIGIN + p.step * 1000,
+      })),
+      config: { axis: "relative", xScale: "log", smoothingSigma: sigma },
     },
     { id: "linear", y: samples(steps, values) },
   ]);
   const log = await read(page, "log"),
     shifted = await read(page, "shifted");
   expectValues(shifted.points, log.points);
-  expect(log.points[2][1]).toBeCloseTo(20 * centerWeight(1), 7);
+  const relative = await read(page, "relative-log");
+  expectValues(relative.points, log.points);
+  expect(relative.points.map((p) => p[0])).toEqual(steps.map((x) => x * 1000));
+  expect(log.points[2][1]).toBeCloseTo(20 * centerWeight(transformedSigma), 7);
   expect((await read(page, "linear")).points[2][1]).toBe(20);
   expect(shifted.points.map((p) => p[0])).toEqual(steps.map((x) => x * 100));
 });
@@ -336,7 +355,10 @@ test("XY smooths both scalar channels on the common log axis before joining, nev
   const steps = [1, 10, 100, 1000, 10000];
   const x = samples(steps, [10, 10, 100, 10, 10]);
   const y = samples(steps, [0, 0, 20, 0, 0]);
-  const config = { joinScale: "log", joinLog: 10, smoothingSigma: 1 };
+  const sigma = 2500;
+  const transformedSigma =
+    (sigma * (Math.log10(10000) - Math.log10(1))) / (10000 - 1);
+  const config = { joinScale: "log", joinLog: 10, smoothingSigma: sigma };
   await fixture(page, [
     { id: "xy", x, y, config },
     { id: "metric-log", x, y, config: { ...config, xScale: "log" } },
@@ -350,8 +372,11 @@ test("XY smooths both scalar channels on the common log axis before joining, nev
   const xy = await read(page, "xy"),
     metricLog = await read(page, "metric-log");
   expect(xy.points).toHaveLength(5);
-  expect(xy.points[2][0]).toBeCloseTo(10 + 90 * centerWeight(1), 7);
-  expect(xy.points[2][1]).toBeCloseTo(20 * centerWeight(1), 7);
+  expect(xy.points[2][0]).toBeCloseTo(
+    10 + 90 * centerWeight(transformedSigma),
+    7,
+  );
+  expect(xy.points[2][1]).toBeCloseTo(20 * centerWeight(transformedSigma), 7);
   expect(metricLog.points).toEqual(xy.points);
   expect(xy.observations).toEqual(x.map((p, i) => [p.value, y[i].value]));
   expect(xy.markers).toEqual([...xy.observations].sort((a, b) => a[0] - b[0]));
@@ -364,6 +389,111 @@ test("XY smooths both scalar channels on the common log axis before joining, nev
   );
 });
 
+test("asinh equivalent-step sigma uses the full raw and transformed spans", async ({
+  page,
+}) => {
+  const steps = [-2, -1, 0, 1, 2].map((x) => Math.sinh(x));
+  const sigma = 2;
+  const transformedSigma =
+    (sigma * (Math.asinh(steps[4]) - Math.asinh(steps[0]))) /
+    (steps[4] - steps[0]);
+  await fixture(page, [
+    {
+      id: "asinh",
+      y: samples(steps, [0, 0, 20, 0, 0]),
+      config: { xScale: "asinh", smoothingSigma: sigma },
+    },
+  ]);
+  const curve = await read(page, "asinh");
+  expect(curve.points[2][1]).toBeCloseTo(
+    20 * centerWeight(transformedSigma),
+    7,
+  );
+  expect(curve.observations).toEqual(
+    steps.map((x, i) => [x, i === 2 ? 20 : 0]),
+  );
+  expect(curve.markers).toEqual(curve.observations);
+  // Zooming must never shrink the data domain used to map the bandwidth.
+  await page.evaluate(() => (window as any).gaussian.cards.asinh.plot.zoom(2));
+  await edit(page, "asinh", { smoothing: false });
+  await edit(page, "asinh", { smoothing: true });
+  expectValues((await read(page, "asinh")).points, curve.points);
+});
+
+test("XY equivalent sigma shares the full channel domain before overlap and join", async ({
+  page,
+}) => {
+  const xSteps = [1, 10, 100, 1000, 10000];
+  const ySteps = [10, 100, 1000];
+  const sigma = 2500;
+  // The X-only endpoints belong to the common smoothing domain even though
+  // they are outside the eventual XY overlap. Y must not normalize itself.
+  const transformedSigma =
+    (sigma * (Math.log10(10000) - Math.log10(1))) / (10000 - 1);
+  await fixture(page, [
+    {
+      id: "unequal-xy",
+      x: samples(xSteps, [10, 10, 100, 10, 10]),
+      y: samples(ySteps, [0, 20, 0]),
+      config: { joinScale: "log", smoothingSigma: sigma },
+    },
+  ]);
+  const curve = await read(page, "unequal-xy");
+  expect(curve.points).toHaveLength(3);
+  expect(curve.points[1][0]).toBeCloseTo(
+    10 + 90 * centerWeight(transformedSigma),
+    7,
+  );
+  const yWeight = 1 / (1 + 2 * Math.exp(-0.5 / transformedSigma ** 2));
+  expect(curve.points[1][1]).toBeCloseTo(20 * yWeight, 7);
+  expect(curve.observations).toEqual([
+    [10, 0],
+    [100, 20],
+    [10, 0],
+  ]);
+});
+test("equivalent sigma uses one full-data domain across every chart series", async ({
+  page,
+}) => {
+  const sigma = 2500;
+  const transformedSigma =
+    (sigma * (Math.log10(10000) - Math.log10(1))) / (10000 - 1);
+  await fixture(page, [
+    {
+      id: "narrow",
+      y: samples([10, 100, 1000], [0, 20, 0]),
+      config: { xScale: "log", smoothingSigma: sigma },
+    },
+    {
+      id: "wide",
+      y: samples([1, 10, 100, 1000, 10000], [0, 0, 20, 0, 0]),
+      config: { xScale: "log", smoothingSigma: sigma },
+    },
+  ]);
+  await page.evaluate(() => {
+    const card = (window as any).gaussian.cards.narrow;
+    const spec = structuredClone(card.spec);
+    spec.source = { mode: "selected", keys: ["narrow:y", "wide:y"] };
+    card.setSpec(spec);
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as any).gaussian.cards.narrow.data.length),
+    )
+    .toBe(2);
+  const curves = await page.evaluate(() =>
+    (window as any).gaussian.cards.narrow.data.map(
+      (trace: any) => trace.points as XY[],
+    ),
+  );
+  const narrow = curves.find((points: XY[]) => points.length === 3)!;
+  const wide = curves.find((points: XY[]) => points.length === 5)!;
+  expect(narrow[1][1]).toBeCloseTo(
+    20 / (1 + 2 * Math.exp(-0.5 / transformedSigma ** 2)),
+    7,
+  );
+  expect(wide[2][1]).toBeCloseTo(20 * centerWeight(transformedSigma), 7);
+});
 test("paired record curves without a common coordinate stay raw, including repeated X", async ({
   page,
 }) => {
@@ -439,7 +569,15 @@ test("cached sigma and join-coordinate edits retain canvas, camera, cursors and 
   ]) {
     await edit(page, "cached", patch);
     const current = (await read(page, "cached")).points;
-    expect(current).not.toEqual(previous);
+    if ("joinLog" in patch) {
+      // Changing log base rescales both distances and mapped sigma equally.
+      expectValues(current, previous);
+      current.forEach((point, i) =>
+        expect(point[0]).toBeCloseTo(previous[i][0], 7),
+      );
+    } else {
+      expect(current).not.toEqual(previous);
+    }
     previous = current;
     expect(
       await page.evaluate(() => {
