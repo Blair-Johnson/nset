@@ -117,11 +117,18 @@ async function fixture(page: Page, bottom = false) {
     const { ChartCard } = await import("/src/cards.ts");
     const state = ((window as any).resizeTest = { cards: {} });
     const proto = ChartCard.prototype as any;
-    const build = proto.build;
-    proto.build = function (...args: any[]) {
-      const result = build.apply(this, args);
+    const buildShell = proto.buildShell;
+    proto.buildShell = function (...args: any[]) {
+      const result = buildShell.apply(this, args);
       state.cards[this.spec.id] = this;
-      if (this.plot) {
+      return result;
+    };
+    const ensurePanel = proto.ensurePanel;
+    const instrumentedPlots = new WeakSet();
+    proto.ensurePanel = function (...args: any[]) {
+      const result = ensurePanel.apply(this, args);
+      if (this.plot && !instrumentedPlots.has(this.plot)) {
+        instrumentedPlots.add(this.plot);
         const publish = this.plot.onWarnings;
         this.plot.onWarnings = (warnings: string[]) => {
           (state.warnings ??= {})[this.spec.id] = warnings;

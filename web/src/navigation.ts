@@ -180,6 +180,8 @@ export class PlotNavigation {
   private space = false;
   private pointerButtons = 0;
   private touchInput = false;
+  private active = false;
+  private destroyed = false;
   private abort = new AbortController();
   private previousTouchAction: string;
   constructor(
@@ -211,6 +213,30 @@ export class PlotNavigation {
     this.previousTouchAction = u.over.style.touchAction;
     u.over.style.touchAction = "none";
     u.root.classList.add("plot-navigation");
+    this.setActive(true);
+    this.publishView();
+  }
+  /** Detach input fan-out without losing the fit, camera, history, or pins. */
+  setActive(active: boolean): void {
+    if (this.destroyed || this.active === active) return;
+    this.active = active;
+    if (active) {
+      this.abort = new AbortController();
+      this.listen();
+      this.cursor();
+    } else {
+      this.abort.abort();
+      this.cancelGesture();
+      this.space = false;
+      this.pointerButtons = 0;
+      this.touchInput = false;
+      this.options.onHover?.(null);
+      this.u.over.style.touchAction = this.previousTouchAction;
+      this.u.over.style.cursor = "";
+    }
+  }
+  private listen() {
+    const u = this.u;
     const signal = this.abort.signal;
     u.over.addEventListener("pointerdown", this.down, { signal });
     u.over.addEventListener("contextmenu", this.contextmenu, { signal });
@@ -271,10 +297,12 @@ export class PlotNavigation {
         capture: true,
       });
     window.addEventListener("keyup", this.keyup, { signal });
-    this.cursor();
-    this.publishView();
   }
   configure(options: PlotInteraction) {
+    if (!this.active) {
+      this.options = options;
+      return;
+    }
     this.cancel();
     if (
       this.options.mode !== options.mode &&
@@ -756,6 +784,10 @@ export class PlotNavigation {
     }
   };
   cancelGesture() {
+    if (this.wheelPending) clearTimeout(this.wheelPending.timer);
+    this.wheelPending = undefined;
+    this.wheelLast = 0;
+    this.wheelBurstUntil = 0;
     this.cancel();
   }
   private cancel = (event?: PointerEvent) => {
@@ -920,10 +952,9 @@ export class PlotNavigation {
     this.cancel();
   };
   destroy() {
-    this.cancel();
-    if (this.wheelPending) clearTimeout(this.wheelPending.timer);
-    this.wheelPending = undefined;
-    this.abort.abort();
+    if (this.destroyed) return;
+    this.setActive(false);
+    this.destroyed = true;
     this.options.onHover?.(null);
     this.u.over.style.touchAction = this.previousTouchAction;
     this.u.over.style.cursor = "";

@@ -1,5 +1,5 @@
 import { uuid } from "./uuid";
-import { validateRecordBinding, recordRuns } from "./records";
+import { validateRecordBinding, type RecordBinding } from "./records";
 import { assertSafe, defaults, parseSafeJson, validateConfig } from "./config";
 import type {
   Catalog,
@@ -72,88 +72,169 @@ export function cameraAxis(card: ChartSpec): string {
     x.mode === "key" ? ["key", x.key] : ["series", seriesId(x.series)],
   ]);
 }
+interface RunIndex {
+  byId: Map<string, Run>;
+  names: Map<string, number>;
+  rxBySource: Map<string, Run[]>;
+}
+// Catalog snapshots are immutable: live-catalog replaces both arrays on metric
+// updates, and metadata refreshes replace them too. Key each index by its own
+// array so wrapper/selection changes reuse it and replacing either array (even
+// on the same Catalog object) invalidates it. Do not mutate indexed fields or
+// array contents in place. Weak keys allow obsolete snapshots to be collected.
+const runIndexes = new WeakMap<Catalog["runs"], RunIndex>();
+const seriesIndexes = new WeakMap<Catalog["series"], Set<string>>();
+function indexRuns(catalog: Catalog): RunIndex {
+  let index = runIndexes.get(catalog.runs);
+  if (!index) {
+    index = { byId: new Map(), names: new Map(), rxBySource: new Map() };
+    for (const run of catalog.runs) {
+      index.byId.set(run.id, run);
+      index.names.set(run.name, (index.names.get(run.name) ?? 0) + 1);
+      if (run.rx) {
+        let runs = index.rxBySource.get(run.rx.sourceId);
+        if (!runs) index.rxBySource.set(run.rx.sourceId, (runs = []));
+        runs.push(run);
+      }
+    }
+    runIndexes.set(catalog.runs, index);
+  }
+  return index;
+}
+function indexSeries(catalog: Catalog): Set<string> {
+  let available = seriesIndexes.get(catalog.series);
+  if (!available) {
+    available = new Set(
+      catalog.series.map((s) =>
+        seriesId({ runId: s.run_id, key: s.key, kind: s.kind }),
+      ),
+    );
+    seriesIndexes.set(catalog.series, available);
+  }
+  return available;
+}
+function runLabel(run: Run, index: RunIndex): string {
+  return index.names.get(run.name)! > 1 ? `${run.name} (${run.id})` : run.name;
+}
+function* sourceRefs(
+  card: ChartSpec,
+  selectedRunIds: string[],
+): Generator<SeriesRef> {
+  if (card.source.mode === "explicit") yield* card.source.series;
+  else {
+    const kind = card.kind === "image" ? "image" : "metric";
+    for (const runId of selectedRunIds)
+      for (const key of card.source.keys) yield { runId, key, kind };
+  }
+}
+/** Shared availability rules, without constructing labels or resolved traces. */
+function* nativeSources(
+  card: ChartSpec,
+  selectedRunIds: string[],
+  catalog: Catalog,
+) {
+  const { byId } = indexRuns(catalog);
+  const available = indexSeries(catalog);
+  const kind = card.kind === "image" ? "image" : "metric";
+  const binding = kind === "metric" ? card.x : undefined;
+  for (const ref of sourceRefs(card, selectedRunIds)) {
+    const run = byId.get(ref.runId);
+    if (ref.kind !== kind || !run || !available.has(seriesId(ref))) continue;
+    // Keyed X follows Y's run; fixed X may belong to any unselected run.
+    const xRef = !binding
+      ? undefined
+      : binding.mode === "series"
+        ? binding.series
+        : { runId: ref.runId, key: binding.key, kind: "metric" as const };
+    const xRun = xRef ? byId.get(xRef.runId) : undefined;
+    if (
+      xRef &&
+      (xRef.kind !== "metric" || !xRun || !available.has(seriesId(xRef)))
+    )
+      continue;
+    yield { ref, run, xRef, xRun };
+  }
+}
+function* recordSourceRuns(
+  binding: RecordBinding,
+  selectedRunIds: string[],
+  index: RunIndex,
+) {
+  // Preserve recordRuns' UID-based eligibility and catalog ordering, including
+  // explicit portable UIDs independent of the workspace selection.
+  const uids = new Set(
+    binding.runUids.length
+      ? binding.runUids
+      : selectedRunIds.flatMap((id) => {
+          const run = index.byId.get(id);
+          return run?.rx?.sourceId === binding.sourceId ? [run.rx.uid] : [];
+        }),
+  );
+  for (const run of index.rxBySource.get(binding.sourceId) ?? [])
+    if (uids.has(run.rx!.uid)) yield run;
+}
+/** Whether a chart can have a trace, before constructing a ChartCard.
+ * Native charts require a matching Y (and metric X for XY). Explicit bindings
+ * ignore selection. Record fields/filters are not known from the scalar catalog:
+ * keep record charts visible when any eligible rx run exists. */
+export function chartHasSources(
+  spec: ChartSpec,
+  catalog: Catalog,
+  selectedRunIds: string[],
+): boolean {
+  if (spec.records) {
+    if (!spec.records.ys.length) return false;
+    return !recordSourceRuns(
+      spec.records,
+      selectedRunIds,
+      indexRuns(catalog),
+    ).next().done;
+  }
+  return !nativeSources(spec, selectedRunIds, catalog).next().done;
+}
 export function resolveSources(
   card: ChartSpec,
   selectedRunIds: string[],
   catalog: Catalog,
 ): ResolvedSeries[] {
+  const index = indexRuns(catalog);
   if (card.records) {
     const b = card.records;
-    const uids = recordRuns(b, catalog, selectedRunIds);
-    return catalog.runs
-      .filter(
-        (run) => run.rx?.sourceId === b.sourceId && uids.includes(run.rx.uid),
-      )
-      .flatMap((run) =>
-        b.ys.map((key) => ({
-          id: JSON.stringify([b.sourceId, run.rx!.uid, key, null]),
-          runId: run.id,
-          key,
-          kind: "metric" as const,
-          run,
-          label: `${run.name} · ${key}`,
-        })),
-      );
+    return [...recordSourceRuns(b, selectedRunIds, index)].flatMap((run) =>
+      b.ys.map((key) => ({
+        id: JSON.stringify([b.sourceId, run.rx!.uid, key, null]),
+        runId: run.id,
+        key,
+        kind: "metric" as const,
+        run,
+        label: `${run.name} · ${key}`,
+      })),
+    );
   }
-  const kind = card.kind === "image" ? "image" : "metric";
-  const runs = new Map(catalog.runs.map((run) => [run.id, run]));
-  const available = new Set(
-    catalog.series.map((s) =>
-      seriesId({ runId: s.run_id, key: s.key, kind: s.kind }),
-    ),
-  );
-  const refs: SeriesRef[] =
-    card.source.mode === "explicit"
-      ? card.source.series
-      : selectedRunIds.flatMap((runId) =>
-          card.source.mode === "selected"
-            ? card.source.keys.map((key) => ({ runId, key, kind }))
-            : [],
-        );
   const result: ResolvedSeries[] = [];
   const seen = new Set<string>();
-  const names = new Map<string, number>();
-  for (const run of catalog.runs)
-    names.set(run.name, (names.get(run.name) ?? 0) + 1);
-  const runLabel = (run: Run) =>
-    names.get(run.name)! > 1 ? `${run.name} (${run.id})` : run.name;
-  // XY charts: a trace exists only when both of its channels exist. A fixed
-  // X series may come from any run; a keyed X follows the Y trace's own run.
-  const binding = kind === "metric" ? card.x : undefined;
-  const xFor = (ref: SeriesRef): ResolvedSeries["x"] | null => {
-    if (!binding) return undefined;
-    const xRef: SeriesRef =
-      binding.mode === "series"
-        ? binding.series
-        : { runId: ref.runId, key: binding.key, kind: "metric" };
-    const xRun = runs.get(xRef.runId);
-    if (xRef.kind !== "metric" || !xRun || !available.has(seriesId(xRef)))
-      return null;
-    return {
-      ref: { ...xRef },
-      run: xRun,
-      label: `${runLabel(xRun)} \u00b7 ${xRef.key}`,
-    };
-  };
-  for (const ref of refs) {
-    const identity = seriesId(ref),
-      run = runs.get(ref.runId);
-    if (
-      ref.kind !== kind ||
-      !run ||
-      !available.has(identity) ||
-      seen.has(identity)
-    )
-      continue;
-    const x = xFor(ref);
-    if (x === null) continue;
+  for (const { ref, run, xRef, xRun } of nativeSources(
+    card,
+    selectedRunIds,
+    catalog,
+  )) {
+    const identity = seriesId(ref);
+    if (seen.has(identity)) continue;
     seen.add(identity);
     result.push({
       ...ref,
       id: identity,
       run,
-      label: `${runLabel(run)} \u00b7 ${ref.key}`,
-      ...(x ? { x } : {}),
+      label: `${runLabel(run, index)} · ${ref.key}`,
+      ...(xRef && xRun
+        ? {
+            x: {
+              ref: { ...xRef },
+              run: xRun,
+              label: `${runLabel(xRun, index)} · ${xRef.key}`,
+            },
+          }
+        : {}),
     });
   }
   return result;

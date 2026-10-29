@@ -227,6 +227,198 @@ test("hints during initial metadata and live requests coalesce without losing th
   expect(await metadataCount(page)).toBe(3);
 });
 
+for (const flushInactive of [false, true]) {
+  test(`initial single-frame metadata resumes after activation churn (${flushInactive ? "inactive animation frame" : "synchronous"})`, async ({
+    page,
+  }) => {
+    await fixture(page, true, { single: true });
+    await expect.poll(() => metadataCount(page)).toBe(1);
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).liveImages.pending.length),
+      )
+      .toBe(1);
+    await page.evaluate(async (flushInactive) => {
+      const s = (window as any).liveImages,
+        p = s.panel;
+      s.initialRequest = s.requests[0];
+      s.releaseInitial = s.pending.shift();
+      // No animation frame may run between these three transitions.
+      p.setActive(false);
+      p.setActive(true);
+      p.setActive(false);
+      if (flushInactive) {
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        s.inactive = {
+          active: p.active,
+          metadata: s.metadataCount(),
+          content: s.contentCount(),
+        };
+      }
+      p.setActive(true);
+    }, flushInactive);
+    if (flushInactive) {
+      expect(
+        await page.evaluate(() => (window as any).liveImages.inactive),
+      ).toEqual({ active: false, metadata: 1, content: 0 });
+    }
+    await expect.poll(() => metadataCount(page)).toBe(2);
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).liveImages.pending.length),
+      )
+      .toBe(1);
+    expect(
+      await page.evaluate(async () => {
+        const s = (window as any).liveImages,
+          p = s.panel;
+        // The transport ignores abort. Only the old response is released;
+        // replacement metadata remains held so it cannot hide a stale commit.
+        s.releaseInitial();
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+        return {
+          aborted: s.initialRequest.signal.aborted,
+          metadata: s.metadataCount(),
+          content: s.contentCount(),
+          metadataPending: p.metadataPending,
+          frames: p.frames.map((f: any) => f.id),
+          displayed: p.displayed ?? null,
+          requested: p.requested ?? null,
+          items: p.viewer.world.getItemCount(),
+        };
+      }),
+    ).toEqual({
+      aborted: true,
+      metadata: 2,
+      content: 0,
+      metadataPending: true,
+      frames: [],
+      displayed: null,
+      requested: null,
+      items: 0,
+    });
+    await expect(page.locator(".frame-info")).toHaveText("No frame loaded");
+    await page.evaluate(() => {
+      const s = (window as any).liveImages;
+      s.hold = false;
+      s.release();
+    });
+    await expect(page.locator(".frame-info")).toHaveText("Step 0 · 1 / 1");
+    expect(
+      await page.evaluate(() => {
+        const s = (window as any).liveImages,
+          p = s.panel;
+        return {
+          metadata: s.metadataCount(),
+          content: s.contentCount(),
+          displayed: p.displayed,
+          frames: p.frames.map((f: any) => f.id),
+          items: p.viewer.world.getItemCount(),
+          playing: p.playing,
+        };
+      }),
+    ).toEqual({
+      metadata: 2,
+      content: 1,
+      displayed: "run-a-0",
+      frames: ["run-a-0"],
+      items: 1,
+      playing: false,
+    });
+  });
+}
+
+test("inactive source replacement clears obsolete identity without loading until activation", async ({
+  page,
+}) => {
+  await fixture(page, false, { single: true });
+  expect(
+    await page.evaluate(async () => {
+      const s = (window as any).liveImages,
+        p = s.panel;
+      p.setActive(false);
+      s.hold = true;
+      s.frames = [s.frame(10, "a", "new")];
+      p.setSources(s.source("new"));
+      p.setActive(false);
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      return {
+        active: p.active,
+        metadata: s.metadataCount(),
+        content: s.contentCount(),
+        pending: s.pending.length,
+        displayed: p.displayed ?? null,
+        requested: p.requested ?? null,
+        frames: p.frames.map((f: any) => f.id),
+        all: p.all.map((f: any) => f.id),
+        cache: p.cache.size,
+        items: p.viewer.world.getItemCount(),
+      };
+    }),
+  ).toEqual({
+    active: false,
+    metadata: 1,
+    content: 1,
+    pending: 0,
+    displayed: null,
+    requested: null,
+    frames: [],
+    all: [],
+    cache: 0,
+    items: 0,
+  });
+  await expect(page.locator(".frame-info")).toHaveText("No frame loaded");
+  await expect(page.locator(".frame-info")).not.toHaveAttribute("data-step");
+  await expect(page.locator(".frame-info")).not.toHaveAttribute("title");
+  await page.evaluate(() => (window as any).liveImages.panel.setActive(true));
+  await expect.poll(() => metadataCount(page)).toBe(2);
+  expect(
+    await page.evaluate(() => {
+      const s = (window as any).liveImages;
+      return {
+        newRun: s.requests
+          .filter((r: any) => r.url.endsWith("/images"))[1]
+          .url.endsWith("/runs/new/images"),
+        pending: s.pending.length,
+        content: s.contentCount(),
+      };
+    }),
+  ).toEqual({ newRun: true, pending: 1, content: 1 });
+  await expect(page.locator(".frame-info")).toHaveText("No frame loaded");
+  await page.evaluate(() => {
+    const s = (window as any).liveImages;
+    s.hold = false;
+    s.release();
+  });
+  await expect(page.locator(".frame-info")).toHaveText("Step 10 · 1 / 1");
+  expect(
+    await page.evaluate(() => {
+      const s = (window as any).liveImages,
+        p = s.panel;
+      return {
+        metadata: s.metadataCount(),
+        content: s.contentCount(),
+        displayed: p.displayed,
+        frames: p.frames.map((f: any) => f.id),
+        cache: p.cache.size,
+        items: p.viewer.world.getItemCount(),
+        playing: p.playing,
+      };
+    }),
+  ).toEqual({
+    metadata: 2,
+    content: 2,
+    displayed: "new-a-10",
+    frames: ["new-a-10"],
+    cache: 1,
+    items: 1,
+    playing: false,
+  });
+});
+
 test("inactive panels defer hints, cancel live work and catch up only on activation", async ({
   page,
 }) => {

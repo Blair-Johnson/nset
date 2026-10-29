@@ -442,7 +442,7 @@ test("deactivation cancels staging and resumes safely; destroy settles pending d
     await page.evaluate(() =>
       (window as any).stability.panel.viewer.world.getItemCount(),
     ),
-  ).toBe(1);
+  ).toBe(0);
   await page.evaluate(() => (window as any).stability.panel.setActive(true));
   await expect(page.locator(".frame-info")).toHaveAttribute("data-step", "2");
   await page.evaluate(() => {
@@ -486,9 +486,17 @@ test("390px timeline stays in place during delayed frame and empty selection", a
   ).toBeLessThanOrEqual(390);
   await page.evaluate(() => (window as any).stability.panel.setSources([]));
   await expect(page.getByRole("status")).toHaveText("No images selected");
-  expect(
-    await page.evaluate(() => (window as any).stability.geometry()),
-  ).toEqual(geometry);
+  const emptyGeometry = await page.evaluate(() =>
+    (window as any).stability.geometry(),
+  );
+  expect(emptyGeometry[1]).toEqual(geometry[1]);
+  expect(emptyGeometry[2].slice(0, 3)).toEqual(geometry[2].slice(0, 3));
+  await expect(
+    page.getByRole("button", { name: "Play image timeline" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("slider", { name: "Image frame timeline" }),
+  ).toHaveCount(0);
   await release(page, "pendingDecode");
 });
 

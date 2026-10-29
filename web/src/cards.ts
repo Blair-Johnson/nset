@@ -91,6 +91,7 @@ export class ChartCard {
   private root = element("article", "chart-card");
   private header = element("header", "card-header");
   private foldObserver?: ResizeObserver;
+  private foldsActive = false;
   private title = element("h3", "card-title");
   private content = element("div", "card-content");
   private status = element("div", "card-status");
@@ -125,6 +126,9 @@ export class ChartCard {
   private active = true;
   private visible = typeof IntersectionObserver === "undefined";
   private loaded = false;
+  private transformDirty = false;
+  private colorsDirty = false;
+  private orderDirty = false;
   private data: Analyzed[] = [];
   /** Last fetched raw histories, kept so transform-only edits need no refetch. */
   private raw: PlotRun[] = [];
@@ -134,6 +138,8 @@ export class ChartCard {
   private cursorAxis: "x" | "y" = "x";
   private inspectOpen = false;
   private sources: ResolvedSeries[] = [];
+  private eligible = false;
+  private imageSourcesDirty = false;
   private loadedRecordSources?: ResolvedSeries[];
   private runOrder: readonly string[] = [];
   private legendDetails = element("details", "card-legend-details");
@@ -188,12 +194,9 @@ export class ChartCard {
       },
       { signal: this.lifetime.signal },
     );
-    // Register before PlotPanel so fold growth is compensated before its size observer.
-    this.foldObserver = new ResizeObserver(() => this.measureFolds());
-    this.build();
+    this.buildShell();
+    this.sources = this.resolveSources();
     this.installResize();
-    for (const node of [this.root, this.legend, this.inspection])
-      this.foldObserver.observe(node);
     if (typeof IntersectionObserver !== "undefined") {
       this.observer = new IntersectionObserver(
         (entries) => {
@@ -240,7 +243,12 @@ export class ChartCard {
 
   /** Derived colors only: keep observations, interpolators, pins and navigation alive. */
   refreshColors(): void {
-    if (this.destroyed || !this.plot) return;
+    if (this.destroyed || this.spec.kind === "image") return;
+    if (!this.demanded() || !this.plot) {
+      this.colorsDirty = true;
+      return;
+    }
+    this.colorsDirty = false;
     this.plot.refreshColors(this.displayConfig());
     this.renderLegend();
     this.renderResults();
@@ -297,7 +305,22 @@ export class ChartCard {
     );
   }
 
+  private setFoldsActive(active: boolean) {
+    if (active === this.foldsActive) return;
+    this.foldsActive = active;
+    if (!active) {
+      this.foldObserver?.disconnect();
+      return;
+    }
+    // Create/register before PlotPanel so folds are compensated before plot sizing.
+    this.foldObserver ??= new ResizeObserver(() => this.measureFolds());
+    for (const node of [this.root, this.legend, this.inspection])
+      this.foldObserver.observe(node);
+    this.measureFolds();
+  }
+
   private measureFolds() {
+    if (!this.foldsActive || !this.demanded()) return;
     const legend =
       !this.legendDetails.hidden && this.legendDetails.open
         ? this.legend.getBoundingClientRect().height
@@ -306,10 +329,9 @@ export class ChartCard {
       this.inspection.hidden || !this.inspection.isConnected
         ? 0
         : this.inspection.getBoundingClientRect().height + 4;
-    this.root.style.setProperty(
-      "--card-fold-height",
-      `${legend + inspection}px`,
-    );
+    const height = `${legend + inspection}px`;
+    if (this.root.style.getPropertyValue("--card-fold-height") !== height)
+      this.root.style.setProperty("--card-fold-height", height);
     if (this.full && this.plot) {
       const summary = this.legendDetails.hidden
         ? 0
@@ -477,9 +499,8 @@ export class ChartCard {
     this.maximize.focus({ preventScroll: true });
   }
 
-  private build() {
-    this.hoverPosition?.destroy();
-    this.hoverPosition = undefined;
+  /** Stable shell: no viewer, plot controls, or layout observers until demanded. */
+  private buildShell() {
     this.root.dataset.role = "chart-card";
     this.host.dataset.cardId = this.spec.id;
     this.host.dataset.cardKind = this.spec.kind;
@@ -509,7 +530,11 @@ export class ChartCard {
     item("Move down", () => this.actions.onMove(this.spec.id, 1));
     item("Remove", () => this.actions.onRemove(this.spec.id));
     this.menu.append(summary, items);
-    this.header.querySelector(".card-chart-toolbar")?.remove();
+  }
+
+  private ensurePanel(): boolean {
+    if (!this.demanded() || !this.eligible) return false;
+    if (this.plot || this.images) return true;
     this.content.replaceChildren();
     this.inputs.clear();
     this.cursorButtons.clear();
@@ -517,7 +542,7 @@ export class ChartCard {
       this.images = new ImagePanel(this.content, this.context.api, {
         compact: true,
       });
-      return;
+      return true;
     }
     const toolbar = element("div", "card-chart-toolbar");
     this.backButton = iconButton("back", "Previous view", () =>
@@ -579,6 +604,8 @@ export class ChartCard {
       this.hover,
       this.inspection,
     );
+    this.setFoldsActive(false);
+    this.setFoldsActive(true);
     this.hoverPosition = new HoverLegendPosition(this.hover, plotHost);
     this.plot = new PlotPanel(
       plotHost,
@@ -588,11 +615,23 @@ export class ChartCard {
       true,
     );
     this.configure();
-    if (this.foldObserver) {
-      this.foldObserver.disconnect();
-      for (const node of [this.root, this.legend, this.inspection])
-        this.foldObserver.observe(node);
-    }
+    return true;
+  }
+
+  private destroyPanel() {
+    this.setFoldsActive(false);
+    this.hoverPosition?.destroy();
+    this.hoverPosition = undefined;
+    this.plot?.destroy();
+    this.images?.destroy();
+    this.plot = undefined;
+    this.images = undefined;
+    this.header.querySelector(".card-chart-toolbar")?.remove();
+    this.root.style.removeProperty("--card-fold-height");
+    this.root.style.removeProperty("--card-full-plot-height");
+    this.content.replaceChildren();
+    this.inputs.clear();
+    this.cursorButtons.clear();
   }
 
   private configure(rebuild = true) {
@@ -736,7 +775,8 @@ export class ChartCard {
   setRunOrder(topFirstRunIds: readonly string[]): void {
     if (this.destroyed) return;
     this.runOrder = [...topFirstRunIds];
-    this.syncDrawOrder(true);
+    if (this.demanded()) this.syncDrawOrder(true);
+    else this.orderDirty = true;
   }
   private syncDrawOrder(redraw = false): void {
     this.plot?.setDrawOrder(
@@ -1089,6 +1129,31 @@ export class ChartCard {
       document.visibilityState !== "hidden"
     );
   }
+  private resolveSources(): ResolvedSeries[] {
+    const sources = resolveSources(
+      this.spec,
+      this.context.selectedRunIds,
+      this.context.catalog,
+    );
+    this.eligible = sources.length > 0;
+    const expected =
+      this.spec.source.mode === "explicit"
+        ? new Set(
+            this.spec.source.series.map((ref) =>
+              JSON.stringify([ref.runId, ref.key, ref.kind]),
+            ),
+          ).size
+        : 0;
+    if (!this.spec.records)
+      this.notice.textContent =
+        expected > sources.length
+          ? `${expected - sources.length} series unavailable`
+          : "";
+    const empty = "No matching series. Select runs or edit this chart.";
+    if (!this.eligible) this.status.textContent = empty;
+    else if (this.status.textContent === empty) this.status.textContent = "";
+    return sources;
+  }
   private sourceSignature(sources: ResolvedSeries[]): string {
     return JSON.stringify(
       sources.map((s) => [
@@ -1128,7 +1193,8 @@ export class ChartCard {
     this.liveAbort = undefined;
   }
   private syncLiveWatch(): void {
-    if (!this.demanded() || this.images || this.spec.records) return;
+    if (!this.demanded() || this.spec.kind === "image" || this.spec.records)
+      return;
     const refs = this.liveRefs();
     const key = JSON.stringify(refs);
     if (this.unwatch && key === this.watchKey) return;
@@ -1151,7 +1217,7 @@ export class ChartCard {
       this.abort ||
       this.liveAbort ||
       this.liveTimer !== undefined ||
-      this.images
+      this.spec.kind === "image"
     )
       return;
     this.liveTimer = setTimeout(
@@ -1287,47 +1353,34 @@ export class ChartCard {
         ),
       );
     this.context = { ...this.context, catalog };
-    if (this.images) {
-      const sources = resolveSources(
-        this.spec,
-        this.context.selectedRunIds,
-        catalog,
-      );
-      if (
+    const sources = this.resolveSources();
+    if (this.spec.kind === "image") {
+      const changed =
         JSON.stringify(sources.map((s) => s.id)) !==
-        JSON.stringify(this.sources.map((s) => s.id))
-      ) {
-        this.sources = sources;
-        this.images.setSources(sources);
+        JSON.stringify(this.sources.map((s) => s.id));
+      this.sources = sources;
+      if (changed) {
+        if (this.images) {
+          // Keep suspended frame/camera/cache until demand returns. Empty sources
+          // are incompatible and must discard the old image immediately.
+          this.imageSourcesDirty = sources.length > 0;
+          if (!sources.length) this.images.setSources(sources);
+        } else this.loaded = false;
       }
+      this.updateActive();
       return;
     }
-    const sources = resolveSources(
-      this.spec,
-      this.context.selectedRunIds,
-      catalog,
-    );
     const after = this.sourceSignature(sources);
     // Keep current metadata even when dependency identities and labels are stable.
     this.sources = sources;
     if (before === after) return;
+    if (!sources.length) {
+      this.refresh();
+      return;
+    }
     this.cancel();
     this.sources = sources;
     this.sourceKey = after;
-    if (!this.spec.records) {
-      const expected =
-        this.spec.source.mode === "explicit"
-          ? new Set(
-              this.spec.source.series.map((ref) =>
-                JSON.stringify([ref.runId, ref.key, ref.kind]),
-              ),
-            ).size
-          : 0;
-      this.notice.textContent =
-        expected > sources.length
-          ? `${expected - sources.length} series unavailable`
-          : "";
-    }
     this.liveDirty = true;
     if (!this.raw.length) this.loaded = false;
     this.updateActive();
@@ -1356,9 +1409,17 @@ export class ChartCard {
     this.abort = undefined;
   }
   private updateActive() {
-    const active = this.demanded();
+    const active = this.ensurePanel();
+    this.setFoldsActive(active);
+    this.hoverPosition?.setActive(active);
+    this.plot?.setActive(active);
+    if (active && this.imageSourcesDirty && this.images) {
+      this.imageSourcesDirty = false;
+      this.images.setSources(this.sources);
+    }
     this.images?.setActive(active);
     if (!active) {
+      this.cancelResize();
       if (this.loaded && (this.context.store.watch || this.spec.records))
         this.liveDirty = true;
       this.stopLive();
@@ -1368,11 +1429,43 @@ export class ChartCard {
       }
       return;
     }
+    this.applyDeferred();
     if (!this.loaded) void this.ensureLoaded();
     this.syncLiveWatch();
     this.scheduleLive();
   }
+  private applyDeferred() {
+    if (this.transformDirty && this.plot && this.loaded && !this.abort) {
+      this.transformDirty = false;
+      this.data = analyze(this.raw, this.spec.config);
+      this.syncDrawOrder();
+      const display = this.displayConfig();
+      this.plot.updateData(
+        this.data,
+        this.spec.outliers === "robust"
+          ? robustConfig(this.data, display)
+          : display,
+        this.pins,
+      );
+      this.colorsDirty = false;
+      this.orderDirty = false;
+      this.renderLegend();
+      this.renderResults();
+      this.renderHover();
+    }
+    if (this.colorsDirty) this.refreshColors();
+    if (this.orderDirty) {
+      this.orderDirty = false;
+      this.syncDrawOrder(true);
+    }
+    if (this.pendingCamera && this.loaded && !this.abort) {
+      const camera = this.pendingCamera;
+      this.pendingCamera = undefined;
+      this.setCamera(camera);
+    }
+  }
   private ensureLoaded(): Promise<void> {
+    if (!this.ensurePanel()) return Promise.resolve();
     if (!this.loaded) {
       const pending = this.load();
       this.loading = pending;
@@ -1383,8 +1476,11 @@ export class ChartCard {
     return this.loading ?? Promise.resolve();
   }
   private async load() {
-    if (this.destroyed) return;
+    if (!this.demanded() || !this.ensurePanel()) return;
     this.cancel();
+    // This full snapshot consumes invalidations from before the load. Watch
+    // callbacks installed below still mark publications during the load dirty.
+    this.liveDirty = false;
     const generation = this.generation;
     const controller = new AbortController();
     this.abort = controller;
@@ -1400,30 +1496,14 @@ export class ChartCard {
     this.legendValues = [];
     this.clipping.replaceChildren();
     this.renderResults();
-    const sources = (this.sources = resolveSources(
-      this.spec,
-      this.context.selectedRunIds,
-      this.context.catalog,
-    ));
+    const sources = (this.sources = this.resolveSources());
     this.sourceKey = this.sourceSignature(sources);
     this.syncLiveWatch();
-    const expected =
-      this.spec.source.mode === "explicit"
-        ? new Set(
-            this.spec.source.series.map((ref) =>
-              JSON.stringify([ref.runId, ref.key, ref.kind]),
-            ),
-          ).size
-        : 0;
-    this.notice.textContent =
-      expected > sources.length
-        ? `${expected - sources.length} series unavailable`
-        : "";
-    if (this.images) {
+    if (this.spec.kind === "image") {
       this.status.textContent = "";
-      this.images.setCamera(this.pendingCamera?.image);
+      this.images!.setCamera(this.pendingCamera?.image);
       this.pendingCamera = undefined;
-      this.images.setSources(sources);
+      this.images!.setSources(sources);
       this.abort = undefined;
       return;
     }
@@ -1513,22 +1593,33 @@ export class ChartCard {
     if (this.destroyed) return;
     this.measurementRevision++;
     const apiChanged = context.api !== this.context.api;
+    const sources = resolveSources(
+      this.spec,
+      context.selectedRunIds,
+      context.catalog,
+    );
     const presentationOnly =
       !apiChanged &&
       context.store === this.context.store &&
-      JSON.stringify(context.catalog) ===
-        JSON.stringify(this.context.catalog) &&
-      JSON.stringify(context.selectedRunIds) ===
-        JSON.stringify(this.context.selectedRunIds);
+      this.sourceSignature(sources) ===
+        this.sourceSignature(
+          resolveSources(
+            this.spec,
+            this.context.selectedRunIds,
+            this.context.catalog,
+          ),
+        );
     this.context = context;
     if (presentationOnly) {
+      this.eligible = sources.length > 0;
+      if (!this.loadedRecordSources) this.sources = sources;
       this.refreshColors();
+      this.updateActive();
       return;
     }
-    if (apiChanged && this.images) {
-      this.images.destroy();
-      this.images = undefined;
-      this.build();
+    if (apiChanged && this.spec.kind === "image") {
+      this.destroyPanel();
+      this.buildShell();
     }
     this.refresh();
   }
@@ -1544,7 +1635,6 @@ export class ChartCard {
       signal?.aborted ||
       this.destroyed ||
       !this.active ||
-      !this.plot ||
       this.spec.kind === "image" ||
       (measurement.axis !== "x" && measurement.axis !== "y") ||
       !Number.isFinite(measurement.a) ||
@@ -1559,18 +1649,19 @@ export class ChartCard {
     )
       return false;
     const revision = ++this.measurementRevision;
-    const plot = this.plot;
     this.root.scrollIntoView({ block: "nearest", inline: "nearest" });
     // Explicit user reveal may precede IntersectionObserver's next delivery.
     this.visible = true;
+    this.updateActive();
+    const plot = this.plot;
+    if (!plot || !this.demanded()) return false;
     const ready = this.ensureLoaded();
     this.syncLiveWatch();
     this.scheduleLive();
     const generation = this.generation;
     await ready;
     if (
-      this.destroyed ||
-      !this.active ||
+      !this.demanded() ||
       signal?.aborted ||
       revision !== this.measurementRevision ||
       generation !== this.generation ||
@@ -1622,8 +1713,9 @@ export class ChartCard {
 
   /** Current camera, for handing to the editor preview. */
   camera(): EditorCamera | undefined {
-    if (this.images) {
-      const image = this.images.camera();
+    if (this.pendingCamera) return this.pendingCamera;
+    if (this.spec.kind === "image") {
+      const image = this.images?.camera();
       return image ? { image } : undefined;
     }
     const view = this.plot?.zoomed() ? this.plot.viewport() : null;
@@ -1641,6 +1733,10 @@ export class ChartCard {
   /** Adopt a camera (from the editor) on the next render of this card. */
   setCamera(camera: EditorCamera | undefined): void {
     if (!camera) return;
+    if (!this.demanded()) {
+      this.pendingCamera = camera;
+      return;
+    }
     if (camera.image && this.images && this.loaded && !this.abort) {
       this.images.setCamera(camera.image);
       return;
@@ -1721,29 +1817,20 @@ export class ChartCard {
       this.spec = spec;
       this.title.textContent = spec.title;
       this.updateDetailsButton();
+      this.root.classList.toggle("card-wide", spec.size === "wide");
       this.applyDimensions();
-      this.data = analyze(this.raw, spec.config);
-      this.renderLegend();
-      const display = this.displayConfig();
-      this.plot.updateData(
-        this.data,
-        spec.outliers === "robust" ? robustConfig(this.data, display) : display,
-        this.pins,
-      );
-      this.renderResults();
+      this.transformDirty = true;
+      if (this.demanded()) this.applyDeferred();
       return;
     }
     if (cameraAxis(spec) !== cameraAxis(this.spec))
       this.pins = { a: null, b: null, threshold: null };
     this.cancel();
-    this.plot?.destroy();
-    this.images?.destroy();
-    this.plot = undefined;
-    this.images = undefined;
+    this.destroyPanel();
     this.spec = spec;
     this.data = [];
     this.raw = [];
-    this.build();
+    this.buildShell();
     this.refresh();
   }
   setActive(active: boolean): void {
@@ -1757,7 +1844,11 @@ export class ChartCard {
     this.cancel();
     this.loaded = false;
     this.sourceKey = undefined;
+    this.imageSourcesDirty = false;
     this.liveDirty = false;
+    this.transformDirty = false;
+    this.colorsDirty = false;
+    this.orderDirty = false;
     this.data = [];
     this.raw = [];
     this.legend.replaceChildren();
@@ -1765,6 +1856,7 @@ export class ChartCard {
     this.images?.clear();
     this.status.textContent = "";
     this.notice.textContent = "";
+    this.sources = this.resolveSources();
     this.hover.textContent = "";
     this.lastHoverX = null;
     this.lastHoverPointer = null;

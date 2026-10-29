@@ -45,6 +45,8 @@ export class HoverLegendPosition {
   private corners?: LegendCorners;
   private overlay?: HTMLElement;
   private frame = 0;
+  private active = false;
+  private destroyed = false;
   private resize = new ResizeObserver(() => this.schedule());
   private mutation = new MutationObserver(() => this.schedule());
 
@@ -52,16 +54,34 @@ export class HoverLegendPosition {
     private popup: HTMLElement,
     private plotHost: HTMLElement,
   ) {
-    const parent = popup.parentElement!;
+    this.setActive(true);
+  }
+
+  setActive(active: boolean): void {
+    if (this.destroyed || this.active === active) return;
+    this.active = active;
+    if (!active) {
+      this.resize.disconnect();
+      this.mutation.disconnect();
+      cancelAnimationFrame(this.frame);
+      this.frame = 0;
+      this.corners = undefined;
+      this.overlay = undefined;
+      this.pointer = null;
+      this.setSide("right");
+      return;
+    }
+    const parent = this.popup.parentElement!;
     this.resize.observe(parent);
     // Includes clipping notices, whose height can move the plot without resizing it.
     for (const child of parent.children) this.resize.observe(child);
     // uPlot can replace its root on a data/config render.
-    this.mutation.observe(plotHost, { childList: true });
+    this.mutation.observe(this.plotHost, { childList: true });
     this.schedule();
   }
 
   update(pointer: Point | null): void {
+    if (!this.active) return;
     this.pointer = pointer;
     if (!pointer) {
       this.setSide("right");
@@ -77,7 +97,7 @@ export class HoverLegendPosition {
   }
 
   private schedule(): void {
-    if (!this.frame)
+    if (this.active && !this.frame)
       this.frame = requestAnimationFrame(() => {
         this.frame = 0;
         this.measure();
@@ -85,6 +105,7 @@ export class HoverLegendPosition {
   }
 
   private measure(): void {
+    if (!this.active) return;
     const overlay =
       this.plotHost.querySelector<HTMLElement>(".u-over") ?? undefined;
     if (overlay !== this.overlay) {
@@ -109,9 +130,18 @@ export class HoverLegendPosition {
     const height = Math.min(popup.height, availableHeight);
     const originX = container.left + parent.clientLeft - parent.scrollLeft;
     const originY = container.top + parent.clientTop - parent.scrollTop;
-    this.popup.style.setProperty("--legend-left", `${plot.left - originX + inset}px`);
-    this.popup.style.setProperty("--legend-right", `${parent.clientWidth - (plot.right - originX) + inset}px`);
-    this.popup.style.setProperty("--legend-top", `${plot.top - originY + inset}px`);
+    this.popup.style.setProperty(
+      "--legend-left",
+      `${plot.left - originX + inset}px`,
+    );
+    this.popup.style.setProperty(
+      "--legend-right",
+      `${parent.clientWidth - (plot.right - originX) + inset}px`,
+    );
+    this.popup.style.setProperty(
+      "--legend-top",
+      `${plot.top - originY + inset}px`,
+    );
     this.popup.style.setProperty("--legend-width", `${availableWidth}px`);
     this.popup.style.setProperty("--legend-height", `${availableHeight}px`);
     this.corners = {
@@ -122,8 +152,7 @@ export class HoverLegendPosition {
   }
 
   destroy(): void {
-    this.resize.disconnect();
-    this.mutation.disconnect();
-    cancelAnimationFrame(this.frame);
+    this.setActive(false);
+    this.destroyed = true;
   }
 }

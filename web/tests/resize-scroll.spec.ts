@@ -102,9 +102,9 @@ async function fixture(page: Page, bottom = false) {
     const { ChartCard } = await import("/src/cards.ts");
     const state = ((window as any).resizeTest = { cards: {} });
     const proto = ChartCard.prototype as any;
-    const build = proto.build;
-    proto.build = function (...args: any[]) {
-      const result = build.apply(this, args);
+    const buildShell = proto.buildShell;
+    proto.buildShell = function (...args: any[]) {
+      const result = buildShell.apply(this, args);
       state.cards[this.spec.id] = this;
       return result;
     };

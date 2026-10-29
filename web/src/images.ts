@@ -34,7 +34,11 @@ export class ImagePanel {
   private lifetime = new AbortController();
   private destroyed = false;
   private resume = false;
-  private resumeFrame = false;
+  private resumeFrame?: string;
+  private suspendedCamera?: ImageCamera;
+  private suspendedFrame?: string;
+  private activationRaf?: number;
+  private cancelGesture = () => {};
   private metadataPending = false;
   private liveDirty = false;
   private liveQueued = false;
@@ -226,7 +230,15 @@ export class ImagePanel {
       element: canvas,
       showNavigationControl: false,
       showNavigator: false,
-      preserveViewport: true,
+      // Our toolbar is external; do not animate nonexistent OSD controls.
+      autoHideControls: false,
+      // A dashboard may contain dozens of viewers; do not allocate a scarce
+      // WebGL context per panel for these ordinary raster images.
+      drawer: "canvas",
+      // Fit the first item before tile loading. Preserving an empty viewport
+      // can leave a wide image entirely outside it, so readiness never arrives.
+      // Replacement frames are staged alongside the old item and retain its camera.
+      preserveViewport: false,
       visibilityRatio: 0.1,
       minZoomImageRatio: 0.5,
       maxZoomPixelRatio: 8,
@@ -337,12 +349,26 @@ export class ImagePanel {
   }
   setActive(active: boolean) {
     if (this.destroyed || this.active === active) return;
+    if (this.activationRaf !== undefined)
+      cancelAnimationFrame(this.activationRaf);
+    this.activationRaf = undefined;
+    this.cancelGesture();
     this.active = active;
+    this.viewer.setMouseNavEnabled(active);
     if (!active) {
       this.cancelLive();
-      this.resume = this.metadataPending;
-      this.resumeFrame =
-        !this.resume && !!this.requested && this.requested !== this.displayed;
+      this.resume ||= this.metadataPending;
+      // Keep logical selection separate from the physical item being closed.
+      // A scrub/playback request may have been interrupted before it displayed.
+      this.resumeFrame = this.resume
+        ? undefined
+        : (this.requested ?? this.displayed);
+      this.suspendedFrame = this.displayed ?? this.suspendedFrame;
+      const camera = this.camera();
+      if (camera) {
+        this.suspendedCamera = camera;
+        this.pendingCamera ??= camera;
+      }
       this.metadataPending = false;
       this.stop();
       this.metadata.next();
@@ -350,8 +376,14 @@ export class ImagePanel {
       this.metadataAbort?.abort();
       this.frameAbort?.abort();
       this.prefetchAbort?.abort();
+      // OSD schedules updates as long as its world is open, even when hidden.
+      // close() stops that loop without discarding our metadata or blob cache.
+      this.displayed = undefined;
+      this.needsHome = true;
+      this.viewer.close();
     } else
-      requestAnimationFrame(() => {
+      this.activationRaf = requestAnimationFrame(() => {
+        this.activationRaf = undefined;
         if (this.destroyed || !this.active) return;
         if (this.resume) {
           this.resume = false;
@@ -359,26 +391,23 @@ export class ImagePanel {
           return;
         }
         this.queueLive();
-        if (this.resumeFrame) {
-          this.resumeFrame = false;
-          void this.show(this.index);
-        }
-        if (this.active && this.needsHome && this.displayed) {
-          this.viewer.viewport.resize(
-            new OpenSeadragon.Point(
-              this.viewer.container.clientWidth,
-              this.viewer.container.clientHeight,
-            ),
-            true,
+        const frame = this.resumeFrame;
+        this.resumeFrame = undefined;
+        if (frame) {
+          const index = this.frames.findIndex(
+            (candidate) => candidate.id === frame,
           );
-          this.home();
-          this.needsHome = false;
+          if (index >= 0) void this.show(index);
         }
       });
   }
   setSources(sources: ResolvedSeries[]): void {
     this.sources = sources.filter((source) => source.kind === "image");
     const previous = this.runSelect.value;
+    const previousKey = this.keySelect.value;
+    const retained = this.sources.some(
+      (source) => source.runId === previous && source.key === previousKey,
+    );
     this.runs = [
       ...new Map(
         this.sources.map((source) => [source.runId, source.run]),
@@ -393,7 +422,12 @@ export class ImagePanel {
     if (this.runs.some((run) => run.id === previous))
       this.runSelect.value = previous;
     this.runSelect.hidden = this.compact && this.runs.length <= 1;
-    void this.load();
+    if (retained) {
+      // Source additions and presentation changes must not reset a valid
+      // selection, including its suspended frame, camera, and blob cache.
+      this.updateKeys(previous, previousKey);
+      this.refreshLive();
+    } else void this.load();
   }
   setRuns(runs: Run[]) {
     this.sources = undefined;
@@ -483,7 +517,7 @@ export class ImagePanel {
       this.slider.disabled = !this.frames.length;
       this.updateSequenceControls();
       const displayed = this.frames.find(
-        (frame) => frame.id === this.displayed,
+        (frame) => frame.id === (this.displayed ?? this.suspendedFrame),
       );
       if (displayed) this.updateFrameInfo(displayed);
       if (this.liveError && this.status.textContent === this.liveError)
@@ -587,6 +621,8 @@ export class ImagePanel {
   }
   /** Current visible region, or null before a frame is shown. */
   camera(): ImageCamera | null {
+    if (this.suspendedCamera)
+      return { ...(this.pendingCamera ?? this.suspendedCamera) };
     if (!this.displayed || !this.viewer.world.getItemCount()) return null;
     const viewport = this.viewer.viewport;
     const b = viewport.getBounds(true);
@@ -611,15 +647,16 @@ export class ImagePanel {
     const viewport = this.viewer.viewport;
     viewport.setRotation(camera.rotation, true);
     viewport.setFlip(camera.flip);
-    // getBounds() reports the rotated region; fitBounds() undoes that rotation,
-    // then fits the limiting dimension without distorting the image.
+    // getBounds() normalizes its Rect angle to [0, 90), swapping dimensions
+    // and shifting its origin at quarter turns. Recreate that normalized angle,
+    // not -rotation (which would normalize those coordinates a second time).
     viewport.fitBounds(
       new OpenSeadragon.Rect(
         camera.x,
         camera.y,
         camera.width,
         camera.height,
-        -camera.rotation,
+        ((-camera.rotation % 90) + 90) % 90,
       ),
       true,
     );
@@ -742,7 +779,7 @@ export class ImagePanel {
       "pointermove",
       (e) => {
         const g = drag;
-        if (!g || e.pointerId !== g.id) return;
+        if (!this.active || !g || e.pointerId !== g.id) return;
         e.stopPropagation();
         const p = local(e);
         g.moved ||= Math.hypot(p.x - g.x, p.y - g.y) >= MIN_DRAG;
@@ -785,7 +822,7 @@ export class ImagePanel {
     canvas.addEventListener(
       "dblclick",
       (e) => {
-        if (editableTarget(e.target)) return;
+        if (!this.active || editableTarget(e.target)) return;
         e.preventDefault();
         this.viewer.viewport.goHome();
       },
@@ -816,6 +853,11 @@ export class ImagePanel {
       },
       { signal },
     );
+    this.cancelGesture = () => {
+      this.space = false;
+      finish(null, false);
+      cursor();
+    };
     const releaseSpace = () => {
       if (!this.space) return;
       this.space = false;
@@ -850,6 +892,10 @@ export class ImagePanel {
     this.frameAbort?.abort();
     this.prefetchAbort?.abort();
     this.viewer.close();
+    if (this.suspendedCamera) this.pendingCamera = undefined;
+    this.suspendedCamera = undefined;
+    this.suspendedFrame = undefined;
+    this.resumeFrame = undefined;
     this.clearFrameInfo();
     this.displayed = undefined;
     this.requested = undefined;
@@ -869,7 +915,7 @@ export class ImagePanel {
     this.liveDirty = false;
     this.liveError = undefined;
     this.resume = false;
-    this.resumeFrame = false;
+    this.resumeFrame = undefined;
     const previousKey = this.keySelect.value;
     const generation = this.metadata.next();
     this.metadataAbort?.abort();
@@ -883,6 +929,10 @@ export class ImagePanel {
       return;
     }
     this.status.textContent = "Loading image metadata…";
+    if (!this.active) {
+      this.resume = true;
+      return;
+    }
     this.metadataPending = true;
     try {
       const response = await this.api.json<{ images: ImageFrame[] }>(
@@ -909,6 +959,10 @@ export class ImagePanel {
     this.frameAbort?.abort();
     this.prefetchAbort?.abort();
     this.viewer.close();
+    if (this.suspendedCamera) this.pendingCamera = undefined;
+    this.suspendedCamera = undefined;
+    this.suspendedFrame = undefined;
+    this.resumeFrame = undefined;
     this.clearFrameInfo();
     this.displayed = undefined;
     this.requested = undefined;
@@ -989,6 +1043,11 @@ export class ImagePanel {
     this.slider.value = String(index);
     const frame = this.frames[index];
     this.requested = frame.id;
+    if (!this.active) {
+      this.resumeFrame = frame.id;
+      return { status: "cancelled" };
+    }
+    this.resumeFrame = undefined;
     this.prefetchAbort?.abort();
     const generation = this.requests.next();
     this.frameAbort?.abort();
@@ -1020,9 +1079,14 @@ export class ImagePanel {
       entry = await Promise.race([this.blob(frame, signal), interrupted]);
       fetched = performance.now();
       signal.throwIfAborted();
-      if (!this.requests.current(generation)) return { status: "cancelled" };
+      if (!this.active || !this.requests.current(generation))
+        return { status: "cancelled" };
       const itemOpened = await this.prepare(entry.url, signal);
-      if (!this.requests.current(generation) || signal.aborted) {
+      if (
+        !this.active ||
+        !this.requests.current(generation) ||
+        signal.aborted
+      ) {
         this.viewer.world.removeItem(itemOpened);
         return { status: "cancelled" };
       }
@@ -1049,6 +1113,8 @@ export class ImagePanel {
         } else this.needsHome = true;
       } else this.viewer.viewport.fitBounds(bounds, true);
       this.displayed = frame.id;
+      this.suspendedCamera = undefined;
+      this.suspendedFrame = undefined;
       this.viewer.forceRedraw();
       // Metadata may have inserted earlier frames while this image decoded.
       this.index = this.frames.findIndex(
@@ -1259,11 +1325,15 @@ export class ImagePanel {
     schedule();
   }
   clear() {
+    if (this.activationRaf !== undefined)
+      cancelAnimationFrame(this.activationRaf);
+    this.activationRaf = undefined;
+    this.cancelGesture();
     this.cancelLive();
     this.liveDirty = false;
     this.liveError = undefined;
     this.resume = false;
-    this.resumeFrame = false;
+    this.resumeFrame = undefined;
     this.metadataPending = false;
     this.metadata.next();
     this.metadataAbort?.abort();

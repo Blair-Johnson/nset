@@ -102,7 +102,20 @@ function tracePath(
 export class PlotPanel {
   private chart?: uPlot;
   private generation = 0;
-  private pendingData?: { data: Analyzed[]; config: ViewConfig; pins: Pins };
+  private active = true;
+  private destroyed = false;
+  private pendingData?: {
+    data: Analyzed[];
+    config: ViewConfig;
+    pins: Pins;
+    options?: {
+      preserveView?: boolean;
+      initialView?: Viewport | null;
+      updateData?: boolean;
+    };
+  };
+  private pendingColors?: ViewConfig;
+  private pendingRedraw = false;
   private dataTimer?: ReturnType<typeof setTimeout>;
   private interaction?: PlotInteraction;
   private navigation?: PlotNavigation;
@@ -124,7 +137,7 @@ export class PlotPanel {
     if (redraw && this.chart && this.config) {
       const next = this.pendingData ?? {
         data: this.analyzed,
-        config: this.config,
+        config: this.pendingColors ?? this.config,
         pins: this.pins,
       };
       this.updateData(next.data, next.config, next.pins);
@@ -147,8 +160,54 @@ export class PlotPanel {
     this.resize = new ResizeObserver(() => this.syncSize());
     this.resize.observe(host);
   }
+  /** Retain the renderer and navigation state while its card is not demanded. */
+  setActive(active: boolean): void {
+    if (this.destroyed || this.active === active) return;
+    this.active = active;
+    if (!active) {
+      this.resize.disconnect();
+      clearTimeout(this.dataTimer);
+      this.dataTimer = undefined;
+      const pause = () => {
+        this.navigation?.setActive(false);
+        this.hoverPointer = undefined;
+        this.hoverClient = undefined;
+        this.mouseAxisTicks?.update(null);
+        this.interaction?.onHover?.(null);
+      };
+      // Hover/gesture cleanup must not queue a new native repaint while hidden.
+      if (this.chart && (this.hoverPointer || this.interacting()))
+        this.chart.batch(pause);
+      else pause();
+      return;
+    }
+    const next = this.pendingData;
+    const colors = this.pendingColors;
+    const redraw = this.pendingRedraw;
+    this.pendingData = undefined;
+    this.pendingColors = undefined;
+    this.pendingRedraw = false;
+    if (next)
+      this.render(next.data, next.config, next.pins, {
+        ...next.options,
+        preserveView: true,
+        updateData: true,
+      });
+    else if (colors) this.refreshColors(colors);
+    else if (redraw) this.chart?.redraw(false);
+    if (!this.navigation) this.attachNavigation();
+    this.navigation?.setActive(true);
+    this.resize.observe(this.host);
+    this.syncSize();
+  }
   private syncSize() {
-    if (!this.chart || !this.config || this.host.clientWidth <= 0) return;
+    if (
+      !this.active ||
+      !this.chart ||
+      !this.config ||
+      this.host.clientWidth <= 0
+    )
+      return;
     const width = this.fillHost
       ? this.host.clientWidth
       : (this.config.width ?? Math.max(320, this.host.clientWidth));
@@ -162,6 +221,20 @@ export class PlotPanel {
 
   /** Only replace display colors; retain uPlot, data arrays, scales and navigation history. */
   refreshColors(config: ViewConfig): void {
+    if (this.destroyed) return;
+    const previous = this.pendingData?.config ?? this.config;
+    if (!previous) return;
+    const colors = {
+      ...previous,
+      runs: config.runs,
+      palette: config.palette,
+      style: config.style,
+    };
+    if (this.pendingData) this.pendingData.config = colors;
+    if (!this.active) {
+      if (!this.pendingData) this.pendingColors = colors;
+      return;
+    }
     if (!this.chart || !this.config) return;
     this.analyzed.forEach((data, index) => {
       const style = styleFor(config, data.run.id, index);
@@ -197,6 +270,8 @@ export class PlotPanel {
     clearTimeout(this.dataTimer);
     this.dataTimer = undefined;
     this.pendingData = undefined;
+    this.pendingColors = undefined;
+    this.pendingRedraw = false;
     this.hoverPointer = undefined;
     this.hoverClient = undefined;
     this.interaction?.onHover?.(null);
@@ -211,13 +286,17 @@ export class PlotPanel {
     this.host.replaceChildren();
   }
   destroy() {
+    if (this.destroyed) return;
+    this.setActive(false);
+    this.destroyed = true;
     this.clear();
-    this.resize.disconnect();
   }
   setPins(pins: Pins) {
+    if (this.destroyed) return;
     this.pins = { ...pins };
     if (this.pendingData) this.pendingData.pins = { ...pins };
-    this.chart?.redraw(false);
+    if (this.active) this.chart?.redraw(false);
+    else this.pendingRedraw = true;
   }
   configureInteraction(options: PlotInteraction): void {
     // Ordinary cursor orientation changes intentionally keep the current hover.
@@ -226,6 +305,10 @@ export class PlotPanel {
       this.interaction?.mode !== options.mode &&
       (this.interaction?.mode === "navigate" || options.mode === "navigate");
     this.interaction = { ...options };
+    if (!this.active) {
+      this.navigation?.configure(this.navigationOptions());
+      return;
+    }
     const pointer = changedTool ? undefined : this.hoverPointer;
     const client = changedTool ? undefined : this.hoverClient;
     if (this.navigation) this.navigation.configure(this.navigationOptions());
@@ -418,9 +501,17 @@ export class PlotPanel {
   /** Live replacement: reuse the renderer for stable topology, never interrupt a
    * drag/pinch. Only the newest pending snapshot is retained during a gesture. */
   updateData(data: Analyzed[], config: ViewConfig, pins: Pins): void {
-    this.pendingData = { data, config, pins };
+    if (this.destroyed) return;
+    this.pendingData = {
+      data,
+      config,
+      pins: { ...pins },
+      options: this.pendingData?.options,
+    };
+    this.pendingColors = undefined;
     clearTimeout(this.dataTimer);
     this.dataTimer = undefined;
+    if (!this.active) return;
     if (this.interacting()) {
       this.dataTimer = setTimeout(() => {
         this.dataTimer = undefined;
@@ -442,8 +533,20 @@ export class PlotPanel {
       updateData?: boolean;
     } = {},
   ) {
+    if (this.destroyed) return;
     clearTimeout(this.dataTimer);
     this.dataTimer = undefined;
+    this.pendingColors = undefined;
+    this.pendingRedraw = false;
+    if (!this.active) {
+      this.pendingData = {
+        data,
+        config,
+        pins: { ...pins },
+        options: { ...options },
+      };
+      return;
+    }
     this.pendingData = undefined;
     // A redraw must not carry an uncommitted pinch preview without its undo entry.
     if (!options.updateData && this.interaction?.mode === "navigate")

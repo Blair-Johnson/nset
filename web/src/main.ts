@@ -25,6 +25,7 @@ import { element, message, isAbort } from "./utils";
 import { fetchCatalog, MetricStore } from "./catalog";
 import {
   defaultSections,
+  chartHasSources,
   newChart,
   resetChart,
   reorderSections,
@@ -1252,7 +1253,7 @@ function workspaceToolbar(workspace: Workspace) {
   search.value = chartSearch;
   search.oninput = () => {
     chartSearch = search.value;
-    applyChartFilter(workspace);
+    renderCharts(workspace, false);
   };
   const add = element("details", "menu");
   add.dataset.menu = "add";
@@ -1725,7 +1726,35 @@ function refreshChartRunOrder(workspace: Workspace) {
   const order = chartRunOrder(workspace.experimentId);
   for (const entry of cards.values()) entry.view.setRunOrder(order);
 }
-function renderCharts(workspace: Workspace) {
+function chartMatches(
+  workspace: Workspace,
+  section: Section,
+  spec: ChartSpec,
+): boolean {
+  if (!chartHasSources(spec, catalog, workspace.selectedRunIds)) return false;
+  const query = chartSearch.trim().toLowerCase();
+  const keys =
+    spec.source.mode === "selected"
+      ? spec.source.keys
+      : spec.source.series.map((s) => s.key);
+  return (
+    !query ||
+    `${section.title} ${spec.title} ${keys.join(" ")}`
+      .toLowerCase()
+      .includes(query)
+  );
+}
+function chartAvailability(workspace: Workspace): string {
+  return JSON.stringify(
+    workspace.sections.flatMap((section) =>
+      section.cards
+        .filter((spec) => chartMatches(workspace, section, spec))
+        .map((spec) => spec.id),
+    ),
+  );
+}
+let renderedAvailability = "";
+function renderCharts(workspace: Workspace, refreshChrome = true) {
   if (currentRoute().view !== "charts" || currentWorkspaceId !== workspace.id)
     return;
   sectionDrag.cancel();
@@ -1735,11 +1764,15 @@ function renderCharts(workspace: Workspace) {
   const focusToggle = focused?.classList.contains("section-toggle");
   // An unchanged refresh keeps the gesture; changed workspace state cancels it.
   chartDrag.validate();
-  runDrawer?.update(catalog, workspace.selectedRunIds);
-  workspaceToolbar(workspace);
+  if (refreshChrome) {
+    runDrawer?.update(catalog, workspace.selectedRunIds);
+    workspaceToolbar(workspace);
+  }
   const dashboard = $("dashboard");
   const keep = new Set<string>();
   const runOrder = chartRunOrder(workspace.experimentId);
+  const selectedKey = workspace.selectedRunIds.join(",");
+  const labelKey = `${labelMode(workspace)}:${JSON.stringify(workspace.runLabels ?? {})}`;
 
   for (const [sectionIndex, section] of workspace.sections.entries()) {
     let node = sectionNodes.get(section.id);
@@ -1823,11 +1856,24 @@ function renderCharts(workspace: Workspace) {
     menu.append(summary, actions);
     header.append(menu);
     const grid = node.querySelector<HTMLElement>("[data-role=section-cards]")!;
+    // Suspend before hiding geometry so image cameras can be captured intact.
+    for (const spec of section.cards) {
+      if (section.collapsed || !chartMatches(workspace, section, spec))
+        cards.get(spec.id)?.view.setActive(false);
+    }
     grid.hidden = section.collapsed;
-    for (const [cardIndex, spec] of section.cards.entries()) {
-      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? workspace.selectedRunIds.join(",") : "explicit"}:${labelMode(workspace)}:${JSON.stringify(workspace.runLabels ?? {})}`;
+    let cardIndex = 0;
+    for (const spec of section.cards) {
+      // Definitions stay saved; known-empty charts own no DOM or viewer.
+      if (!chartHasSources(spec, catalog, workspace.selectedRunIds)) continue;
       keep.add(spec.id);
       let entry = cards.get(spec.id);
+      if (
+        !entry &&
+        (section.collapsed || !chartMatches(workspace, section, spec))
+      )
+        continue;
+      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? selectedKey : "explicit"}:${labelKey}`;
       const serialized = JSON.stringify(spec);
       if (!entry) {
         const host = element("article", "dashboard-cell");
@@ -1920,6 +1966,7 @@ function renderCharts(workspace: Workspace) {
       // focus and can dislodge the browser's scroll anchor on geometry commits.
       if (grid.children[cardIndex] !== entry.host)
         grid.insertBefore(entry.host, grid.children[cardIndex] ?? null);
+      cardIndex++;
     }
     for (const child of [...grid.children]) {
       const id = (child as HTMLElement).dataset.cardId;
@@ -1970,20 +2017,14 @@ function applyChartFilter(workspace: Workspace) {
   for (const section of workspace.sections) {
     let matches = 0;
     for (const spec of section.cards) {
+      const match = chartMatches(workspace, section, spec);
       const entry = cards.get(spec.id);
-      if (!entry) continue;
-      const keys =
-        spec.source.mode === "selected"
-          ? spec.source.keys
-          : spec.source.series.map((s) => s.key);
-      const match =
-        (!query ||
-          `${section.title} ${spec.title} ${keys.join(" ")}`
-            .toLowerCase()
-            .includes(query)) &&
-        (!chartFollowsSelection(spec) || workspace.selectedRunIds.length > 0);
-      entry.host.hidden = !match;
-      entry.view.setActive(match && !section.collapsed);
+      if (entry) {
+        // Suspend before changing geometry; activation can follow unhide.
+        if (!match || section.collapsed) entry.view.setActive(false);
+        entry.host.hidden = !match;
+        if (match && !section.collapsed) entry.view.setActive(true);
+      }
       if (match) matches++;
     }
     const node = sectionNodes.get(section.id);
@@ -2016,6 +2057,7 @@ function applyChartFilter(workspace: Workspace) {
       button("Open run table", () => navigate(workspace.experimentId)),
     );
   } else empty?.remove();
+  renderedAvailability = chartAvailability(workspace);
   syncChartDetails(workspace);
 }
 
@@ -2073,7 +2115,9 @@ function scheduleLiveModel(metadata: boolean) {
         runDrawer?.update(catalog, workspace.selectedRunIds);
         syncChartDetails(workspace);
       } else runDrawer?.updateMetrics(catalog);
-      refreshChartRunOrder(workspace);
+      if (renderedAvailability !== chartAvailability(workspace))
+        renderCharts(workspace, false);
+      else refreshChartRunOrder(workspace);
     }
   }, 500);
 }
@@ -2196,6 +2240,14 @@ async function connect(refresh = false) {
           : workspaceFor(currentRoute().experimentId);
       renderCharts(workspace);
     } else renderPage();
+    if (refresh) {
+      // Catalog identity can stay unchanged while image/record histories grow.
+      // These sources do not subscribe to the scalar store's clear notification.
+      for (const entry of cards.values()) {
+        entry.view.refreshLiveImages();
+        entry.view.refreshLiveRecords();
+      }
+    }
     store.setLiveEnabled(!document.hidden);
     live.setVisible(!document.hidden);
     live.start(liveCursor);
