@@ -214,13 +214,14 @@ export function recordRuns(
   selected: string[],
 ): string[] {
   const selection = new Set(selected);
+  const eligible = new Set(
+    catalog.runs
+      .filter((r) => selection.has(r.id) && r.rx?.sourceId === binding.sourceId)
+      .map((r) => r.rx!.uid),
+  );
   return binding.runUids.length
-    ? binding.runUids
-    : catalog.runs
-        .filter(
-          (r) => selection.has(r.id) && r.rx?.sourceId === binding.sourceId,
-        )
-        .map((r) => r.rx!.uid);
+    ? binding.runUids.filter((uid) => eligible.has(uid))
+    : [...eligible];
 }
 export function recordRequest(
   binding: RecordBinding,

@@ -714,7 +714,7 @@ test("390px drawer is an explicit overlay and leaves charts full width when clos
 const savedLibrary = (page: Page): Promise<WorkspaceLibrary> =>
   page.evaluate(() => JSON.parse(localStorage.getItem("nset.workspaces.v2")!));
 
-test("oversized saved-view styles persist selection and filtering without changing charts", async ({
+test("oversized saved-view styles persist selection and filtering without changing chart definitions", async ({
   page,
 }) => {
   await fixture(page);
@@ -793,6 +793,14 @@ test("oversized saved-view styles persist selection and filtering without changi
   await expect
     .poll(async () => (await savedLibrary(page)).views[0].selectedRunIds)
     .toEqual(["run-0", "run-1"]);
+  expect(
+    await reference
+      .locator("canvas")
+      .evaluate((node, old) => node === old, canvas),
+  ).toBe(true);
+  await expect(
+    reference.getByRole("button", { name: "Previous view", exact: true }),
+  ).toBeEnabled();
   await expect(page.locator("#global-error")).not.toContainText(
     "Could not save this view in your browser",
   );
@@ -811,23 +819,13 @@ test("oversized saved-view styles persist selection and filtering without changi
   expect(saved.views[0].id).toBe(seeded.library.views[0].id);
   expect(saved.views[0].name).toBe("Large styled workspace");
   expect(saved.views[0].sections).toEqual(seeded.library.views[0].sections);
-  expect(
-    await reference
-      .locator("canvas")
-      .evaluate((node, old) => node === old, canvas),
-  ).toBe(true);
-  await expect(
-    reference.getByRole("button", { name: "Previous view", exact: true }),
-  ).toBeEnabled();
+  await expect(reference).toHaveCount(0);
   await expect(page.locator("#global-error")).not.toContainText(
     "Could not save this view in your browser",
   );
 
   await page.reload();
-  await expect(page.locator(".card-title")).toHaveText([
-    "Styled loss",
-    "Fixed reference",
-  ]);
+  await expect(page.locator(".card-title")).toHaveText(["Styled loss"]);
   await expect(choice).toBeChecked();
   expect((await savedLibrary(page)).views[0].selectedRunIds).toEqual(["run-1"]);
   expect((await savedLibrary(page)).views[0].sections).toEqual(

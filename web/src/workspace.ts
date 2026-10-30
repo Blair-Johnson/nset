@@ -120,8 +120,11 @@ function* sourceRefs(
   card: ChartSpec,
   selectedRunIds: string[],
 ): Generator<SeriesRef> {
-  if (card.source.mode === "explicit") yield* card.source.series;
-  else {
+  if (card.source.mode === "explicit") {
+    const selected = new Set(selectedRunIds);
+    for (const ref of card.source.series)
+      if (selected.has(ref.runId)) yield ref;
+  } else {
     const kind = card.kind === "image" ? "image" : "metric";
     for (const runId of selectedRunIds)
       for (const key of card.source.keys) yield { runId, key, kind };
@@ -160,22 +163,16 @@ function* recordSourceRuns(
   selectedRunIds: string[],
   index: RunIndex,
 ) {
-  // Preserve recordRuns' UID-based eligibility and catalog ordering, including
-  // explicit portable UIDs independent of the workspace selection.
-  const uids = new Set(
-    binding.runUids.length
-      ? binding.runUids
-      : selectedRunIds.flatMap((id) => {
-          const run = index.byId.get(id);
-          return run?.rx?.sourceId === binding.sourceId ? [run.rx.uid] : [];
-        }),
-  );
+  // Explicit portable UIDs narrow the global selection, never replace it.
+  const selected = new Set(selectedRunIds);
+  const uids = new Set(binding.runUids);
   for (const run of index.rxBySource.get(binding.sourceId) ?? [])
-    if (uids.has(run.rx!.uid)) yield run;
+    if (selected.has(run.id) && (!uids.size || uids.has(run.rx!.uid)))
+      yield run;
 }
 /** Whether a chart can have a trace, before constructing a ChartCard.
  * Native charts require a matching Y (and metric X for XY). Explicit bindings
- * ignore selection. Record fields/filters are not known from the scalar catalog:
+ * narrow selection. Record fields/filters are not known from the scalar catalog:
  * keep record charts visible when any eligible rx run exists. */
 export function chartHasSources(
   spec: ChartSpec,

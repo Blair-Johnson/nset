@@ -16,6 +16,7 @@ import type { EditorCamera } from "./chart-editor";
 import { formatValue, styleFor, type ViewConfig } from "./config";
 import { resolveSources } from "./workspace";
 import { withRunColors } from "./series-colors";
+import { runColorButton } from "./run-color-picker";
 import { traceDrawOrder } from "./trace-order";
 import { loadPlotRuns, withMetricLabel } from "./card-label";
 import { HoverLegendPosition } from "./hover-legend-position";
@@ -930,7 +931,29 @@ export class ChartCard {
       }
     }
     text.title = identity?.label ?? series.run.name;
-    node.append(swatch, text);
+    if (surface === "legend" && run) {
+      if (this.actions.onRunSelection) {
+        const visible = element("input", "card-legend-visible");
+        visible.type = "checkbox";
+        visible.checked = this.context.selectedRunIds.includes(run.id);
+        visible.setAttribute("aria-label", `Show ${name} in all charts`);
+        visible.title = `Show ${name} in all charts`;
+        visible.onchange = () => {
+          if (this.actions.onRunSelection!(run.id, visible.checked) === false)
+            visible.checked = this.context.selectedRunIds.includes(run.id);
+        };
+        node.append(visible);
+      }
+      const colorButton = runColorButton(
+        this.context.catalog,
+        run.id,
+        JSON.stringify([this.spec.id, series.run.id]),
+      );
+      colorButton.classList.add("card-legend-color");
+      colorButton.append(swatch);
+      node.append(colorButton);
+    } else node.append(swatch);
+    node.append(text);
     return node;
   }
 
@@ -1139,9 +1162,9 @@ export class ChartCard {
     const expected =
       this.spec.source.mode === "explicit"
         ? new Set(
-            this.spec.source.series.map((ref) =>
-              JSON.stringify([ref.runId, ref.key, ref.kind]),
-            ),
+            this.spec.source.series
+              .filter((ref) => this.context.selectedRunIds.includes(ref.runId))
+              .map((ref) => JSON.stringify([ref.runId, ref.key, ref.kind])),
           ).size
         : 0;
     if (!this.spec.records)

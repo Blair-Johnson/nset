@@ -1,6 +1,10 @@
 import uPlot from "uplot";
 import type { XY } from "./math";
-import { tessellate, type TessellationOptions } from "./rendering";
+import {
+  floatMidpoint,
+  tessellate,
+  type TessellationOptions,
+} from "./rendering";
 
 export type MatchedPathOptions = TessellationOptions & {
   fillTo?: number;
@@ -83,7 +87,12 @@ export function matchedPath(
     const fillOption = u.series[seriesIdx]?.fill;
     const fillStyle =
       typeof fillOption === "function" ? fillOption(u, seriesIdx) : fillOption;
-    if (fillStyle != null && points.length > 1) {
+    if (
+      fillStyle != null &&
+      points.length > 1 &&
+      points[0][0] <= bounds.xMax &&
+      points[points.length - 1][0] >= bounds.xMin
+    ) {
       const clamp = (value: number) =>
         Math.max(bounds.yMin, Math.min(bounds.yMax, value));
       const baseline = options.fillTo ?? (y.distr === 3 ? bounds.yMin : 0);
@@ -152,11 +161,10 @@ function positiveRuns(
   const boundary = (positive: XY, nonpositive: XY): XY | null => {
     let good = positive,
       bad = nonpositive;
-    for (let i = 0; i < 2200; i++) {
-      const vx =
-        Math.sign(good[0]) === Math.sign(bad[0])
-          ? good[0] + (bad[0] - good[0]) / 2
-          : good[0] / 2 + bad[0] / 2;
+    // Ordered-float bisection bounds work even across extreme decades. This
+    // boundary remains a REAL positive sample (unlike display-only clip edges).
+    for (let i = 0; i <= 64; i++) {
+      const vx = floatMidpoint(good[0], bad[0]);
       if (vx === good[0] || vx === bad[0]) return good;
       const vy = at(vx);
       if (vy === null || !Number.isFinite(vy)) {

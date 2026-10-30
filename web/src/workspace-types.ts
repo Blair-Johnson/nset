@@ -133,6 +133,8 @@ export interface CardContext {
   labelMode?: "semantic" | "original";
 }
 export interface CardActions {
+  /** Shared workspace selection; false means the saved edit was rolled back. */
+  onRunSelection?: (runId: string, selected: boolean) => boolean;
   onEdit(id: string): void;
   onDetails?: (id: string) => void;
   onRemove(id: string): void;

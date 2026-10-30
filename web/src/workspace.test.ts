@@ -102,7 +102,7 @@ test("selected sources have distinct metrics per run, escaped IDs and readable l
     seriesId({ runId: "a", key: "b", kind: "image" }),
   );
 });
-test("explicit cross-experiment bindings ignore selection and preserve unavailable references", () => {
+test("explicit cross-experiment bindings filter selection and preserve unavailable references", () => {
   const card = newChart("timeseries", []);
   card.source = {
     mode: "explicit",
@@ -112,10 +112,12 @@ test("explicit cross-experiment bindings ignore selection and preserve unavailab
       { runId: "r1", key: "train/sample", kind: "image" },
     ],
   };
+  assert.deepEqual(resolveSources(card, ["r1"], catalog()), []);
   assert.deepEqual(
-    resolveSources(card, ["r1"], catalog()).map((s) => s.runId),
+    resolveSources(card, ["r1", "r2"], catalog()).map((s) => s.runId),
     ["r2"],
   );
+  assert.deepEqual(resolveSources(card, [], catalog()), []);
   assert.equal(card.source.series.length, 3);
 });
 test("new charts have unique IDs, safe dark defaults and no implicit selection", () => {

@@ -219,13 +219,13 @@ test("series binding: specific series across runs and experiments", () => {
     mode: "series",
     series: { runId: "r1", key: "data", kind: "metric" },
   };
-  const [only] = resolveSources(validateChart(card), [], catalog());
+  const [only] = resolveSources(validateChart(card), ["r3"], catalog());
   assert.equal(only.runId, "r3");
   assert.equal(only.x?.ref.runId, "r1");
   assert.match(only.x!.label, /Run r1 · data/);
   // Missing X series: no half-traces.
   card.x.series.key = "missing";
-  assert.deepEqual(resolveSources(card, [], catalog()), []);
+  assert.deepEqual(resolveSources(card, ["r3"], catalog()), []);
   // Selected Y runs combine with a fixed X too.
   const followed = newChart("timeseries", ["loss"]);
   followed.x = {

@@ -195,11 +195,15 @@ test("name click and keyboard activation navigate without row actions or draggin
     await page.evaluate(() => (window as any).legendNavigation.rowEvents),
   ).toEqual([]);
 
-  // Swatches still reach row handlers; only the run-name link is isolated.
+  // The line now opens the shared color picker without a row click action.
   await page.locator(".card-legend-item .card-legend-swatch").first().click();
   expect(
     await page.evaluate(() => (window as any).legendNavigation.rowEvents),
-  ).toEqual(["pointerdown", "mousedown", "click"]);
+  ).toEqual(["pointerdown", "mousedown"]);
+  await expect(
+    page.getByRole("dialog", { name: "Color for Duplicate" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
 });
 
 for (const activation of ["middle", "modifier"] as const) {

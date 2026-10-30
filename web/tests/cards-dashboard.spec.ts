@@ -560,6 +560,8 @@ test("offscreen and inactive cards defer loads, unavailable sources stay explici
   ).toBe(true);
   await page.evaluate(() => {
     const s = (window as any).cardsFixture;
+    // Keep the unavailable-source case selected under global selection gating.
+    s.cards[1].setContext({ ...s.context, selectedRunIds: ["missing"] });
     s.cards[1].setSpec({
       ...s.specs[1],
       source: {

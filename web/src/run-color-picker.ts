@@ -4,12 +4,17 @@ import type { Catalog } from "./workspace-types";
 import "./run-color-picker.css";
 let active: HTMLDialogElement | undefined;
 /** A compact accessible swatch; the palette exists only while it is being edited. */
-export function runColorButton(catalog: Catalog, runId: string): HTMLElement {
+export function runColorButton(
+  catalog: Catalog,
+  runId: string,
+  focusKey?: string,
+): HTMLElement {
   const name = catalog.runs.find((run) => run.id === runId)?.name ?? runId;
   const trigger = document.createElement("button");
   trigger.type = "button";
   trigger.className = "run-color-button";
   trigger.dataset.runColorId = runId;
+  if (focusKey) trigger.dataset.runColorFocusKey = focusKey;
   trigger.setAttribute("aria-label", `Change color for ${name}`);
   trigger.title = `Change color for ${name}`;
   trigger.style.setProperty("--run-color", runColor(catalog, runId));
@@ -75,13 +80,17 @@ export function runColorButton(catalog: Catalog, runId: string): HTMLElement {
         dialog.remove();
         if (active === dialog) active = undefined;
         requestAnimationFrame(() => {
-          const replacement = Array.from(
+          const candidates = Array.from(
             document.querySelectorAll<HTMLButtonElement>("[data-run-color-id]"),
-          ).find(
+          ).filter(
             (button) =>
               button.dataset.runColorId === runId &&
               button.getClientRects().length > 0,
           );
+          const replacement =
+            candidates.find(
+              (button) => button.dataset.runColorFocusKey === focusKey,
+            ) ?? candidates[0];
           (trigger.isConnected ? trigger : replacement)?.focus({
             preventScroll: true,
           });

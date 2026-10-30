@@ -1,4 +1,5 @@
 import uPlot from "uplot";
+import { logAxisSplits } from "./log-ticks";
 import {
   defaultLabelLayout,
   formatNumberTicks,
@@ -172,7 +173,11 @@ export function formatXValue(
 
 /** Moving coordinates use the effective axis notation. Static label arrays
  * describe only their explicit splits, so arbitrary coordinates use base format. */
-export function coordinateFormatter(config: ViewConfig, quantity: XQuantity, index: number): (value: number) => string {
+export function coordinateFormatter(
+  config: ViewConfig,
+  quantity: XQuantity,
+  index: number,
+): (value: number) => string {
   const axes = config.advanced?.axes as { values?: unknown }[] | undefined;
   const override = axes?.[index]?.values;
   if (typeof override === "string") {
@@ -194,9 +199,10 @@ export function resolveOptions(
   quantity: XQuantity = config.axis,
 ): uPlot.Options {
   config = validateConfig(config);
-  const labelLayout = quantity === "metric"
-    ? { ...defaultLabelLayout(config), multilineTime: false }
-    : defaultLabelLayout(config);
+  const labelLayout =
+    quantity === "metric"
+      ? { ...defaultLabelLayout(config), multilineTime: false }
+      : defaultLabelLayout(config);
   const { scales: scalePatches, ...presentation } = config.advanced;
   const patches = (scalePatches ?? {}) as { x?: ScalePatch; y?: ScalePatch };
   const opts: uPlot.Options = {
@@ -279,9 +285,17 @@ export function resolveOptions(
   if (resolved.cursor?.hover?.skip)
     resolved.cursor.hover.skip = [undefined, ...resolved.cursor.hover.skip];
   resolved.axes?.forEach((axis, index) => {
+    const scale = resolved.scales?.[axis.scale ?? (index === 0 ? "x" : "y")];
+    if (scale?.distr === 3 && axis.splits === undefined) {
+      // Native log splits can stop advancing after a fractional pan. Our
+      // bounded generator already spaces labels, including on reversed axes.
+      axis.splits = logAxisSplits;
+      axis.filter ??= (_u, values) => values;
+    }
     if (typeof axis.values === "string") {
       const format = coordinateFormatter(config, quantity, index);
-      axis.values = (_u, values) => values.map((value) => value == null ? "" : format(value));
+      axis.values = (_u, values) =>
+        values.map((value) => (value == null ? "" : format(value)));
     } else if (Array.isArray(axis.values)) {
       // Static labels must stay attached to their split value when zoomed or
       // when uPlot filters log ticks. Resolve to trusted callbacks, not index labels.

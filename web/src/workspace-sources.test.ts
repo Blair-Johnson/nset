@@ -74,7 +74,7 @@ test("native selected charts require the requested kind, key and an existing run
   presence(newChart("image", ["absent", "picture"]), c, ["r2", "r1"], true);
 });
 
-test("explicit native sources ignore selection but reject missing and wrong-kind references", () => {
+test("explicit native sources narrow selection and reject missing and wrong-kind references", () => {
   const c = catalog();
   for (const [kind, key, sourceKind] of [
     ["timeseries", "y", "metric"],
@@ -85,8 +85,9 @@ test("explicit native sources ignore selection but reject missing and wrong-kind
       mode: "explicit",
       series: [{ runId: "r1", key, kind: sourceKind }],
     };
-    presence(card, c, [], true);
-    presence(card, c, ["r3"], true);
+    presence(card, c, [], false);
+    presence(card, c, ["r3"], false);
+    presence(card, c, ["r1", "r3"], true);
     card.source.series = [{ runId: "orphan", key, kind: sourceKind }];
     presence(card, c, ["r1"], false);
     card.source.series = [{ runId: "r1", key: "absent", kind: sourceKind }];
@@ -119,9 +120,10 @@ test("keyed XY requires X and Y on the same eligible run", () => {
     mode: "explicit",
     series: [{ runId: "r1", key: "y", kind: "metric" }],
   };
-  presence(card, c, [], true);
-  card.x = { mode: "key", key: "picture" };
   presence(card, c, [], false);
+  presence(card, c, ["r1"], true);
+  card.x = { mode: "key", key: "picture" };
+  presence(card, c, ["r1"], false);
 });
 
 test("fixed XY can use an unselected X run but still requires metric X and Y", () => {
@@ -138,7 +140,9 @@ test("fixed XY can use an unselected X run but still requires metric X and Y", (
     mode: "explicit",
     series: [{ runId: "r2", key: "y", kind: "metric" }],
   };
-  presence(card, c, [], true);
+  presence(card, c, [], false);
+  presence(card, c, ["r2"], true);
+  assert.equal(resolveSources(card, ["r2"], c)[0].x?.run.id, "r3");
   for (const ref of [
     { runId: "r1", key: "picture", kind: "image" },
     { runId: "r1", key: "picture", kind: "metric" },
@@ -146,7 +150,7 @@ test("fixed XY can use an unselected X run but still requires metric X and Y", (
     { runId: "r3", key: "absent", kind: "metric" },
   ] as SeriesRef[]) {
     card.x = { mode: "series", series: ref };
-    presence(card, c, [], false);
+    presence(card, c, ["r2"], false);
   }
 });
 
@@ -177,7 +181,17 @@ test("resolution preserves ordering, deduplication and globally disambiguated X/
     mode: "series",
     series: { runId: "r1", key: "x", kind: "metric" },
   };
-  const resolved = resolveSources(card, [], c);
+  const resolved = resolveSources(card, ["r2", "r1", "r3"], c);
+  assert.deepEqual(
+    resolved.map((s) => s.runId),
+    ["r1", "r2"],
+  );
+  assert.deepEqual(
+    resolveSources(card, ["r2", "r3"], c).map((s) => s.runId),
+    ["r2"],
+  );
+  presence(card, c, [], false);
+  assert.equal(card.source.series.length, 3);
   assert.equal(resolved.length, 2);
   assert.equal(resolved[0].label, "Run (r1) · y");
   assert.equal(resolved[0].x?.label, "Run (r1) · x");
@@ -236,12 +250,15 @@ test("rx record charts remain visible for eligible runs without scalar or field 
   );
   assert.equal(resolved[0].label, "Records · unknown_y");
   card.records.runUids = ["u2"];
-  presence(card, c, [], true);
-  presence(card, c, ["c"], true);
+  presence(card, c, [], false);
+  presence(card, c, ["c"], false);
+  presence(card, c, ["a"], false);
+  presence(card, c, ["b"], true);
   assert.deepEqual(
-    resolveSources(card, [], c).map((s) => s.runId),
+    resolveSources(card, ["a", "b", "c"], c).map((s) => s.runId),
     ["b", "b"],
   );
+  assert.deepEqual(card.records.runUids, ["u2"]);
   card.records.runUids = ["missing"];
   presence(card, c, ["a"], false);
   card.records.sourceId = "rx:missing";
@@ -298,17 +315,17 @@ test("rx index follows source/UID metadata replacement, not just native membersh
     ys: ["y"],
     filters: { any: false, conditions: [] },
   };
-  presence(card, c, [], false);
+  presence(card, c, ["r1"], false);
   c.runs = c.runs.map((r) => ({
     ...r,
     rx: { sourceId: "rx:one", uid: "u1", state: "finished" },
   }));
-  presence(card, c, [], true);
+  presence(card, c, ["r1"], true);
   c.runs = c.runs.map((r) => ({
     ...r,
     rx: { sourceId: "rx:two", uid: "u2", state: "finished" },
   }));
-  presence(card, c, [], false);
+  presence(card, c, ["r1"], false);
 });
 
 test("presence and resolution share indexes across chart, selection and catalog-wrapper changes", () => {

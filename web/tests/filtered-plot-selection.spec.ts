@@ -273,7 +273,7 @@ async function expectSelection(
   await expect(card(page).locator(".card-legend-name")).toHaveText(
     numbers.map((n) => `r${n}`),
   );
-  await expect(traces(page, true)).toHaveCount(1);
+  await expect(traces(page, true)).toHaveCount(numbers.includes(3) ? 1 : 0);
 }
 
 test("search prunes live charts and persistence; typing keeps focus; both lists and reload agree", async ({

@@ -865,3 +865,25 @@ a.card-legend-name:focus-visible {
   color: var(--accent);
   border-color: var(--accent);
 }
+
+/* Stable legend controls share drawer state; hover samples remain passive. */
+.chart-card .card-legend-color {
+  flex: 0 0 26px;
+  width: 26px;
+  min-height: 24px;
+  height: 24px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+.card-legend-color::before {
+  display: none;
+}
+.card-legend-visible {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}

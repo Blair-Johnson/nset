@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import uPlot from "uplot";
+import { logAxisSplits } from "./log-ticks";
 import { defaults, validateConfig, styleFor } from "./config";
 import {
   resolveOptions,
@@ -367,17 +368,92 @@ test("relative axes preserve explicit labels and numeric formatting overrides", 
   assert.deepEqual(axisValues(y, [0], 1), ["1970-01-01 00:00:00Z"]);
 });
 
-
 test("coordinate formatters share advanced notation with axes and fall back for static labels", () => {
-  const config = validateConfig({ xFormat: "fixed-2", yFormat: "scientific", advanced: {
-    axes: [{ values: "scientific" }, { values: "fixed-2" }],
-  } });
+  const config = validateConfig({
+    xFormat: "fixed-2",
+    yFormat: "scientific",
+    advanced: {
+      axes: [{ values: "scientific" }, { values: "fixed-2" }],
+    },
+  });
   const opts = resolveOptions(config, 900, [{}]);
   for (const [index, value] of [50, 75].entries()) {
-    assert.equal(coordinateFormatter(config, "step", index)(value),
-      (opts.axes![index].values as uPlot.Axis.DynamicValues)({} as uPlot, [value], index, 50, 25)[0]);
+    assert.equal(
+      coordinateFormatter(config, "step", index)(value),
+      (opts.axes![index].values as uPlot.Axis.DynamicValues)(
+        {} as uPlot,
+        [value],
+        index,
+        50,
+        25,
+      )[0],
+    );
   }
-  const labels = validateConfig({ xFormat: "fixed-2", advanced: { axes: [{ splits: [0, 100], values: ["low", "high"] }] } });
+  const labels = validateConfig({
+    xFormat: "fixed-2",
+    advanced: { axes: [{ splits: [0, 100], values: ["low", "high"] }] },
+  });
   assert.equal(coordinateFormatter(labels, "step", 0)(50), "50.00");
-  assert.equal(coordinateFormatter(validateConfig({ advanced: { axes: [{ values: "number" }] } }), "timestamp", 0)(50), "50");
+  assert.equal(
+    coordinateFormatter(
+      validateConfig({ advanced: { axes: [{ values: "number" }] } }),
+      "timestamp",
+      0,
+    )(50),
+    "50",
+  );
+});
+
+test("default log ticks are bounded independently of smoothing and direction", () => {
+  const opts = resolve(
+    {
+      scales: { x: { log: 2, dir: -1 }, y: { log: 10, dir: -1 } },
+      axes: [{ values: "fixed-2" }],
+    },
+    { xScale: "log", yScale: "log", smoothing: false },
+  );
+  for (const axis of opts.axes!) {
+    assert.equal(axis.splits, logAxisSplits);
+    assert.deepEqual(
+      (axis.filter as uPlot.Axis.Filter)({} as uPlot, [1, 2, 5], 0, 0, 0),
+      [1, 2, 5],
+    );
+  }
+  assert.deepEqual(
+    (opts.axes![0].values as uPlot.Axis.DynamicValues)(
+      {} as uPlot,
+      [0.125],
+      0,
+      0,
+      0,
+    ),
+    ["0.13"],
+  );
+  const other = resolve({}, { xScale: "linear", yScale: "asinh" });
+  assert.equal(other.axes![0].splits, undefined);
+  assert.equal(other.axes![1].splits, undefined);
+});
+
+test("log split overrides and their static labels remain user-owned", () => {
+  const opts = resolve(
+    {
+      axes: [
+        { splits: [1, 2, 5], values: ["one", "two", "five"] },
+        { splits: [1, 10] },
+      ],
+    },
+    { xScale: "log", yScale: "log", smoothing: false },
+  );
+  const [x, y] = opts.axes!;
+  assert.deepEqual(x.splits, [1, 2, 5]);
+  assert.deepEqual(y.splits, [1, 10]);
+  assert.equal(y.filter, undefined);
+  assert.deepEqual(
+    (x.values as uPlot.Axis.DynamicValues)({} as uPlot, [2, 5], 0, 0, 0),
+    ["two", "five"],
+  );
+  assert.deepEqual(
+    (x.filter as uPlot.Axis.Filter)({} as uPlot, [1, 2, 5], 0, 0, 0),
+    [1, 2, 5],
+  );
 });

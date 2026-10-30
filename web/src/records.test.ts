@@ -109,6 +109,15 @@ test("record charts and layouts save/reopen exact unsuggested fields and filters
   assert.deepEqual(recordRuns(binding, catalog, [run.id]), ["uid"]);
   assert.deepEqual(recordRequest(binding, catalog, [run.id]).runs, ["uid"]);
 });
+test("explicit record UIDs only narrow selected runs", () => {
+  const explicit = { ...binding, runUids: ["uid", "missing"] };
+  assert.deepEqual(recordRuns(explicit, catalog, []), []);
+  assert.deepEqual(recordRuns(explicit, catalog, ["missing"]), []);
+  assert.deepEqual(recordRuns(explicit, catalog, [run.id]), ["uid"]);
+  assert.deepEqual(recordRequest(explicit, catalog, []).runs, []);
+  assert.deepEqual(recordRequest(explicit, catalog, [run.id]).runs, ["uid"]);
+  assert.deepEqual(explicit.runUids, ["uid", "missing"]);
+});
 test("paired record analysis retains fractional/repeated/restarted X in event order", () => {
   const points: [number, number][] = [
     [0.25, 3],

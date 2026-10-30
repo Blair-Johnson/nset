@@ -16,7 +16,7 @@ const viewId = "server:00000000-0000-0000-0000-000000000240";
 const cardId = (section: number, index: number) => `demand-${section}-${index}`;
 const keyFor = (section: number, index: number) =>
   `section_${section}/key_${index}`;
-const firstIds = [cardId(0, 0), cardId(0, 1)];
+const firstIds = [cardId(0, 0)];
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
   "base64",
@@ -25,8 +25,8 @@ type History = { runId: string; key: string; after: string | null };
 type Probe = { rafCallbacks: number; canvasesCreated: number };
 
 /** Real index.html/main.ts/MetricStore/ChartCard/ImagePanel; only HTTP is mocked.
- * All 240 authored keys exist on dense. Sparse has one key. The second relevant
- * sparse chart is an explicit dense source, independent of drawer selection.
+ * All 240 authored keys exist on dense. Sparse has one key. The explicit dense
+ * source also requires dense to be selected in the drawer.
  */
 async function fixture(
   page: Page,
@@ -242,10 +242,7 @@ const materializedIds = (page: Page) =>
     );
 const historyIds = (f: Fixture) =>
   [...new Set(f.histories.map((h) => `${h.runId}:${h.key}`))].sort();
-const sparseHistory = [
-  `sparse:${keyFor(0, 0)}`,
-  `dense:${keyFor(0, 1)}`,
-].sort();
+const sparseHistory = [`sparse:${keyFor(0, 0)}`];
 
 async function diagnostic(
   page: Page,
@@ -338,11 +335,11 @@ test("sparse startup omits known-empty cards without deleting definitions or exp
   const counts = await diagnostic(page, f, info, "sparse-open-startup");
   await demandIds(page, firstIds);
   if (!baseline) {
-    expect(counts.materializedCards).toBeLessThanOrEqual(2);
-    expect(counts.canvases).toBeLessThanOrEqual(2);
+    expect(counts.materializedCards).toBeLessThanOrEqual(1);
+    expect(counts.canvases).toBeLessThanOrEqual(1);
     expect(counts.viewers).toBe(0);
     expect(historyIds(f)).toEqual(sparseHistory);
-    expect(f.histories).toHaveLength(2);
+    expect(f.histories).toHaveLength(1);
     expect(f.imageMetadata).toEqual([]);
     expect(f.imageContent).toEqual([]);
   }
@@ -387,7 +384,7 @@ for (const selected of ["sparse", "dense"] as const) {
       expect(f.histories).toHaveLength(expected.length);
       expect(f.imageMetadata.every((id) => id === "dense")).toBe(true);
       await expect(page.locator("#dashboard canvas")).toHaveCount(
-        selected === "dense" ? 8 : 2,
+        selected === "dense" ? 8 : 1,
       );
       await expect(
         page.locator("#dashboard .openseadragon-container"),
@@ -434,7 +431,7 @@ test("selection restores and removes matching cards; live catalog revives a form
   await dense.uncheck();
   await demandIds(page, firstIds);
   await sparse.uncheck();
-  await demandIds(page, [cardId(0, 1)]); // Explicit reference still resolves with no selected run.
+  await demandIds(page, []); // Explicit sources also require selected runs.
   await sparse.check();
   await demandIds(page, firstIds);
   const beforeLive = f.histories.length;

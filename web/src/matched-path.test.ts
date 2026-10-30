@@ -523,3 +523,88 @@ test("native null-returning fill callback skips fill tessellation", () => {
   );
   assert.equal(commands(result.fill).length, 0);
 });
+
+test("unsmoothed steep log-x strokes reach both viewport edges, including reversed axes", () => {
+  for (const base of [1e3, 1e6])
+    for (const reverse of [false, true])
+      for (const fill of [null, "red"]) {
+        const points: XY[] = [
+          [base, -1e12],
+          [base + base * Number.EPSILON * 8, 1e12],
+        ];
+        const at = makeInterpolator(points, "linear").at;
+        const before = points.map(([x]) => at(x));
+        const p = plot(1, 1e9, -3, 7, 3, 1),
+          limited: boolean[] = [];
+        p.series[1].fill = fill;
+        if (reverse) p.scales.x.dir = p.scales.y.dir = -1;
+        let evaluations = 0;
+        const result = matchedPath(
+          points,
+          (x) => {
+            evaluations++;
+            return at(x);
+          },
+          {
+            onLimited: (value) => limited.push(value),
+          },
+        )(p.u, 1, 0, 1)!;
+        const v = vertices(result.stroke);
+        assert.ok(v.length >= 2);
+        assert.equal(polygonGroups(result.stroke).length, 1);
+        near(v[0][1], p.valToPos(-3, "y", true));
+        near(v.at(-1)![1], p.valToPos(7, "y", true));
+        assert.ok(v.every((q) => q.every(Number.isFinite)));
+        assert.deepEqual(limited, [false]);
+        assert.ok(evaluations <= 150);
+        assert.deepEqual(
+          points.map(([x]) => at(x)),
+          before,
+        );
+      }
+});
+
+test("wholly offscreen spans skip stroke, log-fill searches and all projections", () => {
+  for (const points of [
+    [
+      [1, -1],
+      [2, 3],
+    ],
+    [
+      [30, -1],
+      [40, 3],
+    ],
+  ] as XY[][]) {
+    const p = plot(10, 20, 1, 2, 3, 3);
+    const result = matchedPath(points, () =>
+      assert.fail("offscreen evaluator call"),
+    )(p.u, 1, 0, 1)!;
+    assert.equal(commands(result.stroke).length, 0);
+    assert.equal(commands(result.fill).length, 0);
+    assert.equal(p.calls.length, 0);
+  }
+});
+
+test("log-fill domain search is bounded across extreme x decades", () => {
+  const points: XY[] = [
+    [Number.MIN_VALUE, Math.log10(Number.MIN_VALUE)],
+    [1e300, 300],
+  ];
+  const p = plot(Number.MIN_VALUE, 1e300, 0.125, 10, 3, 3);
+  let evaluations = 0;
+  const result = matchedPath(
+    points,
+    (x) => {
+      evaluations++;
+      return Math.log10(x);
+    },
+    {
+      maxDepth: 0,
+      maxExtraPoints: 0,
+    },
+  )(p.u, 1, 0, 1)!;
+  assert.ok(vertices(result.stroke).length >= 2);
+  assert.ok(vertices(result.fill).length >= 4);
+  assert.ok(evaluations <= 210, `unexpected boundary work: ${evaluations}`);
+  assert.ok(p.calls.every(([value]) => value > 0));
+});

@@ -585,11 +585,6 @@ async function saveRunPatch(
   );
   return resolved;
 }
-function chartFollowsSelection(spec: ChartSpec): boolean {
-  return spec.records
-    ? !spec.records.runUids.length
-    : spec.source.mode === "selected";
-}
 const labelModes = new Map<string, "semantic" | "original">();
 function labelMode(workspace: Workspace): "semantic" | "original" {
   if (!labelModes.has(workspace.id)) {
@@ -1771,7 +1766,7 @@ function renderCharts(workspace: Workspace, refreshChrome = true) {
   const dashboard = $("dashboard");
   const keep = new Set<string>();
   const runOrder = chartRunOrder(workspace.experimentId);
-  const selectedKey = workspace.selectedRunIds.join(",");
+  const selectedKey = JSON.stringify(workspace.selectedRunIds);
   const labelKey = `${labelMode(workspace)}:${JSON.stringify(workspace.runLabels ?? {})}`;
 
   for (const [sectionIndex, section] of workspace.sections.entries()) {
@@ -1873,7 +1868,7 @@ function renderCharts(workspace: Workspace, refreshChrome = true) {
         (section.collapsed || !chartMatches(workspace, section, spec))
       )
         continue;
-      const contextKey = `${catalogGeneration}:${chartFollowsSelection(spec) ? selectedKey : "explicit"}:${labelKey}`;
+      const contextKey = `${catalogGeneration}:${selectedKey}:${labelKey}`;
       const serialized = JSON.stringify(spec);
       if (!entry) {
         const host = element("article", "dashboard-cell");
@@ -1881,6 +1876,13 @@ function renderCharts(workspace: Workspace, refreshChrome = true) {
         host.dataset.cardKind = spec.kind;
         host.setAttribute("aria-label", spec.title);
         const view = new ChartCard(host, spec, context(workspace), {
+          onRunSelection: (runId, selected) =>
+            updateSelection(
+              workspace,
+              selected
+                ? [...workspace.selectedRunIds, runId]
+                : workspace.selectedRunIds.filter((id) => id !== runId),
+            ),
           onDetails: (id) => openChartDetails(workspace.id, id),
           onEdit: (id) => {
             const found = locate(workspace, id);
