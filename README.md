@@ -5,13 +5,16 @@ NSET is a self-hosted experiment tracker compatible with existing logging client
 ![Four training runs compared in nset, showing accuracy, gradient norm, learning rate, and loss.](docs/images/training-comparison.png)
 
 NSET addresses many of my frustrations with existing tools:
-- Curves are plotted at full resolution with configurable interpolation settings.
+- Curves are plotted at full resolution.
 - Cursors enable easy comparative measurements between curves.
 - Curves can be measured at interpolated positions, rather than only where logged data exists.
-- Layouts can be saved, named, and exported.
-- Chart zoom and layout is preserved across content setting changes.
-- Logged images can easily be scrubbed through without resetting crop or zoom.
-- Metrics can be joined on a common axis with interpolation and plotted against each other.
+- Page layouts and chart settings can be saved, named, imported/exported, and managed via API (easy for agents to present data).
+- Chart viewport settings are preserved across content changes.
+- Image viewer supports easy timeline scrubbing without resetting viewport crop.
+- Data updates live without manual polling or scrolling to induce refresh events.
+- Metrics can be joined on a common axis (using interpolated points) and plotted against each other without requiring exact intersection.
+- Configurable Gaussian smoothing instead of lag-inducing EMA.
+- Mouse pointer crosshair uses nearest intersection to display ordered values from curves, enabling easy inspection.
 
 ## Set up and launch
 
